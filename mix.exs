@@ -7,6 +7,9 @@ defmodule Linx.MixProject do
       version: "0.1.0",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
+      # The :netlink_nif compiler builds the netlink_socket NIF as part of
+      # `mix compile`. See lib/mix/tasks/compile.netlink_nif.ex.
+      compilers: Mix.compilers() ++ [:netlink_nif],
       deps: deps()
     ]
   end
