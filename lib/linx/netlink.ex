@@ -18,6 +18,8 @@ defmodule Linx.Netlink do
       reply, including multipart dumps.
     * `Linx.Netlink.Constants` — the core netlink constants every family
       shares.
+    * `Linx.Netlink.Codec` — a DSL for declaring a message's wire format; the
+      per-family codecs are built with it.
 
   Each protocol family then lives in its own namespace. The first is
   rtnetlink — the kernel's networking interface — under `Linx.Netlink.Rtnl`.

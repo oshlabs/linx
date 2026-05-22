@@ -171,15 +171,20 @@ Each milestone is an independently reviewable commit.
   `mix test`.
 
 ### M3 — Extract the DSL
-- From M2's hand-written `Rtnl.Link`, extract the macro into
-  `Linx.Netlink.Message` (`use`, `header`, `field`, `attr`).
-- Rewrite `Rtnl.Link` through the DSL; M2's tests must still pass unchanged.
-- Build the `custom:`/`with:` escape hatches now and exercise at least one,
-  even minimally.
-- Generated `@doc`/`@type`/`@spec` and the attribute documentation table.
-- **Tests:** M2's `Rtnl.Link` tests must pass unchanged — the proof the
-  extraction preserved behaviour; add unit tests for the DSL macro itself and
-  each escape hatch.
+- Extract the codec DSL into `Linx.Netlink.Codec` — its own module, kept
+  separate from the `Message` nlmsghdr struct. A codec module does
+  `use Linx.Netlink.Codec` and declares its wire format in one `codec do … end`
+  block (a `header do field/pad … end` and `attr` lines); the macro generates
+  the struct, `encode/1`, `decode/1`, `@type t`, `@spec`s, and a `__codec__/0`
+  schema-reflection function.
+- Rewrite `Rtnl.Link` through the DSL; M2's tests pass unchanged.
+- One escape hatch: an attribute's type may be a **module** exporting
+  `encode/1`/`decode/1` — covering both a nested codec and a hand-written
+  custom value type with a single mechanism (simpler than separate
+  `with:`/`custom:` options).
+- **Tests:** M2's `Rtnl.Link` tests pass unchanged — the proof the extraction
+  preserved behaviour; plus codec unit tests for the DSL, the escape hatch,
+  and `__codec__/0` reflection.
 
 ### M4 — Complete the rtnetlink first-release scope, via the DSL
 - `Rtnl.Link` full: `create_macvlan`/`create_ipvlan` (first real customer of
