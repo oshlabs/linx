@@ -56,11 +56,26 @@ defmodule Linx.Netlink.Rtnl.LinkTest do
   test "get/2 returns a Linx.Netlink.Error for an unknown interface" do
     {:ok, socket} = Rtnl.open()
 
-    assert {:error, %Error{errno: :enodev, code: 19} = error} =
+    assert {:error, %Error{errno: :enodev, code: 19, message: msg}} =
              Link.get(socket, "nosuchif0")
 
-    # The kernel may or may not attach an extended-ack message; either is fine.
-    assert is_nil(error.message) or is_binary(error.message)
+    # The kernel rarely attaches an ext-ack message for this case, so the
+    # verb synthesizes one naming the missing interface.
+    assert msg =~ "nosuchif0"
+
+    assert :ok = Socket.close(socket)
+  end
+
+  test "create_macvlan/4 reports a missing parent interface clearly" do
+    {:ok, socket} = Rtnl.open()
+
+    assert {:error, %Error{errno: :enodev, message: msg}} =
+             Link.create_macvlan(socket, "web0", "nopar0")
+
+    # The error is re-wrapped so the caller knows it was the *parent* lookup
+    # that failed, with the parent's name in the message.
+    assert msg =~ "parent"
+    assert msg =~ "nopar0"
 
     assert :ok = Socket.close(socket)
   end

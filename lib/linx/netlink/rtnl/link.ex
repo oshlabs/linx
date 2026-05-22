@@ -19,7 +19,7 @@ defmodule Linx.Netlink.Rtnl.Link do
   import Bitwise
   import Linx.Netlink.Constants
 
-  alias Linx.Netlink.{Attr, Message, Request, Socket}
+  alias Linx.Netlink.{Attr, Error, Message, Request, Socket}
 
   # rtnetlink link message types.
   @rtm_newlink 16
@@ -81,9 +81,20 @@ defmodule Linx.Netlink.Rtnl.Link do
   @spec get(Socket.t(), binary) :: {:ok, t()} | {:error, term}
   def get(%Socket{} = socket, name) when is_binary(name) do
     case Request.talk(socket, @rtm_getlink, 0, encode(%__MODULE__{name: name})) do
-      {:ok, [%Message{payload: body} | _]} -> {:ok, decode(body)}
-      {:ok, []} -> {:error, :no_reply}
-      {:error, _} = error -> error
+      {:ok, [%Message{payload: body} | _]} ->
+        {:ok, decode(body)}
+
+      {:ok, []} ->
+        {:error, :no_reply}
+
+      {:error, %Error{errno: :enodev, message: nil} = err} ->
+        # The kernel returns ENODEV without an extended-ack message for the
+        # common "interface does not exist" case; synthesize a useful one so
+        # the caller does not just see a bare :enodev.
+        {:error, %{err | message: ~s|no such interface "#{name}"|}}
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -151,12 +162,21 @@ defmodule Linx.Netlink.Rtnl.Link do
 
   defp create(%Socket{} = socket, name, parent, kind, mode_value)
        when is_binary(name) and is_binary(parent) do
-    with {:ok, %__MODULE__{index: parent_index}} <- get(socket, parent) do
-      payload =
-        encode(%__MODULE__{name: name, link: parent_index}) <> linkinfo(kind, mode_value)
+    case get(socket, parent) do
+      {:ok, %__MODULE__{index: parent_index}} ->
+        payload =
+          encode(%__MODULE__{name: name, link: parent_index}) <> linkinfo(kind, mode_value)
 
-      flags = nlm_f_create() ||| nlm_f_excl() ||| nlm_f_ack()
-      ack(Request.talk(socket, @rtm_newlink, flags, payload))
+        flags = nlm_f_create() ||| nlm_f_excl() ||| nlm_f_ack()
+        ack(Request.talk(socket, @rtm_newlink, flags, payload))
+
+      {:error, %Error{errno: :enodev} = err} ->
+        # Sharpen "no such interface" into "no such parent interface" so the
+        # caller knows it was the parent lookup that failed, not the new link.
+        {:error, %{err | message: ~s|no such parent interface "#{parent}"|}}
+
+      {:error, _} = error ->
+        error
     end
   end
 
