@@ -12,6 +12,12 @@ defmodule Linx.Netlink do
 
     * `Linx.Netlink.Socket` — an `AF_NETLINK` socket in a chosen network
       namespace, for any netlink protocol family.
+    * `Linx.Netlink.Message` / `Linx.Netlink.Attr` — the pure wire codec: the
+      `nlmsghdr` envelope and the type-length-value attributes inside it.
+    * `Linx.Netlink.Request` — sends a request and collects the kernel's
+      reply, including multipart dumps.
+    * `Linx.Netlink.Constants` — the core netlink constants every family
+      shares.
 
   Each protocol family then lives in its own namespace. The first is
   rtnetlink — the kernel's networking interface — under `Linx.Netlink.Rtnl`.
