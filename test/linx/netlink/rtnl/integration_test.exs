@@ -69,4 +69,47 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
     assert :ok = Route.add_default(socket, "10.99.0.1")
   end
+
+  test "Address.add/4 then delete/4 round-trips, visible via list/2",
+       %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+
+    {:ok, before} = Address.list(socket, "dummy0")
+    assert Enum.any?(before, &(&1.address == <<10, 99, 0, 2>>))
+
+    assert :ok = Address.delete(socket, "dummy0", "10.99.0.2", 24)
+
+    {:ok, after_delete} = Address.list(socket, "dummy0")
+    refute Enum.any?(after_delete, &(&1.address == <<10, 99, 0, 2>>))
+  end
+
+  test "Address.add/4 assigns an IPv6 address to a link", %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "fc00::1", 64)
+
+    {:ok, addresses} = Address.list(socket, "dummy0")
+    assert Enum.any?(addresses, &match?(%Address{family: 10}, &1))
+  end
+
+  test "Route.add/4 installs a destination-prefix route, delete/4 removes it",
+       %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+    assert :ok = Route.add(socket, "10.50.0.0", 24, "10.99.0.1")
+
+    {:ok, routes} = Route.list(socket)
+
+    assert Enum.any?(routes, fn r ->
+             r.dst == <<10, 50, 0, 0>> and r.gateway == <<10, 99, 0, 1>>
+           end)
+
+    assert :ok = Route.delete(socket, "10.50.0.0", 24, "10.99.0.1")
+
+    {:ok, after_delete} = Route.list(socket)
+
+    refute Enum.any?(after_delete, fn r ->
+             r.dst == <<10, 50, 0, 0>> and r.gateway == <<10, 99, 0, 1>>
+           end)
+  end
 end

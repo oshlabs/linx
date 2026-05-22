@@ -1,7 +1,7 @@
 defmodule Linx.Netlink.Rtnl.RouteTest do
   use ExUnit.Case, async: true
 
-  alias Linx.Netlink.Attr
+  alias Linx.Netlink.{Attr, Rtnl, Socket}
   alias Linx.Netlink.Rtnl.Route
 
   test "encodes the rtmsg header and the gateway attribute" do
@@ -34,5 +34,38 @@ defmodule Linx.Netlink.Rtnl.RouteTest do
     }
 
     assert Route.decode(Route.encode(message)) == message
+  end
+
+  test "encodes a destination-prefix route with dst, gateway and oif" do
+    message = %Route{
+      family: 2,
+      dst_len: 24,
+      table: 254,
+      protocol: 3,
+      scope: 0,
+      type: 1,
+      dst: <<10, 50, 0, 0>>,
+      gateway: <<10, 99, 0, 1>>,
+      oif: 3
+    }
+
+    assert <<2, 24, 0, 0, 254, 3, 0, 1, 0::native-32, attrs::binary>> = Route.encode(message)
+
+    decoded = Attr.decode(attrs)
+    # RTA_DST (1), RTA_OIF (4) and RTA_GATEWAY (5) — order matches the codec.
+    assert {1, <<10, 50, 0, 0>>} in decoded
+    assert {4, <<3::native-32>>} in decoded
+    assert {5, <<10, 99, 0, 1>>} in decoded
+  end
+
+  test "list/1 returns the host namespace's routes" do
+    {:ok, socket} = Rtnl.open()
+
+    assert {:ok, routes} = Route.list(socket)
+    # Every Linux host has at least one route in its main table.
+    assert routes != []
+    assert Enum.all?(routes, &match?(%Route{family: family} when family in [2, 10], &1))
+
+    assert :ok = Socket.close(socket)
   end
 end
