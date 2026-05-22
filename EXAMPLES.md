@@ -67,6 +67,25 @@ iex> Enum.count(routes, &(&1.family == 2))   # IPv4 routes
 3
 ```
 
+### Neighbours (ARP / NDP table)
+
+```elixir
+iex> alias Linx.Netlink.Rtnl.Neighbour
+
+iex> {:ok, neighbours} = Neighbour.list(sock)
+iex> {:ok, on_eth0} = Neighbour.list(sock, "eth0")
+```
+
+### Policy-routing rules
+
+```elixir
+iex> alias Linx.Netlink.Rtnl.Rule
+
+iex> {:ok, rules} = Rule.list(sock)
+iex> Enum.map(rules, &Rule.target_table/1)
+[255, 254, 253]
+```
+
 ## Creating virtual interfaces
 
 These need `./sudorun.sh`.
@@ -166,6 +185,37 @@ iex> Route.delete_default(sock, "10.0.42.1")
 IPv6 works through the same API — `Route.add(sock, "fd00::", 64, "fc00::1")`
 or `Route.add_default(sock, "fc00::1")`; the family is taken from the
 gateway and destination, which must agree.
+
+## Neighbours
+
+Static ARP (IPv4) or NDP (IPv6) entries — mapping an IP to a MAC on a
+specific link:
+
+```elixir
+iex> Neighbour.add(sock, "eth0", "10.0.0.10", "02:aa:bb:cc:dd:ee")
+:ok
+iex> Neighbour.delete(sock, "eth0", "10.0.0.10")
+:ok
+```
+
+## Policy-routing rules
+
+FIB rules choose which routing table to consult based on selectors. `:table`
+is required; the family is inferred from the address selectors (`:from` /
+`:to`), defaulting to IPv4 when only non-address selectors are used:
+
+```elixir
+# route any packet from 10.0.0.0/24 via table 100
+iex> Rule.add(sock, from: "10.0.0.0/24", table: 100)
+:ok
+
+# match a firewall mark, set the rule's own priority
+iex> Rule.add(sock, fwmark: 0x1, table: 100, priority: 200)
+:ok
+
+iex> Rule.delete(sock, from: "10.0.0.0/24", table: 100)
+:ok
+```
 
 ## Network namespaces
 

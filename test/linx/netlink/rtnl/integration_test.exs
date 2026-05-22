@@ -10,7 +10,7 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
   use ExUnit.Case, async: false
 
   alias Linx.Netlink.{Error, Rtnl, Socket}
-  alias Linx.Netlink.Rtnl.{Address, Link, Route}
+  alias Linx.Netlink.Rtnl.{Address, Link, Neighbour, Route, Rule}
 
   @moduletag :integration
 
@@ -174,5 +174,49 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     assert {:ok, link} = Link.get(socket, "mv1")
     assert link.linkinfo.kind == "macvlan"
     assert link.linkinfo.info_data.mode == 4
+  end
+
+  # --- M7: neighbours and rules ---------------------------------------------
+
+  test "Neighbour.add/4 installs a permanent entry, delete/3 removes it",
+       %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+
+    assert :ok = Neighbour.add(socket, "dummy0", "10.99.0.10", "02:aa:bb:cc:dd:ee")
+
+    {:ok, neighbours} = Neighbour.list(socket, "dummy0")
+
+    assert Enum.any?(neighbours, fn n ->
+             n.dst == <<10, 99, 0, 10>> and
+               n.lladdr == <<0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE>>
+           end)
+
+    assert :ok = Neighbour.delete(socket, "dummy0", "10.99.0.10")
+
+    {:ok, after_delete} = Neighbour.list(socket, "dummy0")
+    refute Enum.any?(after_delete, &(&1.dst == <<10, 99, 0, 10>>))
+  end
+
+  test "Rule.add/2 installs a policy-routing rule, delete/2 removes it",
+       %{socket: socket} do
+    opts = [from: "10.0.0.0/24", table: 100, priority: 1000]
+
+    assert :ok = Rule.add(socket, opts)
+
+    {:ok, rules} = Rule.list(socket)
+
+    assert Enum.any?(rules, fn r ->
+             r.src == <<10, 0, 0, 0>> and r.src_len == 24 and r.priority == 1000 and
+               Rule.target_table(r) == 100
+           end)
+
+    assert :ok = Rule.delete(socket, opts)
+
+    {:ok, after_delete} = Rule.list(socket)
+
+    refute Enum.any?(after_delete, fn r ->
+             r.src == <<10, 0, 0, 0>> and r.priority == 1000
+           end)
   end
 end
