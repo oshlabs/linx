@@ -19,6 +19,14 @@ defmodule Linx.Netlink.Rtnl.LinkTest do
       body = <<0::8, 0::8, 0::native-16, 9::native-signed-32, 0::native-32, 0::native-32>>
       assert %Link{index: 9, name: nil, mtu: nil} = Link.decode(body)
     end
+
+    test "decodes IFLA_LINK as the parent interface index" do
+      body =
+        <<0::8, 0::8, 0::native-16, 7::native-signed-32, 0::native-32, 0::native-32>> <>
+          Attr.encode([{5, <<3::native-32>>}])
+
+      assert %Link{index: 7, link: 3} = Link.decode(body)
+    end
   end
 
   test "up?/1 reflects the IFF_UP flag" do

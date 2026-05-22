@@ -187,16 +187,19 @@ Each milestone is an independently reviewable commit.
   and `__codec__/0` reflection.
 
 ### M4 — Complete the rtnetlink first-release scope, via the DSL
-- `Rtnl.Link` full: `create_macvlan`/`create_ipvlan` (first real customer of
-  `with: LinkInfo` + sub-message dispatch on link kind), `delete`,
-  `move_to_netns`, `set_up`/`set_down` (header-flag encode — mutating, so
-  here with the other mutating verbs rather than in M2).
-- `Rtnl.Address`: add an IPv4 address.
-- `Rtnl.Route`: add a route / default route.
+- `Rtnl.Link` full: `create_macvlan`/`create_ipvlan`, `delete`,
+  `move_to_netns`, `set_up`/`set_down`. The regular attributes (`IFLA_LINK`,
+  `IFLA_NET_NS_PID`, …) are DSL-declared; `IFLA_LINKINFO` — whose data is
+  kind-specific — is built by an explicit per-kind helper (approach B: the
+  escape hatch as hand-written code for the irregular case; DSL-level
+  sub-message dispatch deferred until a second/third kind needs it).
+- `Rtnl.Address`: `add/4` — an IPv4 address on a link.
+- `Rtnl.Route`: `add_default/2` — an IPv4 default route via a gateway.
+  (General destination-prefix routes are a later follow-up.)
 - Verbs grouped per resource module. Matches the README's first-release scope.
-- **Tests:** the `Link`/`LinkInfo`/`Address`/`Route` codecs get unit + golden
-  tests (plain); the mutating verbs need `CAP_NET_ADMIN`, so tagged
-  `:integration`, run against a fresh netns with a `dummy` interface.
+- **Tests:** the `Address`/`Route` codecs get plain unit tests; the mutating
+  verbs need `CAP_NET_ADMIN`, so are tagged `:integration` — run against a
+  fresh `ip netns` with a `dummy` parent interface (root + iproute2).
 
 ## Testing
 
