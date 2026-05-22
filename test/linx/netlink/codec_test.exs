@@ -1,6 +1,45 @@
 # Codec fixtures — separate top-level modules so the DSL's @before_compile
 # runs against a normal module, exactly as a real codec module compiles.
 
+# Two leaf codecs used as dispatch targets.
+defmodule Linx.Netlink.CodecTest.A do
+  @moduledoc false
+  use Linx.Netlink.Codec
+
+  codec do
+    attr(1, :value, :u32)
+  end
+end
+
+defmodule Linx.Netlink.CodecTest.B do
+  @moduledoc false
+  use Linx.Netlink.Codec
+
+  codec do
+    attr(1, :text, :string)
+  end
+end
+
+# A dispatched codec — :payload's sub-codec is chosen at runtime from :kind.
+defmodule Linx.Netlink.CodecTest.Dispatched do
+  @moduledoc false
+  use Linx.Netlink.Codec
+
+  codec do
+    attr(1, :kind, :string)
+
+    attr(
+      2,
+      :payload,
+      {:dispatch, :kind,
+       %{
+         "a" => Linx.Netlink.CodecTest.A,
+         "b" => Linx.Netlink.CodecTest.B
+       }}
+    )
+  end
+end
+
 defmodule Linx.Netlink.CodecTest.Sample do
   @moduledoc false
   use Linx.Netlink.Codec
@@ -86,5 +125,35 @@ defmodule Linx.Netlink.CodecTest do
     assert {:field, :index, :s32} in codec.header
     assert {:pad, 1} in codec.header
     assert {1, :label, :string} in codec.attrs
+  end
+
+  describe "dispatch escape hatch" do
+    alias Linx.Netlink.CodecTest.{A, B, Dispatched}
+
+    test "round-trips a value whose sub-codec is chosen from the kind field" do
+      a_msg = %Dispatched{kind: "a", payload: %A{value: 42}}
+      b_msg = %Dispatched{kind: "b", payload: %B{text: "hello"}}
+
+      assert Dispatched.decode(Dispatched.encode(a_msg)) == a_msg
+      assert Dispatched.decode(Dispatched.encode(b_msg)) == b_msg
+    end
+
+    test "encoding an unknown kind raises a clear error" do
+      assert_raise ArgumentError, ~r/no codec registered/, fn ->
+        Dispatched.encode(%Dispatched{kind: "unknown", payload: %A{value: 1}})
+      end
+    end
+
+    test "decoding an unknown kind keeps the raw bytes rather than crashing" do
+      attrs =
+        Linx.Netlink.Attr.encode([
+          {1, "x" <> <<0>>},
+          {2, <<99, 88, 77>>}
+        ])
+
+      decoded = Dispatched.decode(attrs)
+      assert decoded.kind == "x"
+      assert decoded.payload == <<99, 88, 77>>
+    end
   end
 end

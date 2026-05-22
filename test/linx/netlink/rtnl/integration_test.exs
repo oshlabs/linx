@@ -112,4 +112,67 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
              r.dst == <<10, 50, 0, 0>> and r.gateway == <<10, 99, 0, 1>>
            end)
   end
+
+  # --- M6: link kinds, sub-message dispatch, and link config ----------------
+
+  test "create_veth/3 creates a pair of interfaces", %{socket: socket} do
+    assert :ok = Link.create_veth(socket, "v0a", "v0b")
+
+    assert {:ok, %Link{name: "v0a"}} = Link.get(socket, "v0a")
+    assert {:ok, %Link{name: "v0b"}} = Link.get(socket, "v0b")
+  end
+
+  test "create_vlan/4 creates a VLAN sub-interface on a parent", %{socket: socket} do
+    assert :ok = Link.create_vlan(socket, "dummy0.42", "dummy0", 42)
+
+    assert {:ok, %Link{name: "dummy0.42", link: parent}} =
+             Link.get(socket, "dummy0.42")
+
+    assert {:ok, %Link{index: ^parent}} = Link.get(socket, "dummy0")
+  end
+
+  test "create_bridge/2 and create_dummy/2 work without info_data", %{socket: socket} do
+    assert :ok = Link.create_bridge(socket, "br0")
+    assert :ok = Link.create_dummy(socket, "dummy1")
+    assert {:ok, %Link{name: "br0"}} = Link.get(socket, "br0")
+    assert {:ok, %Link{name: "dummy1"}} = Link.get(socket, "dummy1")
+  end
+
+  test "set_master/3 enslaves a link to a bridge", %{socket: socket} do
+    assert :ok = Link.create_bridge(socket, "br0")
+    assert :ok = Link.create_dummy(socket, "dummy1")
+    assert {:ok, %Link{index: br_index}} = Link.get(socket, "br0")
+
+    assert :ok = Link.set_master(socket, "dummy1", "br0")
+    assert {:ok, %Link{master: ^br_index}} = Link.get(socket, "dummy1")
+  end
+
+  test "set_mtu/3 changes a link's MTU", %{socket: socket} do
+    assert :ok = Link.set_mtu(socket, "dummy0", 1400)
+    assert {:ok, %Link{mtu: 1400}} = Link.get(socket, "dummy0")
+  end
+
+  test "set_name/3 renames a link", %{socket: socket} do
+    assert :ok = Link.set_name(socket, "dummy0", "renamed0")
+    assert {:ok, %Link{name: "renamed0"}} = Link.get(socket, "renamed0")
+  end
+
+  test "set_address/3 changes a link's MAC address", %{socket: socket} do
+    assert :ok = Link.set_address(socket, "dummy0", "02:11:22:33:44:55")
+
+    assert {:ok, %Link{address: <<0x02, 0x11, 0x22, 0x33, 0x44, 0x55>>}} =
+             Link.get(socket, "dummy0")
+  end
+
+  test "decoded macvlan link carries its kind and mode via the dispatch DSL",
+       %{socket: socket} do
+    assert :ok = Link.create_macvlan(socket, "mv1", "dummy0", :bridge)
+
+    # The decoded %Link{}.linkinfo is a %LinkInfo{} whose info_data is the
+    # kind-specific %LinkInfo.Macvlan{} — built by the codec's runtime
+    # dispatch on :kind.
+    assert {:ok, link} = Link.get(socket, "mv1")
+    assert link.linkinfo.kind == "macvlan"
+    assert link.linkinfo.info_data.mode == 4
+  end
 end

@@ -41,13 +41,23 @@ defmodule Linx.Netlink.Codec do
   Scalars `:u8`, `:u16`, `:u32`, `:u64`, `:s8`, `:s16`, `:s32`; `:string` (a
   NUL-terminated string); `:binary` (raw bytes).
 
-  ## The escape hatch
+  ## The escape hatches
 
-  An attribute's type may instead be a **module** that exports `encode/1` and
-  `decode/1`. Pointed at another `Linx.Netlink.Codec` module it covers a
-  nested attribute set; pointed at a hand-written module it covers any value
-  whose wire form a primitive type cannot express. The DSL handles the regular
-  case declaratively and steps aside, to explicit code, for the rest.
+  An attribute's type may also be:
+
+    * a **module** that exports `encode/1` and `decode/1`. Pointed at another
+      `Linx.Netlink.Codec` module it covers a nested attribute set; pointed at
+      a hand-written module it covers any value whose wire form a primitive
+      cannot express.
+    * a **dispatch table**:
+      `{:dispatch, :other_field, %{"k1" => Mod1, "k2" => Mod2, …}}`. The
+      sub-codec is chosen at encode and decode time from the *current* value
+      of `:other_field` — a sibling attribute on the same struct. The
+      dispatching field must be declared *before* the dispatched one, so its
+      value is in hand by the time the latter is processed.
+
+  Both let the DSL handle the regular case and step aside, to module-level
+  code, for the rest.
   """
 
   alias Linx.Netlink.Attr
@@ -116,9 +126,17 @@ defmodule Linx.Netlink.Codec do
   defp header_item({:pad, _, [bytes]}), do: {:pad, bytes}
 
   # A primitive type is a plain atom; a module type arrives as an alias AST,
-  # resolved to the module here at macro-expansion time.
+  # resolved here. A dispatch type is a 3-tuple `{:dispatch, on, table}` whose
+  # table is a map literal with alias-AST values — resolved to module atoms.
   defp type_to_atom(type, _env) when is_atom(type), do: type
-  defp type_to_atom({:__aliases__, _, _} = alias_ast, env), do: Macro.expand(alias_ast, env)
+
+  defp type_to_atom({:__aliases__, _, _} = alias_ast, env),
+    do: Macro.expand(alias_ast, env)
+
+  defp type_to_atom({:{}, _, [:dispatch, on, {:%{}, _, pairs}]}, env) when is_atom(on) do
+    table = Map.new(pairs, fn {key, mod_ast} -> {key, Macro.expand(mod_ast, env)} end)
+    {:dispatch, on, table}
+  end
 
   defp struct_fields(header, attrs) do
     Enum.map(for({:field, name, _} <- header, do: name), &{&1, 0}) ++
@@ -140,15 +158,23 @@ defmodule Linx.Netlink.Codec do
     {header_fields, rest} = decode_header(codec.header, body, [])
     attrs = Attr.decode(rest)
 
-    attr_fields =
-      for {id, name, type} <- codec.attrs do
-        case List.keyfind(attrs, id, 0) do
-          {^id, payload} -> {name, decode_value(type, payload)}
-          nil -> {name, nil}
-        end
-      end
+    # Walk attribute specs in declaration order so that a dispatched
+    # attribute can see the already-decoded value of its on-field.
+    attr_fields = decode_attr_fields(codec.attrs, attrs, [])
 
     struct(codec.module, header_fields ++ attr_fields)
+  end
+
+  defp decode_attr_fields([], _attrs, acc), do: Enum.reverse(acc)
+
+  defp decode_attr_fields([{id, name, type} | rest], attrs, acc) do
+    value =
+      case List.keyfind(attrs, id, 0) do
+        {^id, payload} -> decode_attr_value(type, payload, acc)
+        nil -> nil
+      end
+
+    decode_attr_fields(rest, attrs, [{name, value} | acc])
   end
 
   defp encode_header([], _message, acc), do: Enum.reverse(acc)
@@ -172,13 +198,47 @@ defmodule Linx.Netlink.Codec do
   end
 
   # A nil attribute field is absent from the wire; everything else is emitted.
+  # A dispatched attribute also needs sibling-field access, so this carries
+  # the whole message along.
   defp encode_attrs(specs, message) do
     for {id, name, type} <- specs,
         value = Map.fetch!(message, name),
         not is_nil(value) do
-      {id, encode_value(type, value)}
+      {id, encode_attr_value(type, value, message)}
     end
   end
+
+  defp encode_attr_value({:dispatch, on, table}, value, message) do
+    key = Map.fetch!(message, on)
+
+    case Map.fetch(table, key) do
+      {:ok, mod} ->
+        mod.encode(value)
+
+      :error ->
+        raise ArgumentError,
+              "no codec registered for #{inspect(on)} = #{inspect(key)} in dispatch table"
+    end
+  end
+
+  defp encode_attr_value(type, value, _message), do: encode_value(type, value)
+
+  defp decode_attr_value({:dispatch, on, table}, payload, decoded_so_far) do
+    case List.keyfind(decoded_so_far, on, 0) do
+      {^on, key} ->
+        case Map.fetch(table, key) do
+          {:ok, mod} -> mod.decode(payload)
+          # Unknown kind — keep the raw bytes rather than crashing on a value
+          # we have no codec for.
+          :error -> payload
+        end
+
+      nil ->
+        payload
+    end
+  end
+
+  defp decode_attr_value(type, payload, _decoded), do: decode_value(type, payload)
 
   defp scalar(:u8, v), do: <<v::native-unsigned-8>>
   defp scalar(:u16, v), do: <<v::native-unsigned-16>>

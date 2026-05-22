@@ -3,15 +3,36 @@ defmodule Linx.Netlink.Rtnl.Link do
   rtnetlink network links (interfaces) — the `RTM_*LINK` messages.
 
   A `%Link{}` is a decoded interface: its index, name, link-layer type, flags,
-  MTU and parent. `list/1` and `get/2` read links; `create_macvlan/4`,
-  `create_ipvlan/4`, `delete/2`, `set_up/2`, `set_down/2` and `move_to_netns/3`
-  change them.
+  MTU, MAC address, parent, master and kind-specific information. Read verbs
+  `list/1` / `get/2` retrieve interfaces; mutating verbs create, delete and
+  configure them.
 
-  The wire format — `struct ifinfomsg` (`include/uapi/linux/rtnetlink.h`) and
-  the `IFLA_*` attributes (`include/uapi/linux/if_link.h`) — is declared with
-  the `Linx.Netlink.Codec` DSL, which generates the `%Link{}` struct and its
-  `encode/1` / `decode/1`. `IFLA_LINKINFO` is the one exception: its data is
-  chosen by the link kind, so it is built by hand (see `linkinfo/2`).
+  ## Creating
+
+  Several kinds of virtual link are supported, each by its own constructor:
+
+      Link.create_macvlan(socket, name, parent, mode \\\\ :bridge)
+      Link.create_ipvlan (socket, name, parent, mode \\\\ :l3)
+      Link.create_veth   (socket, name, peer_name)
+      Link.create_vlan   (socket, name, parent, vlan_id)
+      Link.create_bridge (socket, name)
+      Link.create_dummy  (socket, name)
+
+  ## Configuring
+
+  `set_up/2` / `set_down/2` toggle `IFF_UP`; `set_mtu/3`, `set_name/3`,
+  `set_address/3` and `set_master/3` change the MTU, name, MAC and bridge /
+  bond master respectively; `move_to_netns/3` hands the link to another
+  network namespace.
+
+  ## Wire format
+
+  `struct ifinfomsg` (`include/uapi/linux/rtnetlink.h`) and the `IFLA_*`
+  attributes (`include/uapi/linux/if_link.h`) — declared with the
+  `Linx.Netlink.Codec` DSL. `IFLA_LINKINFO` is itself a sub-codec
+  (`Linx.Netlink.Rtnl.LinkInfo`) whose `IFLA_INFO_DATA` is dispatched on the
+  kind value, picking the right per-kind module (`LinkInfo.Macvlan`,
+  `LinkInfo.Veth`, …).
   """
 
   use Linx.Netlink.Codec
@@ -19,7 +40,8 @@ defmodule Linx.Netlink.Rtnl.Link do
   import Bitwise
   import Linx.Netlink.Constants
 
-  alias Linx.Netlink.{Attr, Error, Message, Request, Socket}
+  alias Linx.Netlink.{Error, Message, Request, Socket}
+  alias Linx.Netlink.Rtnl.LinkInfo
 
   # rtnetlink link message types.
   @rtm_newlink 16
@@ -30,14 +52,7 @@ defmodule Linx.Netlink.Rtnl.Link do
   # "interface enabled" bit.
   @iff_up 0x1
 
-  # IFLA_LINKINFO and its sub-attributes — include/uapi/linux/if_link.h.
-  @ifla_linkinfo 18
-  @ifla_info_kind 1
-  @ifla_info_data 2
-
-  # macvlan and ipvlan each carry a single u32 "mode" at attribute 1 of
-  # IFLA_INFO_DATA — include/uapi/linux/if_link.h.
-  @info_data_mode 1
+  # macvlan / ipvlan modes — include/uapi/linux/if_link.h.
   @macvlan_mode_private 1
   @macvlan_mode_bridge 4
   @ipvlan_mode_l2 0
@@ -55,11 +70,16 @@ defmodule Linx.Netlink.Rtnl.Link do
     end
 
     # IFLA_* attributes — include/uapi/linux/if_link.h.
+    attr(1, :address, :binary)
     attr(3, :name, :string)
     attr(4, :mtu, :u32)
     attr(5, :link, :u32)
+    attr(10, :master, :u32)
+    attr(18, :linkinfo, LinkInfo)
     attr(19, :net_ns_pid, :u32)
   end
+
+  # --- reads -----------------------------------------------------------------
 
   @doc """
   Lists every link in the socket's network namespace.
@@ -88,9 +108,6 @@ defmodule Linx.Netlink.Rtnl.Link do
         {:error, :no_reply}
 
       {:error, %Error{errno: :enodev, message: nil} = err} ->
-        # The kernel returns ENODEV without an extended-ack message for the
-        # common "interface does not exist" case; synthesize a useful one so
-        # the caller does not just see a bare :enodev.
         {:error, %{err | message: ~s|no such interface "#{name}"|}}
 
       {:error, _} = error ->
@@ -104,25 +121,90 @@ defmodule Linx.Netlink.Rtnl.Link do
   @spec up?(t()) :: boolean
   def up?(%__MODULE__{flags: flags}), do: (flags &&& @iff_up) != 0
 
+  # --- create ----------------------------------------------------------------
+
   @doc """
   Creates a `macvlan` link named `name` on parent interface `parent`.
 
-  `mode` is `:bridge` (default — sibling macvlans on the same parent can reach
-  each other) or `:private`.
+  `mode` is `:bridge` (default) or `:private`.
   """
   @spec create_macvlan(Socket.t(), binary, binary, :bridge | :private) :: :ok | {:error, term}
-  def create_macvlan(socket, name, parent, mode \\ :bridge),
-    do: create(socket, name, parent, "macvlan", macvlan_mode(mode))
+  def create_macvlan(socket, name, parent, mode \\ :bridge) do
+    create_kinded(socket, name, parent, %LinkInfo{
+      kind: "macvlan",
+      info_data: %LinkInfo.Macvlan{mode: macvlan_mode(mode)}
+    })
+  end
 
   @doc """
   Creates an `ipvlan` link named `name` on parent interface `parent`.
 
-  `mode` is `:l3` (default — routed; works where macvlan cannot, e.g. on
-  Wi-Fi) or `:l2`.
+  `mode` is `:l3` (default) or `:l2`.
   """
   @spec create_ipvlan(Socket.t(), binary, binary, :l2 | :l3) :: :ok | {:error, term}
-  def create_ipvlan(socket, name, parent, mode \\ :l3),
-    do: create(socket, name, parent, "ipvlan", ipvlan_mode(mode))
+  def create_ipvlan(socket, name, parent, mode \\ :l3) do
+    create_kinded(socket, name, parent, %LinkInfo{
+      kind: "ipvlan",
+      info_data: %LinkInfo.Ipvlan{mode: ipvlan_mode(mode)}
+    })
+  end
+
+  @doc """
+  Creates an `vlan` sub-interface named `name` on parent `parent` carrying
+  802.1Q VLAN tag `vlan_id` (1..4094).
+  """
+  @spec create_vlan(Socket.t(), binary, binary, 1..4094) :: :ok | {:error, term}
+  def create_vlan(socket, name, parent, vlan_id) when vlan_id in 1..4094 do
+    create_kinded(socket, name, parent, %LinkInfo{
+      kind: "vlan",
+      info_data: %LinkInfo.Vlan{id: vlan_id}
+    })
+  end
+
+  @doc """
+  Creates a `veth` pair — two interfaces named `name` and `peer_name`,
+  connected back-to-back.
+  """
+  @spec create_veth(Socket.t(), binary, binary) :: :ok | {:error, term}
+  def create_veth(%Socket{} = socket, name, peer_name)
+      when is_binary(name) and is_binary(peer_name) do
+    body =
+      encode(%__MODULE__{
+        name: name,
+        linkinfo: %LinkInfo{
+          kind: "veth",
+          info_data: %LinkInfo.Veth{peer: %__MODULE__{name: peer_name}}
+        }
+      })
+
+    create_request(socket, body)
+  end
+
+  @doc """
+  Creates an empty Linux bridge named `name`.
+  """
+  @spec create_bridge(Socket.t(), binary) :: :ok | {:error, term}
+  def create_bridge(%Socket{} = socket, name) when is_binary(name) do
+    create_request(
+      socket,
+      encode(%__MODULE__{name: name, linkinfo: %LinkInfo{kind: "bridge"}})
+    )
+  end
+
+  @doc """
+  Creates a `dummy` interface named `name` — a loopback-like virtual link
+  with no real packet path, useful as a stable address holder or a test
+  fixture.
+  """
+  @spec create_dummy(Socket.t(), binary) :: :ok | {:error, term}
+  def create_dummy(%Socket{} = socket, name) when is_binary(name) do
+    create_request(
+      socket,
+      encode(%__MODULE__{name: name, linkinfo: %LinkInfo{kind: "dummy"}})
+    )
+  end
+
+  # --- delete / config -------------------------------------------------------
 
   @doc """
   Deletes the link named `name`.
@@ -147,6 +229,46 @@ defmodule Linx.Netlink.Rtnl.Link do
   def set_down(socket, name), do: set_flags(socket, name, 0)
 
   @doc """
+  Sets link `name`'s MTU to `mtu`.
+  """
+  @spec set_mtu(Socket.t(), binary, pos_integer) :: :ok | {:error, term}
+  def set_mtu(socket, name, mtu) when is_binary(name) and is_integer(mtu) and mtu > 0 do
+    configure(socket, name, %{mtu: mtu})
+  end
+
+  @doc """
+  Renames link `name` to `new_name`.
+  """
+  @spec set_name(Socket.t(), binary, binary) :: :ok | {:error, term}
+  def set_name(socket, name, new_name) when is_binary(name) and is_binary(new_name) do
+    configure(socket, name, %{name: new_name})
+  end
+
+  @doc """
+  Sets link `name`'s MAC address to `mac` — a colon-separated hex string,
+  e.g. `"aa:bb:cc:dd:ee:ff"`.
+  """
+  @spec set_address(Socket.t(), binary, binary) :: :ok | {:error, term}
+  def set_address(socket, name, mac) when is_binary(name) and is_binary(mac) do
+    with {:ok, bytes} <- parse_mac(mac) do
+      configure(socket, name, %{address: bytes})
+    end
+  end
+
+  @doc """
+  Enslaves link `name` to `master_name` — typically a bridge or bond.
+  """
+  @spec set_master(Socket.t(), binary, binary) :: :ok | {:error, term}
+  def set_master(%Socket{} = socket, name, master_name)
+      when is_binary(name) and is_binary(master_name) do
+    with {:ok, %__MODULE__{index: master_index}} <- get(socket, master_name),
+         {:ok, %__MODULE__{index: index}} <- get(socket, name) do
+      body = encode(%__MODULE__{index: index, master: master_index})
+      ack(Request.talk(socket, @rtm_newlink, nlm_f_ack(), body))
+    end
+  end
+
+  @doc """
   Moves link `name` into the network namespace of process `pid`.
   """
   @spec move_to_netns(Socket.t(), binary, pos_integer) :: :ok | {:error, term}
@@ -158,26 +280,26 @@ defmodule Linx.Netlink.Rtnl.Link do
     end
   end
 
-  # --- internals --------------------------------------------------------------
+  # --- internals -------------------------------------------------------------
 
-  defp create(%Socket{} = socket, name, parent, kind, mode_value)
+  defp create_kinded(%Socket{} = socket, name, parent, %LinkInfo{} = linkinfo)
        when is_binary(name) and is_binary(parent) do
     case get(socket, parent) do
       {:ok, %__MODULE__{index: parent_index}} ->
-        payload =
-          encode(%__MODULE__{name: name, link: parent_index}) <> linkinfo(kind, mode_value)
-
-        flags = nlm_f_create() ||| nlm_f_excl() ||| nlm_f_ack()
-        ack(Request.talk(socket, @rtm_newlink, flags, payload))
+        body = encode(%__MODULE__{name: name, link: parent_index, linkinfo: linkinfo})
+        create_request(socket, body)
 
       {:error, %Error{errno: :enodev} = err} ->
-        # Sharpen "no such interface" into "no such parent interface" so the
-        # caller knows it was the parent lookup that failed, not the new link.
         {:error, %{err | message: ~s|no such parent interface "#{parent}"|}}
 
       {:error, _} = error ->
         error
     end
+  end
+
+  defp create_request(socket, body) do
+    flags = nlm_f_create() ||| nlm_f_excl() ||| nlm_f_ack()
+    ack(Request.talk(socket, @rtm_newlink, flags, body))
   end
 
   defp set_flags(%Socket{} = socket, name, flags) when is_binary(name) do
@@ -189,18 +311,14 @@ defmodule Linx.Netlink.Rtnl.Link do
     end
   end
 
-  # IFLA_LINKINFO — a nested attribute set carrying the link kind and its
-  # kind-specific data. macvlan and ipvlan each put a single u32 mode at
-  # attribute 1 of IFLA_INFO_DATA. This is hand-written rather than declared
-  # in the codec because IFLA_INFO_DATA's format is selected by the kind —
-  # the explicit escape hatch for sub-message dispatch (see PLAN.md, M4).
-  defp linkinfo(kind, mode_value) do
-    info_data = Attr.encode([{@info_data_mode, <<mode_value::native-32>>}])
-
-    Attr.encode([
-      {@ifla_linkinfo,
-       Attr.encode([{@ifla_info_kind, kind <> <<0>>}, {@ifla_info_data, info_data}])}
-    ])
+  # Resolve `name` to its index and send RTM_NEWLINK with a minimal message
+  # carrying only :index plus the fields in `updates` — the request changes
+  # those fields and leaves the rest alone.
+  defp configure(%Socket{} = socket, name, updates) when is_map(updates) do
+    with {:ok, %__MODULE__{index: index}} <- get(socket, name) do
+      message = struct(__MODULE__, [{:index, index} | Map.to_list(updates)])
+      ack(Request.talk(socket, @rtm_newlink, nlm_f_ack(), encode(message)))
+    end
   end
 
   defp macvlan_mode(:bridge), do: @macvlan_mode_bridge
@@ -211,4 +329,21 @@ defmodule Linx.Netlink.Rtnl.Link do
 
   defp ack({:ok, _messages}), do: :ok
   defp ack({:error, _} = error), do: error
+
+  # `"aa:bb:cc:dd:ee:ff"` → `<<0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF>>`.
+  defp parse_mac(mac) do
+    case String.split(mac, ":") do
+      [_, _, _, _, _, _] = parts -> parse_hex_pairs(parts, <<>>, mac)
+      _ -> {:error, {:bad_mac, mac}}
+    end
+  end
+
+  defp parse_hex_pairs([], acc, _orig), do: {:ok, acc}
+
+  defp parse_hex_pairs([h | t], acc, orig) do
+    case Integer.parse(h, 16) do
+      {n, ""} when n in 0..255 -> parse_hex_pairs(t, acc <> <<n>>, orig)
+      _ -> {:error, {:bad_mac, orig}}
+    end
+  end
 end
