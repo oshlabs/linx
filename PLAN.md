@@ -157,16 +157,18 @@ Each milestone is an independently reviewable commit.
   plain.
 
 ### M2 — First rtnetlink message, hand-written explicit
-- `Linx.Netlink.Rtnl` namespace; `Linx.Netlink.Rtnl.Link` written **by hand,
-  explicit** — no DSL: the `%Link{}` struct, hand-written `encode/1`/`decode/1`,
-  the `ifinfomsg` header, a handful of `IFLA_*` attributes.
-- Verbs that exercise the full cycle both ways: `Link.list/1` and `Link.get/2`
-  (decode + dump), `Link.set_up/2` / `Link.set_down/2` (header-flag encode).
-- **This is the "get a feel" step.** Done when `Rtnl.Link.list(socket)` returns
-  `[%Link{}]` against the host netns.
-- **Tests:** the `Rtnl.Link` codec gets unit + golden tests (plain). `list/1`
-  and `get/2` are unprivileged dumps, tested against the host netns in plain
-  `mix test`; `set_up/2`/`set_down/2` mutate state, so tagged `:integration`.
+- `Linx.Netlink.Rtnl` namespace (the `NETLINK_ROUTE` family; `open/1`);
+  `Linx.Netlink.Rtnl.Link` written **by hand, explicit** — no DSL: the
+  `%Link{}` struct, a hand-written `decode/1`, the `ifinfomsg` header and a
+  handful of `IFLA_*` attributes.
+- Read verbs, all unprivileged: `Link.list/1` (an `RTM_GETLINK` dump) and
+  `Link.get/2` (a single `RTM_GETLINK` by name — which also exercises request
+  *encoding*: an `ifinfomsg` plus an `IFLA_IFNAME` attribute).
+- **This is the "get a feel" step.** Done when `Rtnl.Link.list(socket)`
+  returns `[%Link{}]` against the host netns.
+- **Tests:** the `Rtnl.Link` codec gets unit + golden tests; `list/1` and
+  `get/2` are unprivileged, tested against the live host netns — all plain
+  `mix test`.
 
 ### M3 — Extract the DSL
 - From M2's hand-written `Rtnl.Link`, extract the macro into
@@ -182,7 +184,8 @@ Each milestone is an independently reviewable commit.
 ### M4 — Complete the rtnetlink first-release scope, via the DSL
 - `Rtnl.Link` full: `create_macvlan`/`create_ipvlan` (first real customer of
   `with: LinkInfo` + sub-message dispatch on link kind), `delete`,
-  `move_to_netns`.
+  `move_to_netns`, `set_up`/`set_down` (header-flag encode — mutating, so
+  here with the other mutating verbs rather than in M2).
 - `Rtnl.Address`: add an IPv4 address.
 - `Rtnl.Route`: add a route / default route.
 - Verbs grouped per resource module. Matches the README's first-release scope.
