@@ -1,7 +1,7 @@
 defmodule Linx.Netlink.RequestTest do
   use ExUnit.Case, async: true
 
-  alias Linx.Netlink.{Attr, Message, Request, Socket}
+  alias Linx.Netlink.{Attr, Error, Message, Request, Socket}
 
   @netlink_route 0
   # rtnetlink link message types, and the IFLA_IFNAME attribute.
@@ -25,15 +25,19 @@ defmodule Linx.Netlink.RequestTest do
     assert :ok = Socket.close(socket)
   end
 
-  test "talk/4 surfaces a kernel error as {:error, {:netlink, errno}}" do
+  test "talk/4 surfaces a kernel error as a Linx.Netlink.Error" do
     {:ok, socket} = Socket.open(@netlink_route)
 
     # A non-dump RTM_GETLINK for an interface that does not exist: the kernel
     # answers with NLMSG_ERROR (-ENODEV).
     payload = @ifinfomsg <> Attr.encode([{@ifla_ifname, "nosuchif0" <> <<0>>}])
 
-    assert {:error, {:netlink, errno}} = Request.talk(socket, @rtm_getlink, 0, payload)
-    assert errno > 0
+    assert {:error, %Error{errno: :enodev, code: 19} = error} =
+             Request.talk(socket, @rtm_getlink, 0, payload)
+
+    # NETLINK_EXT_ACK gives the kernel an option to attach a description, but
+    # not every error path supplies one — accept either.
+    assert is_nil(error.message) or is_binary(error.message)
 
     assert :ok = Socket.close(socket)
   end

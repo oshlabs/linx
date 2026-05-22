@@ -1,7 +1,7 @@
 defmodule Linx.Netlink.Rtnl.LinkTest do
   use ExUnit.Case, async: true
 
-  alias Linx.Netlink.{Attr, Rtnl, Socket}
+  alias Linx.Netlink.{Attr, Error, Rtnl, Socket}
   alias Linx.Netlink.Rtnl.Link
 
   describe "decode/1" do
@@ -53,11 +53,14 @@ defmodule Linx.Netlink.Rtnl.LinkTest do
     assert :ok = Socket.close(socket)
   end
 
-  test "get/2 returns a netlink error for an unknown interface" do
+  test "get/2 returns a Linx.Netlink.Error for an unknown interface" do
     {:ok, socket} = Rtnl.open()
 
-    assert {:error, {:netlink, errno}} = Link.get(socket, "nosuchif0")
-    assert errno > 0
+    assert {:error, %Error{errno: :enodev, code: 19} = error} =
+             Link.get(socket, "nosuchif0")
+
+    # The kernel may or may not attach an extended-ack message; either is fine.
+    assert is_nil(error.message) or is_binary(error.message)
 
     assert :ok = Socket.close(socket)
   end

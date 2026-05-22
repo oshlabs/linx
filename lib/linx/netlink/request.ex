@@ -22,7 +22,14 @@ defmodule Linx.Netlink.Request do
   import Bitwise
   import Linx.Netlink.Constants
 
-  alias Linx.Netlink.{Message, Socket}
+  alias Linx.Netlink.{Attr, Error, Message, Socket}
+
+  # Flags carried in an NLMSG_ERROR's nlmsg_flags when extended-ack TLVs are
+  # appended. NLM_F_CAPPED means the echoed original message was trimmed to
+  # its 16-byte header; NLM_F_ACK_TLVS means the extended-ack attributes
+  # follow it. See include/uapi/linux/netlink.h.
+  @nlm_f_capped 0x100
+  @nlm_f_ack_tlvs 0x200
 
   @doc """
   Sends a request and returns the kernel's reply.
@@ -33,7 +40,7 @@ defmodule Linx.Netlink.Request do
 
   Returns `{:ok, messages}` with the data messages of the reply (an empty list
   for a bare acknowledgement), or `{:error, reason}`. A kernel error is
-  `{:error, {:netlink, errno}}`, with `errno` a positive error number.
+  `{:error, %Linx.Netlink.Error{}}`.
   """
   @spec talk(Socket.t(), 0..0xFFFF, non_neg_integer, iodata) ::
           {:ok, [Message.t()]} | {:error, term}
@@ -97,12 +104,50 @@ defmodule Linx.Netlink.Request do
   end
 
   # struct nlmsgerr begins with a signed errno; 0 means the request succeeded
-  # and this is the acknowledgement, anything else is a kernel error.
-  defp classify_error(%Message{payload: <<errno::native-signed-32, _::binary>>}) do
-    if errno == 0, do: :ack, else: {:error, {:netlink, -errno}}
+  # and this is the acknowledgement, anything else is a kernel error. With
+  # NETLINK_EXT_ACK enabled on the socket (Linx.Netlink.Socket does this) the
+  # kernel attaches a human-readable string after the echoed nlmsghdr.
+  defp classify_error(%Message{flags: flags, payload: <<errno::native-signed-32, rest::binary>>}) do
+    if errno == 0 do
+      :ack
+    else
+      {:error, Error.from_errno(-errno, extack_message(flags, rest))}
+    end
   end
 
   defp classify_error(%Message{}), do: {:error, :malformed_error}
+
+  # Extract NLMSGERR_ATTR_MSG from an error reply's payload, or nil if the
+  # kernel did not include the extended-ack TLVs.
+  defp extack_message(flags, rest) do
+    if (flags &&& @nlm_f_ack_tlvs) != 0 do
+      case skip_echoed(rest, (flags &&& @nlm_f_capped) != 0) do
+        {:ok, tlvs} ->
+          case List.keyfind(Attr.decode(tlvs), 1, 0) do
+            # NLMSGERR_ATTR_MSG = 1 — a NUL-terminated string.
+            {1, value} -> String.trim_trailing(value, <<0>>)
+            nil -> nil
+          end
+
+        :error ->
+          nil
+      end
+    end
+  end
+
+  # After the errno, the error reply contains the echoed nlmsghdr — just the
+  # 16-byte header when NLM_F_CAPPED is set, the full original message
+  # (rounded up to a 4-byte boundary) otherwise. The TLVs follow.
+  defp skip_echoed(<<len::native-32, _::binary>> = bin, capped?) do
+    consume = if capped?, do: 16, else: len + 3 &&& bnot(3)
+
+    case bin do
+      <<_::binary-size(consume), tlvs::binary>> -> {:ok, tlvs}
+      _ -> :error
+    end
+  end
+
+  defp skip_echoed(_, _), do: :error
 
   # NLM_F_MULTI marks a message as one of a series ended by NLMSG_DONE; a
   # message without it is a complete single reply.

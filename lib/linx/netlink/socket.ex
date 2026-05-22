@@ -31,6 +31,13 @@ defmodule Linx.Netlink.Socket do
   # rather than via a constants module to keep this lowest layer self-contained.
   @af_netlink 16
 
+  # SOL_NETLINK and NETLINK_EXT_ACK — set this option on the socket to ask
+  # the kernel to include a human-readable string in NLMSG_ERROR replies
+  # (parsed by Linx.Netlink.Request into Linx.Netlink.Error.message). Linux
+  # >= 4.12.
+  @sol_netlink 270
+  @netlink_ext_ack 11
+
   @enforce_keys [:socket, :netns, :protocol, :seq]
   defstruct [:socket, :netns, :protocol, :seq]
 
@@ -93,6 +100,11 @@ defmodule Linx.Netlink.Socket do
   def close(%__MODULE__{socket: socket}), do: :socket.close(socket)
 
   defp build(socket, netns, protocol) do
+    # Best-effort: pre-4.12 kernels do not know NETLINK_EXT_ACK and return
+    # EINVAL here. Ignore the result — without extended ack we just get plain
+    # errno-only errors, which is still correct.
+    _ = :socket.setopt_native(socket, {@sol_netlink, @netlink_ext_ack}, <<1::native-32>>)
+
     %__MODULE__{
       socket: socket,
       netns: netns,

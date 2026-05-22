@@ -75,7 +75,8 @@ defmodule Linx.Netlink.Rtnl.Link do
   @doc """
   Gets the link named `name`.
 
-  Returns `{:error, {:netlink, errno}}` if there is no such interface.
+  Returns `{:error, %Linx.Netlink.Error{errno: :enodev}}` if there is no such
+  interface.
   """
   @spec get(Socket.t(), binary) :: {:ok, t()} | {:error, term}
   def get(%Socket{} = socket, name) when is_binary(name) do

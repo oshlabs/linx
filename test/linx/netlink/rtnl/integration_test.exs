@@ -9,7 +9,7 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
-  alias Linx.Netlink.{Rtnl, Socket}
+  alias Linx.Netlink.{Error, Rtnl, Socket}
   alias Linx.Netlink.Rtnl.{Address, Link, Route}
 
   @moduletag :integration
@@ -56,7 +56,7 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     assert {:ok, _} = Link.get(socket, "mv0")
 
     assert :ok = Link.delete(socket, "mv0")
-    assert {:error, {:netlink, _}} = Link.get(socket, "mv0")
+    assert {:error, %Error{errno: :enodev}} = Link.get(socket, "mv0")
   end
 
   test "Address.add/4 assigns an IPv4 address to a link", %{socket: socket} do

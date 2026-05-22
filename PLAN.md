@@ -1,7 +1,8 @@
-# Linx.Netlink — foundations plan
+# Linx.Netlink — implementation plan
 
-> Status: **proposal, for review.** Branch `netlink-foundations`.
-> Nothing here is committed code yet — review and amend before we build.
+> **Phase 1 (M0–M4) has shipped** on branch `netlink-foundations` — the
+> family-agnostic core and the first rtnetlink slice. **Phase 2** (below,
+> after the Decisions section) is a proposal, for review.
 
 ## Goal
 
@@ -242,3 +243,67 @@ deferred. The tests themselves ship with the milestone they belong to.
 3. **Shared constants module** — `Linx.Netlink.Constants`.
 4. **Integration-test tag** — `:integration`. CI (running that suite
    automatically) is deferred until the project has CI.
+
+---
+
+# Phase 2 — rtnetlink breadth
+
+Phase 1 shipped the family-agnostic core and a thin first slice of rtnetlink.
+Phase 2 widens rtnetlink toward day-to-day completeness. Every milestone here
+is a *declarative addition* — a `codec do … end` block plus verbs — riding the
+finished `Socket` / `Message` / `Attr` / `Request` / `Codec` layers; no new
+infrastructure. Same rules as Phase 1: code ships with its tests (plain for
+codecs, `:integration` for mutating verbs), commit and push per milestone.
+
+## M5 — Address & Route: full CRUD, IPv4 and IPv6
+
+The cheapest, highest-value gap: each resource has one write verb and no reads.
+
+- `Rtnl.Address` — `list/1` (and per-link `list/2`) via an `RTM_GETADDR` dump;
+  `delete/4`.
+- `Rtnl.Route` — `list/1` via an `RTM_GETROUTE` dump; a general `add/4` for a
+  destination-prefix route (`add_default/2` becomes the `0.0.0.0/0` case);
+  `delete`.
+- **IPv6** across both — `AF_INET6`, 16-byte addresses, `:inet.parse_address`.
+  The codec needs no change: the address attributes are already `:binary`,
+  length-agnostic; only the verb logic picks the family and address width.
+- **Tests:** codec tests stay plain; dumps are unprivileged (host netns);
+  `add`/`delete` are `:integration`.
+
+## M6 — Link kinds, and DSL sub-message dispatch
+
+- More virtual link kinds — at least **veth** (the pair that, with a bridge,
+  is the other container-networking model), **vlan**, **bridge**; `dummy` and
+  `vxlan` as they fall out cheaply.
+- These are the second and third customers of kind-specific `IFLA_INFO_DATA`,
+  so **generalize the sub-message dispatch into the `Codec` DSL** — an
+  attribute whose sub-codec is chosen at runtime from the `kind` value. This
+  is the M4 deferral (approach B): now extract it, with real customers.
+- Link configuration verbs: `set_mtu/3`, `set_name/3`, `set_master/3` (enslave
+  to a bridge or bond), `set_address/3` (MAC).
+- **Tests:** codec and dispatch tests plain; create/config verbs
+  `:integration`, in a fresh netns.
+
+## M7 — Neighbours and Rules
+
+New resource modules, the same machinery:
+
+- `Rtnl.Neighbour` — the ARP / NDP table (`RTM_*NEIGH`): `add`, `delete`,
+  `list`.
+- `Rtnl.Rule` — policy-routing FIB rules (`RTM_*RULE`): `add`, `delete`,
+  `list`.
+- **Tests:** as above.
+
+## Beyond Phase 2 — separate tracks
+
+- **Traffic control** (`RTM_*QDISC` / `*TCLASS` / `*TFILTER`) — qdiscs,
+  classes, filters, actions: the largest part of rtnetlink by far. Its own
+  later effort, not a Phase 2 milestone.
+- **The process layer** — `Linx.Netlink.Connection` (a supervised socket with
+  concurrent in-flight requests) and `Linx.Netlink.Monitor` (multicast
+  link/addr/route events). Cross-cutting, not rtnetlink-specific; the
+  synchronous `Request` engine was built to accept this without rework.
+- **Generic netlink** (`Linx.Netlink.Generic`) — genl family resolution and
+  subsystems (WireGuard, nl80211). Where the kernel's YAML specs become
+  attractive: breadth turns into a code-generation problem feeding the same
+  `Codec` DSL, rather than hand-writing.
