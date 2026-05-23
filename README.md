@@ -78,6 +78,10 @@ This composes with `Linx.Netlink` cleanly: clone with `CLONE_NEWNET` → `Linx.N
 
 - **`Linx.Mount`** — mount, `pivot_root`, `open_tree`, `mount_setattr`.
 - **`Linx.Cgroup`** — cgroup v2 controllers (`memory.max`, `pids.max`, `cpu.max`, freezer, …).
+- **`Linx.Tty`** — PTY pair creation, terminal mode control, tty ioctls, plus an `attach/2` byte-pumping helper. Composes with `Linx.Process`'s `:pty` stdio directive to enable, for example, this on a Nerves device:
+
+  > SSH in, land at `iex>`, type `Linx.Process.spawn(argv: ["/bin/bash"], namespaces: [...], stdio: :pty)` then `Linx.Tty.attach(:controlling, child)` — and your `iex>` *becomes* the container's bash until you `exit`, at which point the `iex>` prompt is back. The `docker attach` / `kubectl exec -it` experience, end-to-end inside the BEAM.
+
 - **Within `Linx.Netlink`** — a `Connection` GenServer for concurrent in-flight requests; a `Monitor` for multicast event subscription (the `ip monitor` equivalent); the `NETLINK_GENERIC` family and its subsystems (WireGuard, ethtool, …); more link kinds (`bond`, `vxlan`, `tun`/`tap`).
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.
