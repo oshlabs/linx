@@ -2,11 +2,11 @@
 
 **Linux kernel interfaces for Elixir.**
 
-A growing collection of low-level Linux primitives — netlink sockets, process and namespace lifecycle, mounts, cgroups — exposed as idiomatic Elixir. The goal is to make these feel as natural to drive from the BEAM as anything in the standard library.
+A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
 
 Linx is a library of **primitives**, not a runtime. A container engine, a network orchestrator, or an observability tool is a *consumer* of Linx; the runtime concepts (images, supervision policies, request routing) live in those projects.
 
-> ⚠️ **Early days.** Linx is just getting started. `Linx.Netlink` is the first piece. The API is still settling and breaking changes are likely until `1.0`.
+> ⚠️ **Early days.** Linx is still pre-1.0 — APIs are settling and breaking changes are likely.
 
 ## Installation
 
@@ -22,6 +22,226 @@ end
 
 Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Windows.
 
+## The headline example
+
+The three subsystems composing into something concrete: spawn a real process in a fresh set of namespaces, configure its network from the outside while the child is parked, hand your terminal over to it, type into a shell inside the container.
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Netlink.Rtnl
+iex> alias Linx.Netlink.Rtnl.{Address, Link, Route}
+iex> alias Linx.Tty
+
+# Spawn /bin/bash in fresh net + mount + pid + uts + ipc namespaces,
+# with a PTY for stdio. The child blocks at a checkpoint before exec.
+iex> {:ok, c} = P.spawn(
+...>   argv: ["/bin/bash"],
+...>   namespaces: [:net, :mount, :pid, :uts, :ipc],
+...>   stdio: :pty
+...> )
+iex> receive do {:linx_process, :ready, host_pid} -> host_pid end
+41234
+
+# Host-side: build a macvlan off eth0 and hand it to the child as ct0.
+iex> {:ok, host} = Rtnl.open()
+iex> :ok = Link.create_macvlan(host, "ct0", "eth0", :bridge)
+iex> :ok = Link.move_to_netns(host, "ct0", 41234)
+
+# Inside the child's still-fresh netns: configure ct0 and a default route.
+iex> {:ok, ns} = Rtnl.open({:pid, 41234})
+iex> :ok = Link.set_up(ns, "lo")
+iex> :ok = Address.add(ns, "ct0", "10.0.0.5", 24)
+iex> :ok = Link.set_up(ns, "ct0")
+iex> :ok = Route.add_default(ns, "10.0.0.1")
+
+# Release the child past the checkpoint -- it execs bash now.
+iex> P.proceed(c)
+iex> receive do {:linx_process, :running} -> :ok end
+
+# Hand /dev/tty over to the workload's PTY master. Your iex prompt
+# *becomes* the bash inside the container -- type, run vim, resize the
+# terminal, exit. attach returns when bash does, and the original iex
+# prompt is back.
+iex> Tty.attach(:controlling, c)
+{:ok, {:exited, 0}}
+```
+
+The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`. They compose because they share clean primitives, not because there's a framework holding them together.
+
+## Subsystems
+
+### `Linx.Process` — clone, setns, signals, stdio
+
+The Linux process-lifecycle surface: `clone(2)` with namespace flags, `setns(2)` to enter another process's namespaces, signal delivery, `waitpid(2)`, and stdio plumbing.
+
+The actual syscalls run in a small external C agent — a Port, not a NIF — because `clone()` / `fork()` / `unshare()` inside the multithreaded BEAM corrupts the VM. A checkpoint protocol over fd 3/4 lets the orchestrator do host-side setup before the child execs.
+
+```elixir
+iex> alias Linx.Process, as: P
+
+# Plain spawn (no namespaces) -- equivalent to fork+exec.
+iex> {:ok, c} = P.spawn(argv: ["/bin/echo", "hello"])
+iex> P.proceed(c)
+iex> P.wait(c)
+{:ok, {:exited, 0}}
+```
+
+Every `spawn` returns a session — a GenServer pid that owns the child. The session sends lifecycle events to its owner and ends with exactly one terminal event:
+
+- `{:linx_process, :ready, host_pid}` — child reached the checkpoint
+- `{:linx_process, :running}` — child has `execve`'d
+- `{:linx_process, :exited, code}` — workload exited normally
+- `{:linx_process, :signaled, signum}` — workload was killed by a signal
+- `{:linx_process, :error, errno, stage}` — pre-exec failure (e.g. `ENOENT` from `:execve`)
+
+The **checkpoint** is what makes the host/child cooperation work: the child blocks between `clone()` and `execve()` so the host side can move netlink interfaces in, write cgroup state, mount things, whatever — *then* `proceed/1` lets the workload exec.
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "30"], namespaces: [:net])
+iex> receive do {:linx_process, :ready, host_pid} -> host_pid end
+
+# ... host-side setup happens here ...
+
+iex> P.proceed(c)
+```
+
+Available namespace atoms: `:net`, `:mount`, `:pid`, `:uts`, `:ipc`, `:user`, `:cgroup`, `:time`. All but `:user` need `CAP_SYS_ADMIN`.
+
+`enter/2` runs a new workload *inside* an existing target's namespaces — the equivalent of `nsenter --target <pid>` or `docker exec`:
+
+```elixir
+# probe lives inside ct's namespaces; sees only ct's interfaces
+iex> {:ok, probe} = P.enter(ct_pid, argv: ["/bin/sh", "-c", "ip -o link | wc -l"])
+```
+
+**Stdio plumbing.** By default the workload inherits the BEAM's fds 0/1/2. The `:stdio` option chooses something else:
+
+| Directive | Effect |
+|---|---|
+| `:inherit` (default) | child sees the BEAM's stdin/out/err |
+| `:devnull` | `/dev/null` for all three |
+| `{:connect_unix, path}` | per-fd: child connects to an AF_UNIX listener you opened |
+| `:pty` | full PTY pair; bytes proxy through the control channel |
+
+The per-fd keyword form lets each fd get its own treatment:
+
+```elixir
+iex> {:ok, c} = P.spawn(
+...>   argv: ["/bin/echo", "captured"],
+...>   stdio: [stdout: {:connect_unix, "/tmp/cap.sock"}, stderr: :devnull]
+...> )
+```
+
+With `:pty`, reads arrive as `{:linx_process, :pty_out, bytes}` events in the owner's mailbox; writes go through `pty_write/2`:
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
+iex> P.proceed(c)
+iex> P.pty_write(c, "hello\n")
+iex> receive do {:linx_process, :pty_out, b} -> b end
+"hello\r\nhello\r\n"   # PTY echoes the input, then cat writes it back
+```
+
+`pty_set_winsize/2` configures the PTY's window size — either before `proceed/1` (so the workload sees the right size from the moment it `execve`s) or post-running (so a runtime update reaches the workload as `SIGWINCH`):
+
+```elixir
+iex> P.pty_set_winsize(c, {24, 80, 0, 0})  # rows, cols, xpix, ypix
+:ok
+```
+
+More in [`docs/process/EXAMPLES.md`](docs/process/EXAMPLES.md).
+
+### `Linx.Tty` — terminal, PTY, `/dev/tty`
+
+The kernel's terminal surface: opening `/dev/tty`, manipulating `termios(3)` (raw / save / restore), tty ioctls for window size, plus an `attach/2` byte-pumping helper that composes with `Linx.Process`'s `:pty` stdio directive.
+
+```elixir
+iex> alias Linx.Tty
+iex> {:ok, fd, saved} = Tty.open_controlling_raw()
+iex> Tty.window_size(fd)
+{:ok, #Linx.Tty.WindowSize<132x42>}
+iex> :ok = Tty.restore_and_close(fd, saved)
+```
+
+The `Saved` blob is the original `termios` state, returned so the terminal can be restored exactly. `restore_and_close/2` is idempotent against already-closed fds, so wrapping callers with `try/after` is structurally safe — the user's terminal can never be left in raw mode.
+
+The headliner is **`attach/2`**: given a `Linx.Process` session running under `stdio: :pty`, it hands the caller's controlling terminal over to the workload's PTY master and pumps bytes both ways until the workload exits, restoring the terminal unconditionally on return. Three quality-of-life pieces are baked in:
+
+- **Coexistence with iex.** Erlang's `user_drv` / `prim_tty` driver reads `/dev/tty` to support type-ahead at the iex prompt. `attach/2` calls `:prim_tty.disable_reader/1` for its duration so keystrokes can't be split between the two readers.
+- **Initial window size.** The workload's PTY is sized from the local terminal at entry, so `vim` and `less` open at the right dimensions.
+- **Live resize.** Drag your terminal corner while inside the attached shell and the workload sees `SIGWINCH` with the new size in real time. A `:gen_event` handler registered on OTP's `:erl_signal_server` carries each resize through.
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Tty
+
+iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], stdio: :pty)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.proceed(c)
+iex> receive do {:linx_process, :running} -> :ok end
+
+# iex blocks here. Your terminal IS the bash. Type, run vim, resize,
+# exit. attach returns the workload's terminal event.
+iex> Tty.attach(:controlling, c)
+{:ok, {:exited, 0}}
+```
+
+More in [`docs/tty/EXAMPLES.md`](docs/tty/EXAMPLES.md).
+
+### `Linx.Netlink` — netlink sockets, rtnetlink
+
+An `AF_NETLINK` client with the rtnetlink family fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
+
+```elixir
+iex> alias Linx.Netlink.Rtnl
+iex> alias Linx.Netlink.Rtnl.Link
+
+iex> {:ok, sock} = Rtnl.open()
+iex> {:ok, links} = Link.list(sock)
+[#Linx.Netlink.Rtnl.Link<"lo" (1) UP MTU=65536>,
+ #Linx.Netlink.Rtnl.Link<"eth0" (2) UP MTU=1500>, ...]
+```
+
+**rtnetlink resources** with full CRUD across IPv4 and IPv6:
+
+- **Links** — `list` / `get` / `delete` / `move_to_netns` / `set_{up,down,mtu,name,address,master}`, plus virtual-link constructors: `macvlan`, `ipvlan`, `veth`, `vlan`, `bridge`, `dummy`.
+- **Addresses** — `list` (all / per-link), `add`, `delete`.
+- **Routes** — `list`, `get` (destination lookup), `add` / `add_default`, `delete` / `delete_default`.
+- **Neighbours** (ARP / NDP) — `list`, `add`, `delete`.
+- **Rules** (policy routing) — `list`, `add`, `delete`.
+- **Stats** — `get` / `list` for `rtnl_link_stats64` counters.
+
+**Sockets in another netns.** `Rtnl.open({:pid, child_pid})` opens the socket from inside the target's network namespace; the socket then belongs to that netns for its whole life (the BEAM only ever briefly entered the namespace on an isolated thread). This is what makes the headline example work — configuring the child's network from the host while the child waits at the checkpoint.
+
+```elixir
+iex> {:ok, ns} = Rtnl.open({:pid, 41234})
+iex> :ok = Link.set_up(ns, "lo")
+iex> :ok = Address.add(ns, "eth0", "10.0.0.5", 24)
+iex> :ok = Route.add_default(ns, "10.0.0.1")
+```
+
+**A codec DSL** (`use Linx.Netlink.Codec`) declares each message's wire format in one `codec do … end` block and generates the struct, `encode/1`, `decode/1`, and reflection.
+
+**Rich errors.** `Linx.Netlink.Error` carries the errno as a POSIX atom plus the kernel's extended-ack message; verbs sharpen ambiguous "no such interface" into "no such *parent* interface" where they know better.
+
+More in [`docs/netlink/EXAMPLES.md`](docs/netlink/EXAMPLES.md).
+
+### Value types
+
+- **`Linx.IP`** — IPv4 or IPv6 address. The `~IP` sigil parses at compile time; `Inspect` round-trips back to the sigil. `Linx.IP.Subnet` adds `contains?/2`, `network/1`, `broadcast/1`.
+
+  ```elixir
+  iex> ~IP"192.168.1.1"
+  ~IP"192.168.1.1"
+  iex> {:ok, net} = Linx.IP.Subnet.parse("10.0.0.0/8")
+  iex> Linx.IP.Subnet.contains?(net, ~IP"10.5.3.1")
+  true
+  ```
+
+- **`Linx.MAC`** — link-layer address. The `~MAC` sigil, same shape.
+
+Decoded netlink fields carry these structs directly; verbs accept either the struct or the equivalent string.
+
 ## How Linx is organized
 
 Three kinds of top-level module, named for what they organize:
@@ -29,59 +249,17 @@ Three kinds of top-level module, named for what they organize:
 | Kind | When | Examples |
 |---|---|---|
 | **Mechanism layer** | A coherent transport with shared infrastructure (codec, framing, error handling, …). | `Linx.Netlink` |
-| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process` (planned), `Linx.Mount` (later), `Linx.Cgroup` (later) |
+| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty` |
 | **Value type** | A domain primitive that flows through the mechanisms. Top level. | `Linx.IP`, `Linx.MAC` |
 
-The rule of thumb: name a module after a mechanism only when the mechanism has shared shape worth factoring out. Otherwise name it after the kernel subsystem or concept (`Namespace` isn't a subsystem — it's a cross-cutting flag on `clone(2)` — so it doesn't get its own module; the *operations* live where they belong).
+Naming rule of thumb: name a module after a mechanism only when the mechanism has shared shape worth factoring out. Otherwise name it after the kernel subsystem or concept. `Namespace` isn't a subsystem — it's a cross-cutting flag on `clone(2)` — so it doesn't get its own module; the *operations* live where they belong.
 
 Each subsystem owns its docs under `docs/<subsystem>/` — `EXAMPLES.md` (iex-style usage), `PLAN.md` (roadmap), `COVERAGE.md` (surface tracker), `REFERENCES.md` (external sources).
 
-## What's there today
-
-### `Linx.Netlink` — netlink sockets
-
-An `AF_NETLINK` client with the rtnetlink family fleshed out. Talks netlink directly over a `:socket` socket, encoding and decoding messages in pure Elixir; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace.
-
-Shipped today:
-
-- **Sockets** — opened in the host netns or another netns by pid or path; sequence-correlated requests; the multipart-dump engine.
-- **rtnetlink resources**, full CRUD across IPv4 and IPv6:
-  - **Links** — `list`, `get`, `delete`, `move_to_netns`, `set_{up,down,mtu,name,address,master}`, plus virtual-link constructors: `macvlan`, `ipvlan`, `veth`, `vlan`, `bridge`, `dummy`.
-  - **Addresses** — `list` (all / per-link), `add`, `delete`.
-  - **Routes** — `list`, `get` (destination lookup), `add` / `add_default`, `delete` / `delete_default`.
-  - **Neighbours** (ARP / NDP table) — `list`, `add`, `delete`.
-  - **Rules** (policy routing) — `list`, `add`, `delete`.
-  - **Stats** — `get` / `list` for `rtnl_link_stats64` counters.
-- **A codec DSL** (`use Linx.Netlink.Codec`) that declares each message's wire format in one `codec do … end` block and generates the struct, `encode/1`, `decode/1`, and reflection. Escape hatches for sub-message dispatch and custom value types.
-- **Rich errors** — `Linx.Netlink.Error` carries the errno as a POSIX atom plus the kernel's extended-ack message; verbs sharpen ambiguous "no such interface" into "no such *parent* interface" where they know better.
-
-See [`docs/netlink/EXAMPLES.md`](docs/netlink/EXAMPLES.md) for usage and [`docs/netlink/COVERAGE.md`](docs/netlink/COVERAGE.md) for what's in vs. out.
-
-### Value types
-
-- **`Linx.IP`** — IPv4 or IPv6 address. The `~IP` sigil parses at compile time; `Inspect` round-trips back to the sigil. `Linx.IP.Subnet` adds `contains?/2`, `network/1`, `broadcast/1`.
-- **`Linx.MAC`** — link-layer address. The `~MAC` sigil, same shape.
-
-Decoded netlink fields carry these structs directly; verbs accept either the struct or the equivalent string.
-
 ## What's next
 
-### `Linx.Process` — clone, setns, unshare *(active, feature branch)*
-
-The next subsystem. Provides process-lifecycle primitives, starting with `clone(2)` with namespace flags so a caller can spawn a child in fresh namespaces of selected types. Setns and unshare follow.
-
-Architecturally, `clone()`/`fork()`/`unshare()` inside the multithreaded BEAM corrupts the VM — so the actual syscall runs in a small external C agent (a Port, not a NIF), with a checkpoint protocol over fd 3/4 letting the orchestrator do host-side setup before the child execs.
-
-This composes with `Linx.Netlink` cleanly: clone with `CLONE_NEWNET` → `Linx.Netlink.Socket.open(0, {:pid, child_pid})` to drive netlink inside the new netns → `proceed/1` past the checkpoint → child execs.
-
-### Coming later
-
-- **`Linx.Mount`** — mount, `pivot_root`, `open_tree`, `mount_setattr`.
-- **`Linx.Cgroup`** — cgroup v2 controllers (`memory.max`, `pids.max`, `cpu.max`, freezer, …).
-- **`Linx.Tty`** — PTY pair creation, terminal mode control, tty ioctls, plus an `attach/2` byte-pumping helper. Composes with `Linx.Process`'s `:pty` stdio directive to enable, for example, this on a Nerves device:
-
-  > SSH in, land at `iex>`, type `Linx.Process.spawn(argv: ["/bin/bash"], namespaces: [...], stdio: :pty)` then `Linx.Tty.attach(:controlling, child)` — and your `iex>` *becomes* the container's bash until you `exit`, at which point the `iex>` prompt is back. The `docker attach` / `kubectl exec -it` experience, end-to-end inside the BEAM.
-
+- **`Linx.Mount`** — `mount(2)`, `pivot_root`, `open_tree`, `mount_setattr`. The piece between cloning a `:mount` namespace and having a useful container rootfs.
+- **`Linx.Cgroup`** — cgroup v2 controllers (`memory.max`, `pids.max`, `cpu.max`, freezer, …). Resource limits for spawned workloads.
 - **Within `Linx.Netlink`** — a `Connection` GenServer for concurrent in-flight requests; a `Monitor` for multicast event subscription (the `ip monitor` equivalent); the `NETLINK_GENERIC` family and its subsystems (WireGuard, ethtool, …); more link kinds (`bond`, `vxlan`, `tun`/`tap`).
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.
