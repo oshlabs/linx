@@ -14,18 +14,28 @@
  * big-endian length prefix followed by an Erlang External Term Format
  * payload; ETF means the BEAM side needs no codec.
  *
- * P1: CLONE + CHECKPOINT
- * ----------------------
- * The BEAM sends one {:spawn, %{argv: [...], namespaces: [...], env: [...]}}
- * request on fd 3. We clone() a child with the requested CLONE_NEW* flags
- * and report its host pid as {:status, :spawned, _}; the child reaches the
- * checkpoint, the parent reports {:status, :ready, child_pid_inside_ns};
- * the BEAM does host-side setup (e.g. moves a netlink interface into the
- * new netns) and replies :proceed; the parent forwards that to the child
- * over an internal pipe; the child execve()s the workload and the parent
- * reports {:status, :running, _}. On waitpid, {:status, :exited, code}
- * or {:status, :signaled, signum} terminates the session. Pre-exec
- * failures arrive as {:error, errno, stage}.
+ * TWO MODES
+ * ---------
+ * The BEAM sends one of two requests on fd 3:
+ *
+ *   {:spawn, %{argv, namespaces?, env?}}
+ *     -- clone() a child with the requested CLONE_NEW* flags. The child
+ *        is born in those fresh namespaces.
+ *
+ *   {:enter, %{target, argv, namespaces?, env?}}
+ *     -- setns() the agent itself into the namespaces of host pid
+ *        `target`, then fork(). The fork's child inherits those
+ *        namespaces. `namespaces` chooses which of the target's
+ *        namespaces to join; if absent, join all of them.
+ *
+ * Both modes share the rest of the protocol: the parent reports the host
+ * pid as {:status, :spawned, _}, the child reaches the checkpoint and
+ * the parent reports {:status, :ready, child_pid_inside_ns}, the BEAM
+ * does any host-side setup and replies :proceed, the parent forwards
+ * that to the child over an internal pipe, the child execve()s and the
+ * parent reports {:status, :running, _}. On waitpid,
+ * {:status, :exited, code} or {:status, :signaled, signum} terminates
+ * the session. Pre-exec failures arrive as {:error, errno, stage}.
  *
  * THE RELAY
  * ---------
@@ -73,6 +83,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/signalfd.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -99,23 +110,32 @@ static const char *stage_name(enum stage s)
 	return "unknown";
 }
 
-/* Namespace flags the spawn request can ask for, by Elixir atom name. The
- * order does not matter -- the flags are OR'd together before clone(). */
-struct ns_flag {
-	const char *name;
+/* Namespace types the agent knows about. `atom` is the name on the Elixir
+ * side and on the wire; `proc` is the filename under /proc/<pid>/ns/
+ * (note that the mount namespace is `mnt` in procfs, not `mount`); `flag`
+ * is the CLONE_NEW* bit for `clone(2)` in create mode.
+ *
+ * The list is in setns-safe order for enter mode: user first (so any
+ * later setns calls have capabilities in the new user namespace), pid
+ * last (it only takes effect on future fork()s, so must happen before
+ * the fork). The order is irrelevant for create mode, where the flags
+ * are OR'd into a single clone() call. */
+struct ns_info {
+	const char *atom;
+	const char *proc;
 	int flag;
 };
 
-static const struct ns_flag NS_FLAGS[] = {
-	{ "net",    CLONE_NEWNET },
-	{ "mount",  CLONE_NEWNS },
-	{ "pid",    CLONE_NEWPID },
-	{ "uts",    CLONE_NEWUTS },
-	{ "ipc",    CLONE_NEWIPC },
-	{ "user",   CLONE_NEWUSER },
-	{ "cgroup", CLONE_NEWCGROUP },
-	{ "time",   CLONE_NEWTIME },
-	{ NULL, 0 },
+static const struct ns_info NS_INFO[] = {
+	{ "user",   "user",   CLONE_NEWUSER },
+	{ "mount",  "mnt",    CLONE_NEWNS },
+	{ "uts",    "uts",    CLONE_NEWUTS },
+	{ "ipc",    "ipc",    CLONE_NEWIPC },
+	{ "cgroup", "cgroup", CLONE_NEWCGROUP },
+	{ "net",    "net",    CLONE_NEWNET },
+	{ "time",   "time",   CLONE_NEWTIME },
+	{ "pid",    "pid",    CLONE_NEWPID },
+	{ NULL, NULL, 0 },
 };
 
 /* --- low-level I/O on fd 3/4 -------------------------------------------- */
@@ -230,15 +250,30 @@ static void emit_error(int err, const char *stage)
 	emit_buff(&x);
 }
 
-/* --- the spawn request: parse {:spawn, %{argv, namespaces, env}} ------- */
+/* --- the request: parse {:spawn, _} or {:enter, _} -------------------- */
 
-/* The parsed shape of a {:spawn, _} request. argv/env are NULL-terminated
- * arrays of malloc'd C strings (suitable for execve); ns_flags is the OR
- * of CLONE_NEW* flags from the requested :namespaces. */
-struct spawn_req {
+enum req_mode { MODE_SPAWN, MODE_ENTER };
+
+/* The parsed shape of an inbound request.
+ *   mode      -- which kind of request.
+ *   target    -- enter mode: the host pid of the process whose namespaces
+ *                we should join. Unused in spawn mode.
+ *   argv/env  -- NULL-terminated arrays of malloc'd C strings (suitable
+ *                for execve directly).
+ *   ns_flags  -- OR of CLONE_NEW* flags. In spawn mode: which namespaces
+ *                to create fresh; defaults to 0 (none) if :namespaces is
+ *                omitted. In enter mode: which of the target's namespaces
+ *                to join, when explicitly listed.
+ *   all_ns    -- enter mode only: 1 if :namespaces was *not* listed in
+ *                the request, meaning "join every namespace the target
+ *                has". 0 if :namespaces was listed (use ns_flags).  */
+struct request {
+	enum req_mode mode;
+	pid_t target;
 	char **argv;
 	char **env;
 	int ns_flags;
+	int all_ns;
 };
 
 static void free_str_array(char **arr)
@@ -250,7 +285,7 @@ static void free_str_array(char **arr)
 	free(arr);
 }
 
-static void free_spawn_req(struct spawn_req *r)
+static void free_request(struct request *r)
 {
 	free_str_array(r->argv);
 	free_str_array(r->env);
@@ -321,7 +356,7 @@ static int decode_string_list(const char *buf, int *idx, char ***out)
 	return 0;
 }
 
-/* Decode a list of namespace atoms into ns_flags. */
+/* Decode a list of namespace atoms into a CLONE_NEW* bitmask. */
 static int decode_ns_list(const char *buf, int *idx, int *flags_out)
 {
 	int arity;
@@ -335,9 +370,9 @@ static int decode_ns_list(const char *buf, int *idx, int *flags_out)
 			return -1;
 
 		int matched = 0;
-		for (const struct ns_flag *f = NS_FLAGS; f->name; f++) {
-			if (strcmp(atom, f->name) == 0) {
-				flags |= f->flag;
+		for (const struct ns_info *info = NS_INFO; info->atom; info++) {
+			if (strcmp(atom, info->atom) == 0) {
+				flags |= info->flag;
 				matched = 1;
 				break;
 			}
@@ -359,23 +394,38 @@ static int decode_ns_list(const char *buf, int *idx, int *flags_out)
 	return 0;
 }
 
-/* Decode the inbound {:spawn, %{argv: [...], namespaces: [...], env: [...]}}
- * frame in `buf` into `req`. Returns 0 on success, -1 on malformed input. */
-static int decode_spawn_request(const uint8_t *buf, int len, struct spawn_req *req)
+/* Decode the inbound request, either:
+ *   {:spawn, %{argv, namespaces?, env?}}
+ *   {:enter, %{target, argv, namespaces?, env?}}
+ * Returns 0 on success, -1 on malformed input. */
+static int decode_request(const uint8_t *buf, int len, struct request *req)
 {
+	(void)len;
+
+	/* Sane defaults. all_ns is meaningful only in enter mode and is
+	 * lowered the moment the caller mentioned :namespaces explicitly. */
+	req->all_ns = 1;
+
 	int idx = 0, version;
 	if (ei_decode_version((const char *)buf, &idx, &version) < 0)
 		return -1;
 
 	int arity;
-	if (ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0 || arity != 2)
+	if (ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0 ||
+	    arity != 2)
 		return -1;
 
 	char tag[MAXATOMLEN];
 	if (ei_decode_atom((const char *)buf, &idx, tag) < 0)
 		return -1;
-	if (strcmp(tag, "spawn") != 0)
+
+	if (strcmp(tag, "spawn") == 0) {
+		req->mode = MODE_SPAWN;
+	} else if (strcmp(tag, "enter") == 0) {
+		req->mode = MODE_ENTER;
+	} else {
 		return -1;
+	}
 
 	if (ei_decode_map_header((const char *)buf, &idx, &arity) < 0)
 		return -1;
@@ -392,8 +442,15 @@ static int decode_spawn_request(const uint8_t *buf, int len, struct spawn_req *r
 			if (decode_string_list((const char *)buf, &idx, &req->env) < 0)
 				return -1;
 		} else if (strcmp(key, "namespaces") == 0) {
+			req->all_ns = 0;
 			if (decode_ns_list((const char *)buf, &idx, &req->ns_flags) < 0)
 				return -1;
+		} else if (strcmp(key, "target") == 0) {
+			long t;
+			if (ei_decode_long((const char *)buf, &idx, &t) < 0 ||
+			    t <= 0)
+				return -1;
+			req->target = (pid_t)t;
 		} else {
 			/* Skip unknown keys -- the BEAM may carry extras we
 			 * don't yet understand; future-compatibility. */
@@ -401,8 +458,87 @@ static int decode_spawn_request(const uint8_t *buf, int len, struct spawn_req *r
 		}
 	}
 
-	(void)len;
-	return req->argv && req->argv[0] ? 0 : -1;
+	if (!req->argv || !req->argv[0])
+		return -1;
+	if (req->mode == MODE_ENTER && req->target <= 0)
+		return -1;
+
+	return 0;
+}
+
+/* --- entering an existing target's namespaces (P3) --------------------- */
+
+/* Walk the canonical NS_INFO list and join the target's namespaces. The
+ * order in NS_INFO is setns-safe: user first (so later calls have the
+ * capabilities a fresh user namespace grants), pid last (it only takes
+ * effect on future fork()s, so must precede the fork below).
+ *
+ * Two modes:
+ *   req->all_ns == 1 -- :namespaces was *not* in the request. Join every
+ *     namespace the target has; silently skip a type whose
+ *     /proc/<pid>/ns file is missing (e.g. CLONE_NEWTIME on an old
+ *     kernel).
+ *   req->all_ns == 0 -- :namespaces was listed. Join exactly the ones
+ *     whose flag is set in req->ns_flags; any failure surfaces as
+ *     {:error, errno, :open_ns | :setns} on fd 4.
+ *
+ * On a real failure (in either mode), emits :error and returns -1. */
+/* The agent and target share a given namespace iff their /proc/<pid>/ns/<type>
+ * files point at the same inode. Used to skip no-op setns calls -- entering
+ * the namespace you're already in returns EINVAL on some kernels (notably
+ * the user namespace), and is wasteful even where it doesn't. */
+static int same_namespace(pid_t target, const char *proc_name)
+{
+	char self_path[64], target_path[64];
+	snprintf(self_path, sizeof self_path, "/proc/self/ns/%s", proc_name);
+	snprintf(target_path, sizeof target_path, "/proc/%d/ns/%s",
+		 (int)target, proc_name);
+
+	struct stat ss, ts;
+	if (stat(self_path, &ss) < 0 || stat(target_path, &ts) < 0)
+		return 0;
+	return ss.st_ino == ts.st_ino && ss.st_dev == ts.st_dev;
+}
+
+static int enter_target_namespaces(const struct request *req)
+{
+	for (const struct ns_info *info = NS_INFO; info->atom; info++) {
+		if (!req->all_ns && !(req->ns_flags & info->flag))
+			continue;
+
+		/* Already in the target's namespace of this type -- no setns
+		 * needed; some kernels return EINVAL for setns-to-self. */
+		if (same_namespace(req->target, info->proc))
+			continue;
+
+		char path[64];
+		snprintf(path, sizeof path, "/proc/%d/ns/%s",
+			 (int)req->target, info->proc);
+
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0) {
+			if (req->all_ns && errno == ENOENT)
+				continue;
+			/* Error stage names the namespace so the BEAM-side
+			 * error can pinpoint which type failed -- e.g.
+			 * :open_ns_time, :setns_user. */
+			char stage[32];
+			snprintf(stage, sizeof stage, "open_ns_%s", info->atom);
+			emit_error(errno, stage);
+			return -1;
+		}
+
+		if (setns(fd, 0) < 0) {
+			int err = errno;
+			close(fd);
+			char stage[32];
+			snprintf(stage, sizeof stage, "setns_%s", info->atom);
+			emit_error(err, stage);
+			return -1;
+		}
+		close(fd);
+	}
+	return 0;
 }
 
 /* --- the cloned child --------------------------------------------------- */
@@ -658,10 +794,10 @@ int main(void)
 		return 1;
 	}
 
-	struct spawn_req req = { 0 };
-	if (decode_spawn_request(req_buf, (int)req_len, &req) < 0) {
-		fprintf(stderr, "linx_process: malformed spawn request\n");
-		free_spawn_req(&req);
+	struct request req = { 0 };
+	if (decode_request(req_buf, (int)req_len, &req) < 0) {
+		fprintf(stderr, "linx_process: malformed request\n");
+		free_request(&req);
 		return 2;
 	}
 
@@ -678,12 +814,9 @@ int main(void)
 	int c2p[2], p2c[2];
 	if (pipe2(c2p, O_CLOEXEC) < 0 || pipe2(p2c, 0) < 0) {
 		fprintf(stderr, "linx_process: pipe2: %s\n", strerror(errno));
-		free_spawn_req(&req);
+		free_request(&req);
 		return 4;
 	}
-
-	/* The child stack must be aligned and we pass its *top* to clone. */
-	static char child_stack[CHILD_STACK_SIZE];
 
 	struct child_args ca = {
 		.c2p_w = c2p[1],
@@ -692,15 +825,53 @@ int main(void)
 		.env = child_env,
 	};
 
-	/* CLONE_NEW* flags chosen by the request, OR'd with SIGCHLD so
-	 * waitpid sees the child the way it does for fork(2). */
-	int flags = req.ns_flags | SIGCHLD;
+	pid_t pid;
 
-	pid_t pid = clone(child_fn, child_stack + CHILD_STACK_SIZE, flags, &ca);
-	if (pid < 0) {
-		emit_error(errno, "clone");
-		free_spawn_req(&req);
-		return 3;
+	switch (req.mode) {
+	case MODE_SPAWN: {
+		/* CLONE_NEW* flags chosen by the request, OR'd with SIGCHLD so
+		 * waitpid sees the child the way it does for fork(2). The
+		 * child runs on its own private stack -- 1 MiB is ample for
+		 * the work it does (no recursion, no large frames). */
+		static char child_stack[CHILD_STACK_SIZE];
+		int flags = req.ns_flags | SIGCHLD;
+
+		pid = clone(child_fn, child_stack + CHILD_STACK_SIZE, flags, &ca);
+		if (pid < 0) {
+			emit_error(errno, "clone");
+			free_request(&req);
+			return 3;
+		}
+		break;
+	}
+
+	case MODE_ENTER: {
+		/* Join the target's namespaces *in the agent* before forking
+		 * -- so the fork's child is born inside them. setns is per
+		 * thread, the agent is single-threaded, and PID-namespace
+		 * setns only takes effect on subsequent forks. */
+		if (enter_target_namespaces(&req) < 0) {
+			free_request(&req);
+			return 3;
+		}
+
+		pid = fork();
+		if (pid < 0) {
+			emit_error(errno, "fork");
+			free_request(&req);
+			return 3;
+		}
+		if (pid == 0) {
+			/* Child: close the parent ends of our internal pipes
+			 * and reuse the same checkpoint+execve logic the
+			 * cloned-child path runs. */
+			close(c2p[0]);
+			close(p2c[1]);
+			child_fn(&ca);
+			_exit(127); /* unreachable */
+		}
+		break;
+	}
 	}
 
 	/* Close the child's ends of the internal pipes in the parent. The
@@ -716,13 +887,13 @@ int main(void)
 	uint8_t ready_tag;
 	if (read_exact(c2p[0], &ready_tag, 1) < 0 || ready_tag != 'R') {
 		fprintf(stderr, "linx_process: child did not send ready\n");
-		free_spawn_req(&req);
+		free_request(&req);
 		return 4;
 	}
 	uint8_t ready_pid[4];
 	if (read_exact(c2p[0], ready_pid, sizeof ready_pid) < 0) {
 		fprintf(stderr, "linx_process: short ready frame\n");
-		free_spawn_req(&req);
+		free_request(&req);
 		return 4;
 	}
 	long child_pid = ((long)ready_pid[0] << 24) | ((long)ready_pid[1] << 16) |
@@ -732,14 +903,14 @@ int main(void)
 	/* Wait for :proceed from the BEAM, forward as 'P' to the child. */
 	if (await_proceed() < 0) {
 		fprintf(stderr, "linx_process: expected :proceed from BEAM\n");
-		free_spawn_req(&req);
+		free_request(&req);
 		return 1;
 	}
 	uint8_t go = 'P';
 	if (write_exact(p2c[1], &go, 1) < 0) {
 		fprintf(stderr, "linx_process: write proceed to child: %s\n",
 			strerror(errno));
-		free_spawn_req(&req);
+		free_request(&req);
 		return 4;
 	}
 	close(p2c[1]);
@@ -754,13 +925,13 @@ int main(void)
 		 * zombie, then exit. */
 		int status;
 		waitpid(pid, &status, 0);
-		free_spawn_req(&req);
+		free_request(&req);
 		return 0;
 	}
 
 	if (outcome < 0) {
 		fprintf(stderr, "linx_process: relay error before exec\n");
-		free_spawn_req(&req);
+		free_request(&req);
 		return 4;
 	}
 
@@ -774,13 +945,13 @@ int main(void)
 	if (sigfd < 0) {
 		fprintf(stderr, "linx_process: signalfd: %s\n",
 			strerror(errno));
-		free_spawn_req(&req);
+		free_request(&req);
 		return 4;
 	}
 
 	supervise(pid, sigfd);
 	close(sigfd);
 
-	free_spawn_req(&req);
+	free_request(&req);
 	return 0;
 }

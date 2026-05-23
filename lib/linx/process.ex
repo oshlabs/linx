@@ -56,6 +56,36 @@ defmodule Linx.Process do
 
   @valid_namespaces ~w(net mount pid uts ipc user cgroup time)a
 
+  # Atoms the C agent can send back as the `stage` field of {:error, errno,
+  # stage}. The Port's data is decoded with `:safe`, which requires every
+  # atom in the term to already exist in the BEAM — so this list exists
+  # solely to ensure these atoms are loaded at module compile time. (Naming
+  # mirrors what the agent emits: `setns_<ns>` / `open_ns_<ns>` per type.)
+  @error_stages [
+    :execve,
+    :clone,
+    :fork,
+    :setns_user,
+    :setns_mount,
+    :setns_uts,
+    :setns_ipc,
+    :setns_cgroup,
+    :setns_net,
+    :setns_time,
+    :setns_pid,
+    :open_ns_user,
+    :open_ns_mount,
+    :open_ns_uts,
+    :open_ns_ipc,
+    :open_ns_cgroup,
+    :open_ns_net,
+    :open_ns_time,
+    :open_ns_pid
+  ]
+
+  @doc false
+  def __error_stages__, do: @error_stages
+
   @doc """
   Spawns a child process via `clone(2)`, optionally into fresh namespaces.
 
@@ -77,8 +107,8 @@ defmodule Linx.Process do
   def spawn(opts) do
     owner = Keyword.get(opts, :owner, self())
 
-    with {:ok, request} <- build_request(opts) do
-      GenServer.start_link(__MODULE__, {request, owner})
+    with {:ok, request} <- build_spawn_request(opts) do
+      GenServer.start_link(__MODULE__, {{:spawn, request}, owner})
     end
   end
 
@@ -86,10 +116,39 @@ defmodule Linx.Process do
   Runs a new process *inside* an existing target's namespaces via
   `setns(2)` + `execve(2)`.
 
-  Lands in P3; today returns `{:error, :not_yet_implemented}`.
+  The agent opens `/proc/<target_pid>/ns/<type>` for each namespace
+  type and `setns(2)`s into each, then `fork(2)`s — the child inherits
+  the target's namespaces and `execve`s the workload there. Same
+  checkpoint protocol as `spawn/1`: the owner gets `:ready` →
+  `proceed/1` → `:running` → terminal.
+
+  `target_pid` is the *host* pid of the process whose namespaces you
+  want to join (the pid you saw in `{:linx_process, :ready, _}` when
+  `:pid` was *not* in that session's `:namespaces`, or the host pid
+  reported by `Linx.Process.info/1` for sessions that include
+  `:pid`).
+
+  `opts`:
+
+    * `:argv` (required) — the workload argv.
+    * `:namespaces` — which of the target's namespaces to join.
+      Defaults to *all* — every namespace type the target has under
+      `/proc/<target>/ns/`. Pass a list (e.g. `[:net]`) to join only
+      those.
+    * `:env` — workload environment as `["KEY=VAL", …]`. Defaults to
+      inherit.
+    * `:owner` — pid to receive lifecycle events. Defaults to the
+      caller.
   """
   @spec enter(pos_integer, keyword) :: {:ok, t()} | {:error, term}
-  def enter(_target_pid, _opts), do: {:error, :not_yet_implemented}
+  def enter(target_pid, opts)
+      when is_integer(target_pid) and target_pid > 0 and is_list(opts) do
+    owner = Keyword.get(opts, :owner, self())
+
+    with {:ok, request} <- build_enter_request(target_pid, opts) do
+      GenServer.start_link(__MODULE__, {{:enter, request}, owner})
+    end
+  end
 
   @doc """
   Advances the child past the checkpoint: the agent forwards `:proceed`
@@ -175,11 +234,25 @@ defmodule Linx.Process do
 
   # --- input validation -----------------------------------------------------
 
-  defp build_request(opts) do
+  defp build_spawn_request(opts) do
     with {:ok, argv} <- fetch_argv(opts),
          {:ok, namespaces} <- fetch_namespaces(opts),
          {:ok, env} <- fetch_env(opts) do
       request = %{argv: argv, namespaces: namespaces}
+      request = if env, do: Map.put(request, :env, env), else: request
+      {:ok, request}
+    end
+  end
+
+  # Enter mode omits :namespaces from the request map when the caller did
+  # not specify one — the C side treats an absent :namespaces key as
+  # "join every namespace the target has under /proc/<pid>/ns/".
+  defp build_enter_request(target_pid, opts) do
+    with {:ok, argv} <- fetch_argv(opts),
+         {:ok, namespaces} <- fetch_optional_namespaces(opts),
+         {:ok, env} <- fetch_env(opts) do
+      request = %{target: target_pid, argv: argv}
+      request = if namespaces, do: Map.put(request, :namespaces, namespaces), else: request
       request = if env, do: Map.put(request, :env, env), else: request
       {:ok, request}
     end
@@ -209,6 +282,24 @@ defmodule Linx.Process do
     end
   end
 
+  # As above, but `:error` from Keyword.fetch — "key absent" — passes
+  # through as `{:ok, nil}` so build_enter_request can elide :namespaces
+  # from the wire request altogether.
+  defp fetch_optional_namespaces(opts) do
+    case Keyword.fetch(opts, :namespaces) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, list} when is_list(list) ->
+        if Enum.all?(list, &(&1 in @valid_namespaces)),
+          do: {:ok, list},
+          else: {:error, {:bad_namespaces, list -- @valid_namespaces}}
+
+      _ ->
+        {:error, :bad_namespaces}
+    end
+  end
+
   defp fetch_env(opts) do
     case Keyword.fetch(opts, :env) do
       :error ->
@@ -227,7 +318,7 @@ defmodule Linx.Process do
   # --- GenServer ------------------------------------------------------------
 
   @impl true
-  def init({request, owner}) do
+  def init({command, owner}) when is_tuple(command) and tuple_size(command) == 2 do
     binary = Path.join(:code.priv_dir(:linx), "linx_process")
 
     if not File.exists?(binary) do
@@ -239,7 +330,7 @@ defmodule Linx.Process do
           [:binary, :nouse_stdio, {:packet, 4}, :exit_status]
         )
 
-      Port.command(port, :erlang.term_to_binary({:spawn, request}))
+      Port.command(port, :erlang.term_to_binary(command))
 
       state = %{
         port: port,

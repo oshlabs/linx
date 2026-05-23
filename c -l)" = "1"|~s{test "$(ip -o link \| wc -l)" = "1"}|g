@@ -1,0 +1,2 @@
+          argv: ["/bin/sh", "-c", test "$(ip -o link |test "$(ip -o link | wc -l)" = "1"|]
+          argv: ["/bin/sh", "-c", test "$(ip -o link |test "$(ip -o link | wc -l)" = "1"|]

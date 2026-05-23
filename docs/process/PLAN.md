@@ -1,10 +1,11 @@
 # Linx.Process — implementation plan
 
-> **P0, P1 and P2 have shipped** on branch `process-foundations`: the
+> **P0–P3 have shipped** on branch `process-foundations`: the
 > Port-based agent, `Linx.Process.spawn/1` with the checkpoint protocol,
 > namespace selection (`:net` verified end-to-end against `Linx.Netlink`),
 > structured pre-exec errors, `proceed/1`, `signal/2` (with pre-running
-> buffering), and `wait/1`/`wait/2`. P3–P4 below are the roadmap.
+> buffering), `wait/1`/`wait/2`, and `enter/2` for joining an existing
+> target's namespaces. P4 below is the roadmap.
 
 ## Goal
 
@@ -173,14 +174,28 @@ code that needs them; commit + push per milestone.
 
 ### P3 — `Linx.Process.enter/2`: exec inside an existing process
 
-- Agent (enter mode): `setns()` into the target's namespaces (using
-  `/proc/<pid>/ns/*` fds), then the checkpoint, then `execve`. No `clone()`.
-- Elixir: `Linx.Process.enter(target_pid, opts)` — same event surface as
-  `spawn/1`. `opts` accepts `:namespaces` to choose *which* of the target's
-  namespaces to join (default all available).
-- **Tests:** integration — spawn a child in a fresh netns (P1), enter it
-  with `enter/2` running `/bin/sh -c 'ip addr | grep lo'`, capture exit
-  status, assert success.
+✅ **Shipped.**
+
+- Agent (enter mode): `setns()` into the target's namespaces (one
+  `open(/proc/<target>/ns/<type>, O_RDONLY|O_CLOEXEC)` + `setns(fd, 0)`
+  per type, in setns-safe order — user first, pid last), then `fork()`,
+  then the same checkpoint + `execve` path the cloned-child uses. The
+  agent skips `setns` for any type whose `/proc/<self>/ns/<type>`
+  inode already matches the target's (some kernels return `EINVAL` for
+  setns-to-self, notably user namespaces).
+- Elixir: `Linx.Process.enter(target_pid, opts)` — same event surface
+  as `spawn/1`. `opts` accepts `:namespaces` to choose *which* of the
+  target's namespaces to join; absent means "all of the target's
+  namespace types that exist".
+- Pre-exec failures carry namespace-specific stage atoms —
+  `:setns_user`, `:open_ns_pid`, etc. — so the BEAM can pinpoint
+  which namespace type couldn't be joined.
+- **Tests:** plain — input validation (positive pid, argv required).
+  Integration — spawn `/bin/sleep 60` in a fresh netns, enter that
+  netns with `/bin/sh -c 'test "$(ip -o link | wc -l)" = "1"'` and
+  assert `:exited 0` (only `lo` visible inside the target's netns).
+  Both `:namespaces` not specified (join all) and `:namespaces: [:net]`
+  (explicit) covered.
 
 ### P4 — Stdio plumbing primitives (including PTY)
 

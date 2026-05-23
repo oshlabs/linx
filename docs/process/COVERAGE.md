@@ -25,7 +25,7 @@ A living doc — update as primitives ship. Status legend:
 | `wait/1` (synchronous wait for terminal event) | ✅ | P2 — with timeout in `wait/2` |
 | Exit status via `waitpid(2)` | ✅ | P1 (drives `:exited` / `:signaled`) |
 | `info/1` (state snapshot) | ⬜ | grows with the GenServer state |
-| `enter/2` (`setns(2)` + `execve`) | ⬜ | P3 |
+| `enter/2` (`setns(2)` + `execve`) | ✅ | P3 — joins target's namespaces (default all), skips same-as-self |
 
 ## Namespaces (as `CLONE_NEW*` flags on `spawn/1`)
 

@@ -170,6 +170,51 @@ iex> P.wait(child)
 {:ok, {:signaled, 9}}
 ```
 
+## Entering an existing process's namespaces
+
+`enter/2` runs a new workload *inside* an existing target's namespaces
+— the equivalent of `nsenter --target <pid> -- <cmd>` or `docker exec`.
+
+```elixir
+# Spawn a long-running container with a fresh netns.
+iex> {:ok, ct} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
+iex> receive do {:linx_process, :ready, target_pid} -> target_pid end
+41234
+iex> P.proceed(ct)
+iex> receive do {:linx_process, :running} -> :ok end
+
+# Run a probe inside that container's namespaces.
+iex> {:ok, probe} = P.enter(41234, argv: ["/bin/sh", "-c", "ip -o link | wc -l"])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.proceed(probe)
+iex> P.wait(probe)
+{:ok, {:exited, 0}}   # the shell printed "1\n" -- only `lo` in there
+
+# Clean up the container.
+iex> P.signal(ct, 9)
+iex> P.wait(ct)
+{:ok, {:signaled, 9}}
+```
+
+By default `enter/2` joins *every* namespace the target has — every
+file under `/proc/<target>/ns/`. Pass `:namespaces` to narrow it:
+
+```elixir
+# Join only the target's net namespace; mount/pid/etc. stay the
+# caller's (so /sbin/ip is still resolvable from the host's rootfs).
+iex> P.enter(target_pid, namespaces: [:net], argv: ["/bin/sh", "-c", "..."])
+```
+
+Pre-exec failures from enter carry namespace-specific stage atoms —
+`:setns_user`, `:open_ns_pid`, etc. — so the failing namespace is
+visible in `{:linx_process, :error, errno, stage}`:
+
+```elixir
+iex> P.enter(99999999, argv: ["/bin/true"])    # bogus target pid
+iex> flush()
+{:linx_process, :error, 2, :open_ns_user}      # ENOENT opening /proc/.../ns/user
+```
+
 ## Error paths
 
 ```elixir
@@ -190,7 +235,6 @@ iex> P.spawn(argv: ["/bin/true"], namespaces: [:typo])
 
 ## Not yet implemented
 
-`enter/2` (P3), `info/1`, `pty_master/1` (P4), and `:stdio`
-directives are still stubs — they return
-`{:error, :not_yet_implemented}` for now. See `PLAN.md` for the
-roadmap.
+`info/1`, `pty_master/1` (P4), and `:stdio` directives are still stubs
+— they return `{:error, :not_yet_implemented}` for now. See `PLAN.md`
+for the roadmap.

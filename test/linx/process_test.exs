@@ -177,4 +177,65 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :exited, 0}, 2_000
     end
   end
+
+  describe "enter/2" do
+    test "rejects a non-positive target pid" do
+      assert_raise FunctionClauseError, fn -> P.enter(0, argv: ["/bin/true"]) end
+      assert_raise FunctionClauseError, fn -> P.enter(-1, argv: ["/bin/true"]) end
+    end
+
+    test "rejects opts without :argv" do
+      assert {:error, :argv_required} = P.enter(1, [])
+    end
+
+    # The motivating use case: spawn a child in a fresh netns and then
+    # enter that netns from elsewhere to run a probe. Joining
+    # CLONE_NEWNET (the target's netns) needs CAP_SYS_ADMIN, so
+    # :integration.
+    @tag :integration
+    test "joins a target's netns and the workload sees only its lo" do
+      {:ok, sleeper} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
+      assert_receive {:linx_process, :ready, target_pid}, 2_000
+      :ok = P.proceed(sleeper)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # The probe: a fresh netns has only `lo` -- so `ip -o link | wc -l`
+      # is exactly 1 inside it. The shell exits 0 iff that holds.
+      {:ok, prober} =
+        P.enter(target_pid,
+          argv: ["/bin/sh", "-c", "test \"$(ip -o link | wc -l)\" = \"1\""]
+        )
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(prober)
+      assert {:ok, {:exited, 0}} = P.wait(prober, 5_000)
+
+      # Clean up the sleeper.
+      :ok = P.signal(sleeper, 9)
+      assert_receive {:linx_process, :signaled, 9}, 5_000
+    end
+
+    @tag :integration
+    test "explicit :namespaces joins only the listed types" do
+      {:ok, sleeper} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
+      assert_receive {:linx_process, :ready, target_pid}, 2_000
+      :ok = P.proceed(sleeper)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # namespaces: [:net] only -- mount/pid/etc. stay the host's,
+      # netns becomes the target's. Same exit-code assertion as above.
+      {:ok, prober} =
+        P.enter(target_pid,
+          namespaces: [:net],
+          argv: ["/bin/sh", "-c", "test \"$(ip -o link | wc -l)\" = \"1\""]
+        )
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(prober)
+      assert {:ok, {:exited, 0}} = P.wait(prober, 5_000)
+
+      :ok = P.signal(sleeper, 9)
+      assert_receive {:linx_process, :signaled, 9}, 5_000
+    end
+  end
 end
