@@ -4,8 +4,10 @@ defmodule Linx.Netlink.Rtnl.Neighbour do
 
   A neighbour entry maps an IP address to a link-layer (MAC) address on a
   given interface. `list/1` and `list/2` read entries; `add/4` and `delete/3`
-  install and remove them. IPv4 and IPv6 are both supported — the address
-  family is detected from the IP string.
+  install and remove them.
+
+  `%Neighbour{}.dst` is a `Linx.IP`; `:lladdr` is a `Linx.MAC`. Verbs accept
+  either strings or the corresponding structs.
 
   The wire format — `struct ndmsg` and the `NDA_*` attributes
   (`include/uapi/linux/neighbour.h`) — is declared with the
@@ -17,6 +19,7 @@ defmodule Linx.Netlink.Rtnl.Neighbour do
   import Bitwise
   import Linx.Netlink.Constants
 
+  alias Linx.{IP, MAC}
   alias Linx.Netlink.{Request, Socket}
   alias Linx.Netlink.Rtnl.Link
 
@@ -46,13 +49,11 @@ defmodule Linx.Netlink.Rtnl.Neighbour do
     end
 
     # NDA_* — include/uapi/linux/neighbour.h.
-    attr(1, :dst, :binary)
-    attr(2, :lladdr, :binary)
+    attr(1, :dst, Linx.IP)
+    attr(2, :lladdr, Linx.MAC)
   end
 
-  @doc """
-  Lists every neighbour entry in the socket's network namespace.
-  """
+  @doc "Lists every neighbour entry in the socket's network namespace."
   @spec list(Socket.t()) :: {:ok, [t()]} | {:error, term}
   def list(%Socket{} = socket) do
     case Request.talk(socket, @rtm_getneigh, nlm_f_dump(), encode(%__MODULE__{})) do
@@ -61,9 +62,7 @@ defmodule Linx.Netlink.Rtnl.Neighbour do
     end
   end
 
-  @doc """
-  Lists the neighbour entries on link `link_name`.
-  """
+  @doc "Lists the neighbour entries on link `link_name`."
   @spec list(Socket.t(), binary) :: {:ok, [t()]} | {:error, term}
   def list(%Socket{} = socket, link_name) when is_binary(link_name) do
     with {:ok, %Link{index: index}} <- Link.get(socket, link_name),
@@ -73,23 +72,22 @@ defmodule Linx.Netlink.Rtnl.Neighbour do
   end
 
   @doc """
-  Adds a permanent neighbour entry — `ip` resolves to MAC `mac` on `link_name`.
+  Adds a permanent neighbour entry — `ip` resolves to `mac` on `link_name`.
 
-  `mac` is a colon-separated hex string, e.g. `"aa:bb:cc:dd:ee:ff"`.
+  `ip` may be a string or `Linx.IP`; `mac` may be a string or `Linx.MAC`.
   """
-  @spec add(Socket.t(), binary, binary, binary) :: :ok | {:error, term}
-  def add(%Socket{} = socket, link_name, ip, mac)
-      when is_binary(link_name) and is_binary(ip) and is_binary(mac) do
-    with {:ok, {family, addr}} <- parse_address(ip),
-         {:ok, lladdr} <- parse_mac(mac),
+  @spec add(Socket.t(), binary, binary | IP.t(), binary | MAC.t()) :: :ok | {:error, term}
+  def add(%Socket{} = socket, link_name, ip, mac) when is_binary(link_name) do
+    with {:ok, %IP{family: family} = ip_struct} <- coerce_ip(ip),
+         {:ok, %MAC{} = mac_struct} <- coerce_mac(mac),
          {:ok, %Link{index: index}} <- Link.get(socket, link_name) do
       message = %__MODULE__{
-        family: family,
+        family: family_int(family),
         ifindex: index,
         state: @nud_permanent,
         type: @rtn_unicast,
-        dst: addr,
-        lladdr: lladdr
+        dst: ip_struct,
+        lladdr: mac_struct
       }
 
       flags = nlm_f_create() ||| nlm_f_excl() ||| nlm_f_ack()
@@ -101,15 +99,16 @@ defmodule Linx.Netlink.Rtnl.Neighbour do
     end
   end
 
-  @doc """
-  Removes the neighbour entry for `ip` on link `link_name`.
-  """
-  @spec delete(Socket.t(), binary, binary) :: :ok | {:error, term}
-  def delete(%Socket{} = socket, link_name, ip)
-      when is_binary(link_name) and is_binary(ip) do
-    with {:ok, {family, addr}} <- parse_address(ip),
+  @doc "Removes the neighbour entry for `ip` on link `link_name`."
+  @spec delete(Socket.t(), binary, binary | IP.t()) :: :ok | {:error, term}
+  def delete(%Socket{} = socket, link_name, ip) when is_binary(link_name) do
+    with {:ok, %IP{family: family} = ip_struct} <- coerce_ip(ip),
          {:ok, %Link{index: index}} <- Link.get(socket, link_name) do
-      message = %__MODULE__{family: family, ifindex: index, dst: addr}
+      message = %__MODULE__{
+        family: family_int(family),
+        ifindex: index,
+        dst: ip_struct
+      }
 
       case Request.talk(socket, @rtm_delneigh, nlm_f_ack(), encode(message)) do
         {:ok, _} -> :ok
@@ -118,32 +117,20 @@ defmodule Linx.Netlink.Rtnl.Neighbour do
     end
   end
 
-  defp parse_address(string) do
-    case :inet.parse_address(String.to_charlist(string)) do
-      {:ok, {a, b, c, d}} ->
-        {:ok, {@af_inet, <<a, b, c, d>>}}
+  defp coerce_ip(%IP{} = ip), do: {:ok, ip}
+  defp coerce_ip(string) when is_binary(string), do: IP.parse(string)
 
-      {:ok, {a, b, c, d, e, f, g, h}} ->
-        {:ok, {@af_inet6, <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>}}
+  defp coerce_mac(%MAC{} = mac), do: {:ok, mac}
+  defp coerce_mac(string) when is_binary(string), do: MAC.parse(string)
 
-      {:error, _} ->
-        {:error, {:bad_address, string}}
-    end
-  end
+  defp family_int(:inet), do: @af_inet
+  defp family_int(:inet6), do: @af_inet6
 
-  defp parse_mac(mac) do
-    case String.split(mac, ":") do
-      [_, _, _, _, _, _] = parts -> parse_hex_pairs(parts, <<>>, mac)
-      _ -> {:error, {:bad_mac, mac}}
-    end
-  end
-
-  defp parse_hex_pairs([], acc, _orig), do: {:ok, acc}
-
-  defp parse_hex_pairs([h | t], acc, orig) do
-    case Integer.parse(h, 16) do
-      {n, ""} when n in 0..255 -> parse_hex_pairs(t, acc <> <<n>>, orig)
-      _ -> {:error, {:bad_mac, orig}}
+  defimpl Inspect do
+    def inspect(%{dst: dst, lladdr: lladdr, ifindex: ifindex}, _opts) do
+      dst_str = if dst, do: Linx.IP.to_string(dst), else: "?"
+      ll_part = if lladdr, do: " -> #{Linx.MAC.to_string(lladdr)}", else: ""
+      "#Linx.Netlink.Rtnl.Neighbour<#{dst_str}#{ll_part} ifindex=#{ifindex}>"
     end
   end
 end

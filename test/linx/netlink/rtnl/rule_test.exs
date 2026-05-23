@@ -1,6 +1,7 @@
 defmodule Linx.Netlink.Rtnl.RuleTest do
   use ExUnit.Case, async: true
 
+  import Linx.IP
   alias Linx.Netlink.{Rtnl, Socket}
   alias Linx.Netlink.Rtnl.Rule
 
@@ -15,7 +16,7 @@ defmodule Linx.Netlink.Rtnl.RuleTest do
       res2: 0,
       action: 1,
       flags: 0,
-      src: <<10, 0, 0, 0>>
+      src: ~IP"10.0.0.0"
     }
 
     assert Rule.decode(Rule.encode(message)) == message
@@ -36,8 +37,6 @@ defmodule Linx.Netlink.Rtnl.RuleTest do
   test "target_table/1 prefers FRA_TABLE over the header byte" do
     assert Rule.target_table(%Rule{table: 100}) == 100
     assert Rule.target_table(%Rule{table: 0, table_ext: 1000}) == 1000
-    # When both are set the 32-bit form wins — that is how the kernel
-    # actually conveys tables above 255.
     assert Rule.target_table(%Rule{table: 0, table_ext: 12345}) == 12345
   end
 

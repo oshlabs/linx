@@ -1,6 +1,7 @@
 defmodule Linx.Netlink.Rtnl.AddressTest do
   use ExUnit.Case, async: true
 
+  import Linx.IP
   alias Linx.Netlink.{Attr, Rtnl, Socket}
   alias Linx.Netlink.Rtnl.Address
 
@@ -11,8 +12,8 @@ defmodule Linx.Netlink.Rtnl.AddressTest do
       flags: 0,
       scope: 0,
       index: 3,
-      address: <<10, 0, 0, 5>>,
-      local: <<10, 0, 0, 5>>
+      address: ~IP"10.0.0.5",
+      local: ~IP"10.0.0.5"
     }
 
     # struct ifaddrmsg: family 2, prefixlen 24, flags 0, scope 0, index 3.
@@ -28,15 +29,15 @@ defmodule Linx.Netlink.Rtnl.AddressTest do
       flags: 0,
       scope: 0,
       index: 7,
-      address: <<192, 168, 1, 1>>,
-      local: <<192, 168, 1, 1>>
+      address: ~IP"192.168.1.1",
+      local: ~IP"192.168.1.1"
     }
 
     assert Address.decode(Address.encode(message)) == message
   end
 
   test "encode/decode round-trip for IPv6" do
-    addr = <<0xFE80::16, 0::16, 0::16, 0::16, 0::16, 0::16, 0::16, 1::16>>
+    ip = ~IP"fe80::1"
 
     message = %Address{
       family: 10,
@@ -44,8 +45,8 @@ defmodule Linx.Netlink.Rtnl.AddressTest do
       flags: 0,
       scope: 0,
       index: 2,
-      address: addr,
-      local: addr
+      address: ip,
+      local: ip
     }
 
     assert Address.decode(Address.encode(message)) == message
@@ -56,7 +57,7 @@ defmodule Linx.Netlink.Rtnl.AddressTest do
 
     assert {:ok, addresses} = Address.list(socket)
     # Every Linux host has loopback's 127.0.0.1.
-    assert Enum.any?(addresses, &(&1.address == <<127, 0, 0, 1>>))
+    assert Enum.any?(addresses, &(&1.address == ~IP"127.0.0.1"))
 
     assert :ok = Socket.close(socket)
   end
@@ -66,7 +67,7 @@ defmodule Linx.Netlink.Rtnl.AddressTest do
 
     assert {:ok, lo_addresses} = Address.list(socket, "lo")
     assert lo_addresses != []
-    assert Enum.any?(lo_addresses, &(&1.address == <<127, 0, 0, 1>>))
+    assert Enum.any?(lo_addresses, &(&1.address == ~IP"127.0.0.1"))
 
     assert :ok = Socket.close(socket)
   end

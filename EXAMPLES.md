@@ -16,8 +16,10 @@ iex> {:ok, sock} = Rtnl.open()
 {:ok, %Linx.Netlink.Socket{netns: :host, protocol: 0, ...}}
 
 iex> {:ok, links} = Link.list(sock)
-iex> Enum.map(links, & &1.name)
-["lo", "eth0", "wlan0"]
+iex> links
+[#Linx.Netlink.Rtnl.Link<"lo" (1) UP MTU=65536>,
+ #Linx.Netlink.Rtnl.Link<"eth0" (2) UP MTU=1500>,
+ #Linx.Netlink.Rtnl.Link<"wlan0" (3) DOWN MTU=1500>]
 
 iex> Socket.close(sock)
 :ok
@@ -32,14 +34,10 @@ reads, `:ok` or `{:error, %Linx.Netlink.Error{}}` from mutations.
 
 ```elixir
 iex> {:ok, lo} = Link.get(sock, "lo")
-{:ok, %Link{index: 1, name: "lo", type: 772, flags: 65609, mtu: 65536, ...}}
+{:ok, #Linx.Netlink.Rtnl.Link<"lo" (1) UP MTU=65536>}
 
 iex> Link.up?(lo)
 true
-
-iex> {:ok, links} = Link.list(sock)
-iex> length(links)
-4
 ```
 
 ### Addresses
@@ -48,13 +46,14 @@ iex> length(links)
 iex> alias Linx.Netlink.Rtnl.Address
 
 iex> {:ok, addresses} = Address.list(sock)
-iex> length(addresses)
-6
+iex> addresses
+[#Linx.Netlink.Rtnl.Address<127.0.0.1/8 ifindex=1>,
+ #Linx.Netlink.Rtnl.Address<::1/128 ifindex=1>,
+ #Linx.Netlink.Rtnl.Address<192.168.1.42/24 ifindex=2>, ...]
 
 iex> {:ok, lo_addrs} = Address.list(sock, "lo")
 iex> Enum.map(lo_addrs, & &1.address)
-[<<127, 0, 0, 1>>,
- <<0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1>>]  # ::1
+[~IP"127.0.0.1", ~IP"::1"]
 ```
 
 ### Routes
@@ -63,8 +62,9 @@ iex> Enum.map(lo_addrs, & &1.address)
 iex> alias Linx.Netlink.Rtnl.Route
 
 iex> {:ok, routes} = Route.list(sock)
-iex> Enum.count(routes, &(&1.family == 2))   # IPv4 routes
-3
+iex> routes
+[#Linx.Netlink.Rtnl.Route<default via 192.168.1.1 oif=2>,
+ #Linx.Netlink.Rtnl.Route<192.168.1.0/24 oif=2>, ...]
 ```
 
 ### Neighbours (ARP / NDP table)
@@ -73,7 +73,8 @@ iex> Enum.count(routes, &(&1.family == 2))   # IPv4 routes
 iex> alias Linx.Netlink.Rtnl.Neighbour
 
 iex> {:ok, neighbours} = Neighbour.list(sock)
-iex> {:ok, on_eth0} = Neighbour.list(sock, "eth0")
+iex> neighbours
+[#Linx.Netlink.Rtnl.Neighbour<192.168.1.1 -> aa:bb:cc:dd:ee:ff ifindex=2>, ...]
 ```
 
 ### Policy-routing rules
@@ -82,8 +83,10 @@ iex> {:ok, on_eth0} = Neighbour.list(sock, "eth0")
 iex> alias Linx.Netlink.Rtnl.Rule
 
 iex> {:ok, rules} = Rule.list(sock)
-iex> Enum.map(rules, &Rule.target_table/1)
-[255, 254, 253]
+iex> rules
+[#Linx.Netlink.Rtnl.Rule<table=255>,
+ #Linx.Netlink.Rtnl.Rule<priority=32766 table=254>,
+ #Linx.Netlink.Rtnl.Rule<priority=32767 table=253>]
 ```
 
 ## Creating virtual interfaces
@@ -214,6 +217,41 @@ iex> Rule.add(sock, fwmark: 0x1, table: 100, priority: 200)
 :ok
 
 iex> Rule.delete(sock, from: "10.0.0.0/24", table: 100)
+:ok
+```
+
+## IP addresses, subnets, and MAC addresses
+
+IP addresses, subnets and MAC addresses are first-class values — `Linx.IP`,
+`Linx.IP.Subnet` and `Linx.MAC` structs. Decoded netlink fields carry them
+directly, the `~IP` and `~MAC` sigils build literals at compile time, and
+verbs accept either the struct or the equivalent string.
+
+```elixir
+iex> import Linx.IP
+iex> import Linx.MAC
+
+# build values
+iex> ~IP"10.0.0.5"
+~IP"10.0.0.5"
+iex> ~IP"10.0.0.0/24"
+~IP"10.0.0.0/24"
+iex> ~MAC"02:aa:bb:cc:dd:ee"
+~MAC"02:aa:bb:cc:dd:ee"
+
+# subnet math
+iex> alias Linx.IP.Subnet
+iex> Subnet.contains?(~IP"10.0.0.0/8", ~IP"10.99.0.5")
+true
+iex> Subnet.network(~IP"10.0.42.5/24")
+~IP"10.0.42.0"
+iex> Subnet.broadcast(~IP"10.0.42.5/24")
+~IP"10.0.42.255"
+
+# verbs accept the structs directly (in addition to strings)
+iex> Address.add(sock, "eth0", ~IP"10.0.0.5", 24)
+:ok
+iex> Link.set_address(sock, "eth0", ~MAC"02:aa:bb:cc:dd:ee")
 :ok
 ```
 

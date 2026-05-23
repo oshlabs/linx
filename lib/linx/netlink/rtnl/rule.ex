@@ -14,6 +14,9 @@ defmodule Linx.Netlink.Rtnl.Rule do
   (`:from` / `:to`) — or defaults to IPv4 when only non-address selectors
   (`:fwmark`) are used.
 
+  Address-typed fields (`:src`, `:dst`) on a decoded `%Rule{}` are `Linx.IP`
+  structs.
+
   ## The two table representations
 
   `fib_rule_hdr.table` is a `u8`, so tables above 255 are conveyed via the
@@ -32,6 +35,7 @@ defmodule Linx.Netlink.Rtnl.Rule do
   import Bitwise
   import Linx.Netlink.Constants
 
+  alias Linx.IP
   alias Linx.Netlink.{Request, Socket}
 
   # rtnetlink rule message types.
@@ -60,16 +64,14 @@ defmodule Linx.Netlink.Rtnl.Rule do
     end
 
     # FRA_* — include/uapi/linux/fib_rules.h.
-    attr(1, :dst, :binary)
-    attr(2, :src, :binary)
+    attr(1, :dst, Linx.IP)
+    attr(2, :src, Linx.IP)
     attr(6, :priority, :u32)
     attr(10, :fwmark, :u32)
     attr(15, :table_ext, :u32)
   end
 
-  @doc """
-  Lists every policy-routing rule in the socket's network namespace.
-  """
+  @doc "Lists every policy-routing rule in the socket's network namespace."
   @spec list(Socket.t()) :: {:ok, [t()]} | {:error, term}
   def list(%Socket{} = socket) do
     case Request.talk(socket, @rtm_getrule, nlm_f_dump(), encode(%__MODULE__{})) do
@@ -127,7 +129,7 @@ defmodule Linx.Netlink.Rtnl.Rule do
          {:ok, {dst_family, dst, dst_len}} <- parse_cidr(Keyword.get(opts, :to)),
          {:ok, family} <- pick_family(src_family, dst_family) do
       message = %__MODULE__{
-        family: family,
+        family: family_int(family),
         src_len: src_len,
         dst_len: dst_len,
         action: @fr_act_to_tbl,
@@ -151,19 +153,19 @@ defmodule Linx.Netlink.Rtnl.Rule do
 
   defp parse_cidr(cidr) when is_binary(cidr) do
     case String.split(cidr, "/") do
-      [ip, prefix_str] ->
+      [ip_str, prefix_str] ->
         with {prefix, ""} <- Integer.parse(prefix_str),
-             {:ok, {family, bytes}} <- parse_address(ip) do
-          {:ok, {family, bytes, prefix}}
+             {:ok, %IP{family: family} = ip} <- IP.parse(ip_str) do
+          {:ok, {family, ip, prefix}}
         else
           _ -> {:error, {:bad_cidr, cidr}}
         end
 
-      [ip] ->
-        with {:ok, {family, bytes}} <- parse_address(ip) do
-          # No prefix given — treat as the full-width prefix.
-          prefix = if family == @af_inet, do: 32, else: 128
-          {:ok, {family, bytes, prefix}}
+      [ip_str] ->
+        with {:ok, %IP{family: family} = ip} <- IP.parse(ip_str) do
+          # No prefix given — treat as the family's full-width prefix.
+          prefix = if family == :inet, do: 32, else: 128
+          {:ok, {family, ip, prefix}}
         end
 
       _ ->
@@ -171,22 +173,29 @@ defmodule Linx.Netlink.Rtnl.Rule do
     end
   end
 
-  defp pick_family(nil, nil), do: {:ok, @af_inet}
+  defp pick_family(nil, nil), do: {:ok, :inet}
   defp pick_family(f, nil), do: {:ok, f}
   defp pick_family(nil, f), do: {:ok, f}
   defp pick_family(f, f), do: {:ok, f}
   defp pick_family(_, _), do: {:error, :family_mismatch}
 
-  defp parse_address(string) do
-    case :inet.parse_address(String.to_charlist(string)) do
-      {:ok, {a, b, c, d}} ->
-        {:ok, {@af_inet, <<a, b, c, d>>}}
+  defp family_int(:inet), do: @af_inet
+  defp family_int(:inet6), do: @af_inet6
 
-      {:ok, {a, b, c, d, e, f, g, h}} ->
-        {:ok, {@af_inet6, <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>}}
+  defimpl Inspect do
+    def inspect(rule, _opts) do
+      parts =
+        [
+          rule.priority && "priority=#{rule.priority}",
+          rule.src && "from=#{Linx.IP.to_string(rule.src)}/#{rule.src_len}",
+          rule.dst && "to=#{Linx.IP.to_string(rule.dst)}/#{rule.dst_len}",
+          rule.fwmark && "fwmark=0x#{Integer.to_string(rule.fwmark, 16)}",
+          "table=#{Linx.Netlink.Rtnl.Rule.target_table(rule)}"
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join(" ")
 
-      {:error, _} ->
-        {:error, {:bad_address, string}}
+      "#Linx.Netlink.Rtnl.Rule<#{parts}>"
     end
   end
 end

@@ -1,6 +1,7 @@
 defmodule Linx.Netlink.Rtnl.RouteTest do
   use ExUnit.Case, async: true
 
+  import Linx.IP
   alias Linx.Netlink.{Attr, Rtnl, Socket}
   alias Linx.Netlink.Rtnl.Route
 
@@ -12,7 +13,7 @@ defmodule Linx.Netlink.Rtnl.RouteTest do
       protocol: 3,
       scope: 0,
       type: 1,
-      gateway: <<10, 0, 0, 1>>
+      gateway: ~IP"10.0.0.1"
     }
 
     # struct rtmsg: family 2, dst_len 0, src_len 0, tos 0, table 254,
@@ -30,7 +31,7 @@ defmodule Linx.Netlink.Rtnl.RouteTest do
       protocol: 3,
       scope: 0,
       type: 1,
-      gateway: <<10, 0, 0, 1>>
+      gateway: ~IP"10.0.0.1"
     }
 
     assert Route.decode(Route.encode(message)) == message
@@ -44,15 +45,14 @@ defmodule Linx.Netlink.Rtnl.RouteTest do
       protocol: 3,
       scope: 0,
       type: 1,
-      dst: <<10, 50, 0, 0>>,
-      gateway: <<10, 99, 0, 1>>,
+      dst: ~IP"10.50.0.0",
+      gateway: ~IP"10.99.0.1",
       oif: 3
     }
 
     assert <<2, 24, 0, 0, 254, 3, 0, 1, 0::native-32, attrs::binary>> = Route.encode(message)
 
     decoded = Attr.decode(attrs)
-    # RTA_DST (1), RTA_OIF (4) and RTA_GATEWAY (5) — order matches the codec.
     assert {1, <<10, 50, 0, 0>>} in decoded
     assert {4, <<3::native-32>>} in decoded
     assert {5, <<10, 99, 0, 1>>} in decoded

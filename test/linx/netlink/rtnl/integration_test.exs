@@ -9,6 +9,8 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  import Linx.IP
+  import Linx.MAC
   alias Linx.Netlink.{Error, Rtnl, Socket}
   alias Linx.Netlink.Rtnl.{Address, Link, Neighbour, Route, Rule}
 
@@ -76,12 +78,12 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
 
     {:ok, before} = Address.list(socket, "dummy0")
-    assert Enum.any?(before, &(&1.address == <<10, 99, 0, 2>>))
+    assert Enum.any?(before, &(&1.address == ~IP"10.99.0.2"))
 
     assert :ok = Address.delete(socket, "dummy0", "10.99.0.2", 24)
 
     {:ok, after_delete} = Address.list(socket, "dummy0")
-    refute Enum.any?(after_delete, &(&1.address == <<10, 99, 0, 2>>))
+    refute Enum.any?(after_delete, &(&1.address == ~IP"10.99.0.2"))
   end
 
   test "Address.add/4 assigns an IPv6 address to a link", %{socket: socket} do
@@ -101,7 +103,7 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     {:ok, routes} = Route.list(socket)
 
     assert Enum.any?(routes, fn r ->
-             r.dst == <<10, 50, 0, 0>> and r.gateway == <<10, 99, 0, 1>>
+             r.dst == ~IP"10.50.0.0" and r.gateway == ~IP"10.99.0.1"
            end)
 
     assert :ok = Route.delete(socket, "10.50.0.0", 24, "10.99.0.1")
@@ -109,7 +111,7 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     {:ok, after_delete} = Route.list(socket)
 
     refute Enum.any?(after_delete, fn r ->
-             r.dst == <<10, 50, 0, 0>> and r.gateway == <<10, 99, 0, 1>>
+             r.dst == ~IP"10.50.0.0" and r.gateway == ~IP"10.99.0.1"
            end)
   end
 
@@ -160,8 +162,7 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
   test "set_address/3 changes a link's MAC address", %{socket: socket} do
     assert :ok = Link.set_address(socket, "dummy0", "02:11:22:33:44:55")
 
-    assert {:ok, %Link{address: <<0x02, 0x11, 0x22, 0x33, 0x44, 0x55>>}} =
-             Link.get(socket, "dummy0")
+    assert {:ok, %Link{address: ~MAC"02:11:22:33:44:55"}} = Link.get(socket, "dummy0")
   end
 
   test "decoded macvlan link carries its kind and mode via the dispatch DSL",
@@ -188,14 +189,13 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     {:ok, neighbours} = Neighbour.list(socket, "dummy0")
 
     assert Enum.any?(neighbours, fn n ->
-             n.dst == <<10, 99, 0, 10>> and
-               n.lladdr == <<0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE>>
+             n.dst == ~IP"10.99.0.10" and n.lladdr == ~MAC"02:aa:bb:cc:dd:ee"
            end)
 
     assert :ok = Neighbour.delete(socket, "dummy0", "10.99.0.10")
 
     {:ok, after_delete} = Neighbour.list(socket, "dummy0")
-    refute Enum.any?(after_delete, &(&1.dst == <<10, 99, 0, 10>>))
+    refute Enum.any?(after_delete, &(&1.dst == ~IP"10.99.0.10"))
   end
 
   test "Rule.add/2 installs a policy-routing rule, delete/2 removes it",
@@ -207,7 +207,7 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     {:ok, rules} = Rule.list(socket)
 
     assert Enum.any?(rules, fn r ->
-             r.src == <<10, 0, 0, 0>> and r.src_len == 24 and r.priority == 1000 and
+             r.src == ~IP"10.0.0.0" and r.src_len == 24 and r.priority == 1000 and
                Rule.target_table(r) == 100
            end)
 
@@ -216,7 +216,7 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     {:ok, after_delete} = Rule.list(socket)
 
     refute Enum.any?(after_delete, fn r ->
-             r.src == <<10, 0, 0, 0>> and r.priority == 1000
+             r.src == ~IP"10.0.0.0" and r.priority == 1000
            end)
   end
 end

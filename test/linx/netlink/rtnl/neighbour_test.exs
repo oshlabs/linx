@@ -1,6 +1,8 @@
 defmodule Linx.Netlink.Rtnl.NeighbourTest do
   use ExUnit.Case, async: true
 
+  import Linx.IP
+  import Linx.MAC
   alias Linx.Netlink.{Rtnl, Socket}
   alias Linx.Netlink.Rtnl.Neighbour
 
@@ -11,8 +13,8 @@ defmodule Linx.Netlink.Rtnl.NeighbourTest do
       state: 0x80,
       flags: 0,
       type: 1,
-      dst: <<10, 0, 0, 5>>,
-      lladdr: <<0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE>>
+      dst: ~IP"10.0.0.5",
+      lladdr: ~MAC"02:aa:bb:cc:dd:ee"
     }
 
     assert Neighbour.decode(Neighbour.encode(message)) == message
@@ -25,8 +27,8 @@ defmodule Linx.Netlink.Rtnl.NeighbourTest do
       state: 0x80,
       flags: 0,
       type: 1,
-      dst: <<0xFE80::16, 0::96, 1::16>>,
-      lladdr: <<0x02, 0x11, 0x22, 0x33, 0x44, 0x55>>
+      dst: ~IP"fe80::1",
+      lladdr: ~MAC"02:11:22:33:44:55"
     }
 
     assert Neighbour.decode(Neighbour.encode(message)) == message
@@ -35,8 +37,6 @@ defmodule Linx.Netlink.Rtnl.NeighbourTest do
   test "list/1 returns the host's neighbour table" do
     {:ok, socket} = Rtnl.open()
 
-    # The neighbour table may be empty on a freshly booted host — just check
-    # the shape rather than any specific entry.
     assert {:ok, neighbours} = Neighbour.list(socket)
     assert is_list(neighbours)
     assert Enum.all?(neighbours, &match?(%Neighbour{}, &1))

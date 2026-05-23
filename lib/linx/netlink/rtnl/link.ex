@@ -40,6 +40,7 @@ defmodule Linx.Netlink.Rtnl.Link do
   import Bitwise
   import Linx.Netlink.Constants
 
+  alias Linx.MAC
   alias Linx.Netlink.{Error, Message, Request, Socket}
   alias Linx.Netlink.Rtnl.LinkInfo
 
@@ -70,7 +71,7 @@ defmodule Linx.Netlink.Rtnl.Link do
     end
 
     # IFLA_* attributes — include/uapi/linux/if_link.h.
-    attr(1, :address, :binary)
+    attr(1, :address, Linx.MAC)
     attr(3, :name, :string)
     attr(4, :mtu, :u32)
     attr(5, :link, :u32)
@@ -246,12 +247,12 @@ defmodule Linx.Netlink.Rtnl.Link do
 
   @doc """
   Sets link `name`'s MAC address to `mac` — a colon-separated hex string,
-  e.g. `"aa:bb:cc:dd:ee:ff"`.
+  e.g. `"aa:bb:cc:dd:ee:ff"`, or a `Linx.MAC`.
   """
-  @spec set_address(Socket.t(), binary, binary) :: :ok | {:error, term}
-  def set_address(socket, name, mac) when is_binary(name) and is_binary(mac) do
-    with {:ok, bytes} <- parse_mac(mac) do
-      configure(socket, name, %{address: bytes})
+  @spec set_address(Socket.t(), binary, binary | MAC.t()) :: :ok | {:error, term}
+  def set_address(socket, name, mac) when is_binary(name) do
+    with {:ok, mac_struct} <- coerce_mac(mac) do
+      configure(socket, name, %{address: mac_struct})
     end
   end
 
@@ -330,20 +331,25 @@ defmodule Linx.Netlink.Rtnl.Link do
   defp ack({:ok, _messages}), do: :ok
   defp ack({:error, _} = error), do: error
 
-  # `"aa:bb:cc:dd:ee:ff"` → `<<0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF>>`.
-  defp parse_mac(mac) do
-    case String.split(mac, ":") do
-      [_, _, _, _, _, _] = parts -> parse_hex_pairs(parts, <<>>, mac)
-      _ -> {:error, {:bad_mac, mac}}
-    end
-  end
+  defp coerce_mac(%MAC{} = mac), do: {:ok, mac}
+  defp coerce_mac(string) when is_binary(string), do: MAC.parse(string)
 
-  defp parse_hex_pairs([], acc, _orig), do: {:ok, acc}
+  defimpl Inspect do
+    def inspect(link, _opts) do
+      import Bitwise
 
-  defp parse_hex_pairs([h | t], acc, orig) do
-    case Integer.parse(h, 16) do
-      {n, ""} when n in 0..255 -> parse_hex_pairs(t, acc <> <<n>>, orig)
-      _ -> {:error, {:bad_mac, orig}}
+      parts =
+        [
+          link.name && ~s|"#{link.name}"|,
+          "(#{link.index})",
+          if((link.flags &&& 0x1) != 0, do: "UP", else: "DOWN"),
+          link.mtu && "MTU=#{link.mtu}",
+          link.linkinfo && link.linkinfo.kind && "kind=#{link.linkinfo.kind}"
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join(" ")
+
+      "#Linx.Netlink.Rtnl.Link<#{parts}>"
     end
   end
 end
