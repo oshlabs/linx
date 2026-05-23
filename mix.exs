@@ -14,8 +14,9 @@ defmodule Linx.MixProject do
       # `mix compile`:
       #   * :netlink_nif    -- the netlink_socket NIF (Linx.Netlink)
       #   * :linx_process   -- the linx_process Port binary (Linx.Process)
+      #   * :linx_tty       -- the linx_tty NIF (Linx.Tty)
       # See lib/mix/tasks/compile.*.ex.
-      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process],
+      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process, :linx_tty],
       deps: deps(),
       name: "Linx",
       description: "Linux kernel interfaces for Elixir — netlink, and more.",
@@ -78,6 +79,12 @@ defmodule Linx.MixProject do
         ],
         Process: [
           Linx.Process
+        ],
+        Tty: [
+          Linx.Tty,
+          Linx.Tty.Saved,
+          Linx.Tty.WindowSize,
+          Linx.Tty.Native
         ],
         "Netlink core": [
           Linx.Netlink,

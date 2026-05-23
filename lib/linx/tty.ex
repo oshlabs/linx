@@ -1,0 +1,166 @@
+defmodule Linx.Tty do
+  @moduledoc """
+  Linux terminal / PTY primitives — `/dev/tty` access, `termios(3)`
+  save and restore, tty `ioctl(2)` (window size), and the byte-pumping
+  `attach/2` that composes with `Linx.Process`'s `stdio: :pty` to give
+  the BEAM a `docker attach` experience.
+
+  ## Why a separate subsystem
+
+  Terminals are a coherent kernel-subsystem concept with their own
+  primitives — line discipline, controlling-terminal rules, the
+  `termios` struct, the tty `ioctl(2)` surface. `Linx.Process` knows
+  enough about PTYs to set one up for a workload (`stdio: :pty`); the
+  *interactive* layer that wires the workload's PTY to the *caller's*
+  controlling terminal lives here.
+
+  ## What this module is *not*
+
+  Not an interactive-shell library. Not a terminfo / `tput` layer. Not
+  a line editor. The point of `Linx.Tty` is to expose the kernel
+  primitives so a consumer can build those things on top — or compose
+  them with `Linx.Process` in the one way this subsystem builds in:
+  `attach/2`.
+
+  ## `/dev/tty`, not fd 0
+
+  The BEAM's stdio is mediated by an Erlang group-leader process; the
+  underlying fds are not generally usable from Elixir code, and even
+  if they were, going through them would race the group leader.
+  `Linx.Tty` opens `/dev/tty` directly — the *controlling terminal* of
+  the BEAM process, independent of the group leader. That is what C
+  programs like `vim` and `less` do, and it works the same way from
+  the BEAM whether iex is running in a terminal emulator, over SSH,
+  inside tmux, or as a Nerves device console.
+
+  When the BEAM has no controlling terminal at all (redirected stdio,
+  some CI environments), opening `/dev/tty` fails cleanly with
+  `{:error, {:open, :enxio}}` — a typed error a caller can pattern-match
+  on, not a crash.
+
+  ## Save and restore is mandatory
+
+  Any operation that mutates the local terminal's state hands the
+  caller back a `t:Linx.Tty.Saved.t/0` blob with which to restore it
+  exactly. If the caller forgets to restore and the terminal stays in
+  raw mode, the user has to type `reset(1)` blind to recover. The API
+  shape (`open_controlling_raw/0` returning the saved state, paired
+  with `restore_and_close/2`) and the `attach/2` `try/after` finalisation
+  exist so this can't happen accidentally.
+
+  ## Status
+
+  Phase T (T0–T3) is in flight. Today this module is a T0 skeleton —
+  the NIF loads, a trivial round-trip works, and every public verb
+  returns `{:error, :not_yet_implemented}`. T1 wires the termios
+  primitives; T2 implements `attach/2`; T3 adds window-size
+  propagation. See `docs/tty/PLAN.md` for the roadmap.
+  """
+
+  alias Linx.Tty.Native
+  alias Linx.Tty.{Saved, WindowSize}
+
+  @typedoc """
+  An open file descriptor referring to a tty device. Integer — the
+  caller hands it back to `restore_and_close/2`, `window_size/1`, etc.
+  """
+  @type fd :: non_neg_integer()
+
+  @typedoc """
+  A `Linx.Process` session pid (running with `stdio: :pty`). The
+  attaching side never touches the workload's master fd directly; it
+  goes through `Linx.Process.pty_write/2` and the `:pty_out` event
+  stream.
+  """
+  @type session :: pid()
+
+  # Error stages the C agent can name. The Port-decoded ETF for any
+  # error from `Linx.Tty.Native` already lives in this BEAM as an
+  # atom; referencing them here is belt-and-braces against `:safe`
+  # decode and against ever-typo'd stage names in the C side.
+  @error_stages [:open, :tcgetattr, :tcsetattr, :ioctl, :close]
+  @doc false
+  def __error_stages__, do: @error_stages
+
+  @doc """
+  Returns the linx_tty NIF version string — sanity that the native
+  library loaded and its ABI is reachable.
+  """
+  @spec version() :: binary()
+  def version, do: Native.version()
+
+  @doc """
+  Opens `/dev/tty` and switches it to raw mode (`cfmakeraw(3)`), saving
+  the current `termios` so it can be restored later.
+
+  Lands in T1; today returns `{:error, :not_yet_implemented}`.
+
+  Returns `{:ok, fd, saved}` on success — `fd` for wrapping with
+  `:erlang.open_port({:fd, fd, fd}, [...])`, `saved` for
+  `restore_and_close/2`. `{:error, {stage, errno}}` covers the failure
+  paths (`stage` is one of `:open`, `:tcgetattr`, `:tcsetattr`); the
+  most common case — BEAM without a controlling terminal — surfaces
+  as `{:error, {:open, :enxio}}`.
+  """
+  @spec open_controlling_raw() :: {:ok, fd(), Saved.t()} | {:error, term()}
+  def open_controlling_raw, do: {:error, :not_yet_implemented}
+
+  @doc """
+  Restores the saved `termios` on `fd` and closes the fd.
+
+  Lands in T1; today returns `{:error, :not_yet_implemented}`.
+
+  Symmetric finaliser for `open_controlling_raw/0`. Idempotent against
+  already-closed fds — calling it twice (e.g. once explicitly, then
+  again from an outer `try/after`) is safe.
+  """
+  @spec restore_and_close(fd(), Saved.t()) :: :ok | {:error, term()}
+  def restore_and_close(_fd, _saved), do: {:error, :not_yet_implemented}
+
+  @doc """
+  Returns the current window size of the terminal named by `fd`
+  (`ioctl(TIOCGWINSZ)`).
+
+  Lands in T1; today returns `{:error, :not_yet_implemented}`.
+  """
+  @spec window_size(fd()) :: {:ok, WindowSize.t()} | {:error, term()}
+  def window_size(_fd), do: {:error, :not_yet_implemented}
+
+  @doc """
+  Sets the window size of the terminal named by `fd`
+  (`ioctl(TIOCSWINSZ)`).
+
+  Lands in T1; today returns `{:error, :not_yet_implemented}`.
+
+  The common path for setting the workload's window size goes through
+  the agent — `Linx.Process.pty_set_winsize/2` (lands in T3). This
+  verb is for the rare case of mutating a tty fd held directly by the
+  caller.
+  """
+  @spec set_window_size(fd(), WindowSize.t()) :: :ok | {:error, term()}
+  def set_window_size(_fd, _ws), do: {:error, :not_yet_implemented}
+
+  @doc """
+  Hands the BEAM's controlling terminal over to `session`'s PTY master
+  and pumps bytes both ways until the workload exits, then restores
+  the terminal.
+
+  Lands in T2; today returns `{:error, :not_yet_implemented}`.
+
+  `target` chooses which local tty the caller hands over. Today only
+  `:controlling` (open `/dev/tty`) is meaningful; future shapes may
+  accept an explicit fd.
+
+  Returns the terminal event from the session — `{:ok, {:exited, n}}`,
+  `{:ok, {:signaled, n}}` — or `{:error, _}` for a setup failure.
+
+  The byte pump runs in the *calling process* and blocks until the
+  workload terminates. The caller's terminal is restored
+  unconditionally via `try/after`, even on a crash inside the loop,
+  so a wedged terminal is structurally impossible.
+  """
+  @spec attach(:controlling, session()) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+          | {:error, term()}
+  def attach(:controlling, _session), do: {:error, :not_yet_implemented}
+end
