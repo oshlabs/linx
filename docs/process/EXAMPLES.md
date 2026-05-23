@@ -233,8 +233,82 @@ iex> P.spawn(argv: ["/bin/true"], namespaces: [:typo])
 {:error, {:bad_namespaces, [:typo]}}
 ```
 
+## Stdio plumbing
+
+By default the workload inherits the BEAM's fds 0/1/2. The `:stdio`
+option chooses something else, either via an atom shorthand applying
+to all three fds or via a per-fd keyword list.
+
+### `:devnull` — silence the workload
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/bin/echo", "this won't be seen"], stdio: :devnull)
+iex> P.proceed(c)
+iex> P.wait(c)
+{:ok, {:exited, 0}}
+```
+
+### `{:connect_unix, path}` — pipe a single fd to an AF_UNIX listener
+
+The caller opens the listener *before* `spawn/1`; the workload
+`connect(2)`s to it. Useful for capturing stdout/stderr to a
+GenServer, a file, anywhere.
+
+```elixir
+iex> path = "/tmp/linx-demo.sock"
+iex> {:ok, listener} = :gen_tcp.listen(0, [{:ifaddr, {:local, path}}, :binary, {:active, false}])
+
+iex> {:ok, c} = P.spawn(
+...>   argv: ["/bin/echo", "hello from a workload"],
+...>   stdio: [stdout: {:connect_unix, path}]
+...> )
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.proceed(c)
+
+iex> {:ok, sock} = :gen_tcp.accept(listener, 2_000)
+iex> :gen_tcp.recv(sock, 0, 2_000)
+{:ok, "hello from a workload\n"}
+```
+
+### `:pty` — a PTY shared across all three fds
+
+The agent creates a PTY pair in the parent process, makes the child
+the session leader with the slave as controlling tty, and proxies
+bytes between the master end and the BEAM through the existing
+control channel. Reads arrive as owner events:
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/bin/echo", "hi"], stdio: :pty)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.proceed(c)
+
+iex> receive do {:linx_process, :pty_out, b} -> b end
+"hi\r\n"          # PTY-cooked output translates LF to CRLF
+
+iex> P.wait(c)
+{:ok, {:exited, 0}}
+```
+
+Writes go through `pty_write/2`:
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.proceed(c)
+iex> P.pty_write(c, "hello\n")
+:ok
+iex> receive do {:linx_process, :pty_out, b} -> b end
+"hello\r\nhello\r\n"   # cat echoes (PTY echoes the input, then cat writes it)
+
+iex> P.signal(c, 9)
+iex> P.wait(c)
+{:ok, {:signaled, 9}}
+```
+
+This is the primitive the future [Linx.Tty](../tty/) subsystem will
+compose with — see the "iex on a Nerves device becomes a container's
+bash" use case in `PLAN.md`.
+
 ## Not yet implemented
 
-`info/1`, `pty_master/1` (P4), and `:stdio` directives are still stubs
-— they return `{:error, :not_yet_implemented}` for now. See `PLAN.md`
-for the roadmap.
+`info/1` is still a stub. See `PLAN.md` for the roadmap.

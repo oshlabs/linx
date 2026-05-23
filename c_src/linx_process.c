@@ -82,9 +82,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/signalfd.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -100,12 +103,14 @@
  * an internal protocol; the strings are what the BEAM sees. */
 enum stage {
 	STAGE_EXECVE = 1,
+	STAGE_STDIO = 2, /* per-fd plumbing in child: /dev/null, AF_UNIX connect, PTY ioctl */
 };
 
 static const char *stage_name(enum stage s)
 {
 	switch (s) {
 	case STAGE_EXECVE: return "execve";
+	case STAGE_STDIO:  return "stdio";
 	}
 	return "unknown";
 }
@@ -209,7 +214,10 @@ static ssize_t read_frame(uint8_t *buf, size_t cap)
 
 static void emit_buff(ei_x_buff *x)
 {
-	if (write_frame(x->buff, (uint32_t)x->index) < 0)
+	/* EPIPE here is the normal "BEAM port closed underneath us" case --
+	 * the surrounding loops handle the dropped channel, no stderr noise
+	 * needed. Other errors stay loud so real bugs are visible. */
+	if (write_frame(x->buff, (uint32_t)x->index) < 0 && errno != EPIPE)
 		fprintf(stderr, "linx_process: write to BEAM: %s\n",
 			strerror(errno));
 	ei_x_free(x);
@@ -254,6 +262,20 @@ static void emit_error(int err, const char *stage)
 
 enum req_mode { MODE_SPAWN, MODE_ENTER };
 
+/* Per-fd stdio directive. INHERIT leaves the child's fd untouched; DEVNULL
+ * dup2's /dev/null on; CONNECT_UNIX connects an AF_UNIX stream to `path`
+ * and dup2's it on. (The whole-stdio PTY mode is handled separately --
+ * see `pty` below -- since it shares one slave fd across 0/1/2 plus
+ * setsid + TIOCSCTTY.) */
+struct stdio_dir {
+	enum stdio_kind {
+		STDIO_INHERIT = 0,
+		STDIO_DEVNULL,
+		STDIO_CONNECT_UNIX,
+	} kind;
+	char *path; /* CONNECT_UNIX only; malloc'd */
+};
+
 /* The parsed shape of an inbound request.
  *   mode      -- which kind of request.
  *   target    -- enter mode: the host pid of the process whose namespaces
@@ -266,7 +288,11 @@ enum req_mode { MODE_SPAWN, MODE_ENTER };
  *                to join, when explicitly listed.
  *   all_ns    -- enter mode only: 1 if :namespaces was *not* listed in
  *                the request, meaning "join every namespace the target
- *                has". 0 if :namespaces was listed (use ns_flags).  */
+ *                has". 0 if :namespaces was listed (use ns_flags).
+ *   stdio[]   -- per-fd directive for fd 0/1/2. Defaults: INHERIT.
+ *   pty       -- 1 if :stdio was the atom :pty; all three fds then point
+ *                at a single PTY slave with the child as session leader.
+ *                Mutually exclusive with `stdio[]`.  */
 struct request {
 	enum req_mode mode;
 	pid_t target;
@@ -274,6 +300,8 @@ struct request {
 	char **env;
 	int ns_flags;
 	int all_ns;
+	struct stdio_dir stdio[3];
+	int pty;
 };
 
 static void free_str_array(char **arr)
@@ -289,6 +317,8 @@ static void free_request(struct request *r)
 {
 	free_str_array(r->argv);
 	free_str_array(r->env);
+	for (int i = 0; i < 3; i++)
+		free(r->stdio[i].path);
 }
 
 /* Decode a binary or string ETF term into a freshly malloc'd NUL-terminated
@@ -394,9 +424,120 @@ static int decode_ns_list(const char *buf, int *idx, int *flags_out)
 	return 0;
 }
 
+/* Decode a per-fd stdio directive, one of:
+ *   :inherit       -- ERL_SMALL_ATOM_UTF8_EXT or similar
+ *   :devnull
+ *   {:connect_unix, "path"} -- a 2-tuple
+ * Stores the result in `out`. Returns 0 on success, -1 on bad shape. */
+static int decode_stdio_directive(const char *buf, int *idx, struct stdio_dir *out)
+{
+	int type, sz;
+	if (ei_get_type(buf, idx, &type, &sz) < 0)
+		return -1;
+
+	if (type == ERL_SMALL_ATOM_UTF8_EXT || type == ERL_ATOM_UTF8_EXT ||
+	    type == ERL_ATOM_EXT || type == ERL_SMALL_ATOM_EXT) {
+		char atom[MAXATOMLEN];
+		if (ei_decode_atom(buf, idx, atom) < 0)
+			return -1;
+		if (strcmp(atom, "inherit") == 0) {
+			out->kind = STDIO_INHERIT;
+			return 0;
+		}
+		if (strcmp(atom, "devnull") == 0) {
+			out->kind = STDIO_DEVNULL;
+			return 0;
+		}
+		return -1;
+	}
+
+	if (type == ERL_SMALL_TUPLE_EXT || type == ERL_LARGE_TUPLE_EXT) {
+		int arity;
+		if (ei_decode_tuple_header(buf, idx, &arity) < 0 || arity != 2)
+			return -1;
+		char tag[MAXATOMLEN];
+		if (ei_decode_atom(buf, idx, &tag[0]) < 0)
+			return -1;
+		if (strcmp(tag, "connect_unix") != 0)
+			return -1;
+		if (decode_string(buf, idx, &out->path) < 0)
+			return -1;
+		out->kind = STDIO_CONNECT_UNIX;
+		return 0;
+	}
+
+	return -1;
+}
+
+/* Decode the :stdio value, which is either an atom shorthand
+ * (:inherit | :devnull | :pty) or a keyword list of `[stdin: dir,
+ * stdout: dir, stderr: dir]`. Stores results into req->stdio[] and
+ * req->pty. */
+static int decode_stdio(const char *buf, int *idx, struct request *req)
+{
+	int type, sz;
+	if (ei_get_type(buf, idx, &type, &sz) < 0)
+		return -1;
+
+	if (type == ERL_SMALL_ATOM_UTF8_EXT || type == ERL_ATOM_UTF8_EXT ||
+	    type == ERL_ATOM_EXT || type == ERL_SMALL_ATOM_EXT) {
+		char atom[MAXATOMLEN];
+		if (ei_decode_atom(buf, idx, atom) < 0)
+			return -1;
+		if (strcmp(atom, "inherit") == 0) {
+			/* default already; no change */
+			return 0;
+		}
+		if (strcmp(atom, "devnull") == 0) {
+			for (int i = 0; i < 3; i++)
+				req->stdio[i].kind = STDIO_DEVNULL;
+			return 0;
+		}
+		if (strcmp(atom, "pty") == 0) {
+			req->pty = 1;
+			return 0;
+		}
+		return -1;
+	}
+
+	/* A keyword list arrives as LIST_EXT of 2-tuples, ending in NIL_EXT. */
+	int arity;
+	if (ei_decode_list_header(buf, idx, &arity) < 0)
+		return -1;
+
+	for (int i = 0; i < arity; i++) {
+		int tarity;
+		if (ei_decode_tuple_header(buf, idx, &tarity) < 0 || tarity != 2)
+			return -1;
+
+		char key[MAXATOMLEN];
+		if (ei_decode_atom(buf, idx, key) < 0)
+			return -1;
+
+		int fd = -1;
+		if (strcmp(key, "stdin") == 0)  fd = 0;
+		else if (strcmp(key, "stdout") == 0) fd = 1;
+		else if (strcmp(key, "stderr") == 0) fd = 2;
+		else return -1;
+
+		if (decode_stdio_directive(buf, idx, &req->stdio[fd]) < 0)
+			return -1;
+	}
+
+	if (arity > 0) {
+		ei_get_type(buf, idx, &type, &sz);
+		if (type == ERL_NIL_EXT) {
+			int dummy;
+			ei_decode_list_header(buf, idx, &dummy);
+		}
+	}
+
+	return 0;
+}
+
 /* Decode the inbound request, either:
- *   {:spawn, %{argv, namespaces?, env?}}
- *   {:enter, %{target, argv, namespaces?, env?}}
+ *   {:spawn, %{argv, namespaces?, env?, stdio?}}
+ *   {:enter, %{target, argv, namespaces?, env?, stdio?}}
  * Returns 0 on success, -1 on malformed input. */
 static int decode_request(const uint8_t *buf, int len, struct request *req)
 {
@@ -451,6 +592,9 @@ static int decode_request(const uint8_t *buf, int len, struct request *req)
 			    t <= 0)
 				return -1;
 			req->target = (pid_t)t;
+		} else if (strcmp(key, "stdio") == 0) {
+			if (decode_stdio((const char *)buf, &idx, req) < 0)
+				return -1;
 		} else {
 			/* Skip unknown keys -- the BEAM may carry extras we
 			 * don't yet understand; future-compatibility. */
@@ -543,24 +687,126 @@ static int enter_target_namespaces(const struct request *req)
 
 /* --- the cloned child --------------------------------------------------- */
 
-/* Arguments handed to child_fn via clone's `arg` pointer. */
+/* Arguments handed to child_fn via clone's `arg` pointer.
+ *
+ * stdio    -- per-fd directives. The child applies them after :proceed
+ *             but before execve.
+ * pty_slave -- if >= 0, the child closes pty_master, sets up a new
+ *              session (setsid), makes pty_slave its controlling TTY
+ *              (TIOCSCTTY), and dups it onto fd 0/1/2. The per-fd
+ *              stdio[] is ignored in PTY mode.
+ * pty_master -- the parent's end of the PTY pair. The child closes it
+ *              before execve. */
 struct child_args {
 	int c2p_w; /* child writes events here (CLOEXEC) */
 	int p2c_r; /* child reads commands here */
 	char **argv;
 	char **env;
+	struct stdio_dir stdio[3];
+	int pty_master;
+	int pty_slave;
 };
 
+/* Report an in-child pre-exec failure on the c2p pipe ('E' tag + 4-byte
+ * errno + 1-byte stage code) and exit. Called when something between the
+ * checkpoint and execve fails -- e.g. opening /dev/null, connecting to
+ * the AF_UNIX path, ioctl on the PTY slave. */
+__attribute__((noreturn))
+static void child_fail(int c2p_w, int err, enum stage stage)
+{
+	uint8_t fail[6];
+	fail[0] = 'E';
+	fail[1] = (uint8_t)(err >> 24);
+	fail[2] = (uint8_t)(err >> 16);
+	fail[3] = (uint8_t)(err >> 8);
+	fail[4] = (uint8_t)err;
+	fail[5] = (uint8_t)stage;
+	(void)write_exact(c2p_w, fail, sizeof fail);
+	_exit(127);
+}
+
+/* Apply stdio plumbing in the child before execve. Returns 0 on success,
+ * -1 on failure (caller should report and exit). */
+static int apply_stdio(struct child_args *ca)
+{
+	if (ca->pty_slave >= 0) {
+		/* Whole-stdio PTY mode. Drop the master copy the child
+		 * inherited from the fork, become session leader, take the
+		 * PTY slave as the controlling terminal, then dup it onto
+		 * fd 0/1/2. */
+		if (ca->pty_master >= 0)
+			close(ca->pty_master);
+		if (setsid() < 0)
+			return -1;
+		if (ioctl(ca->pty_slave, TIOCSCTTY, 0) < 0)
+			return -1;
+		for (int fd = 0; fd < 3; fd++) {
+			if (dup2(ca->pty_slave, fd) < 0)
+				return -1;
+		}
+		if (ca->pty_slave > 2)
+			close(ca->pty_slave);
+		return 0;
+	}
+
+	/* Per-fd directives. */
+	for (int fd = 0; fd < 3; fd++) {
+		switch (ca->stdio[fd].kind) {
+		case STDIO_INHERIT:
+			break;
+
+		case STDIO_DEVNULL: {
+			int n = open("/dev/null", O_RDWR | O_CLOEXEC);
+			if (n < 0)
+				return -1;
+			if (dup2(n, fd) < 0) {
+				close(n);
+				return -1;
+			}
+			close(n);
+			break;
+		}
+
+		case STDIO_CONNECT_UNIX: {
+			int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+			if (s < 0)
+				return -1;
+			struct sockaddr_un addr = { .sun_family = AF_UNIX };
+			size_t len = strlen(ca->stdio[fd].path);
+			if (len >= sizeof addr.sun_path) {
+				close(s);
+				errno = ENAMETOOLONG;
+				return -1;
+			}
+			memcpy(addr.sun_path, ca->stdio[fd].path, len + 1);
+			if (connect(s, (struct sockaddr *)&addr, sizeof addr) < 0) {
+				int e = errno;
+				close(s);
+				errno = e;
+				return -1;
+			}
+			if (dup2(s, fd) < 0) {
+				int e = errno;
+				close(s);
+				errno = e;
+				return -1;
+			}
+			close(s);
+			break;
+		}
+		}
+	}
+	return 0;
+}
+
 /* Inside the cloned child: announce :ready (with our pidns-internal pid),
- * wait for :proceed, exec. Any pre-exec failure is reported as 'E' on the
- * c2p pipe and the child exits non-zero. */
+ * wait for :proceed, plumb stdio, exec. Any pre-exec failure is reported
+ * as 'E' on the c2p pipe and the child exits non-zero. */
 static int child_fn(void *arg)
 {
 	struct child_args *ca = arg;
 
-	/* :ready -- send 'R' + pidns-internal pid (uint32 little-endian; the
-	 * parent and child run on the same machine so endianness doesn't
-	 * matter, but pick one). */
+	/* :ready -- send 'R' + pidns-internal pid (uint32 big-endian). */
 	uint8_t ready[5];
 	ready[0] = 'R';
 	uint32_t pid = (uint32_t)getpid();
@@ -578,6 +824,11 @@ static int child_fn(void *arg)
 	if (cmd != 'P')
 		_exit(103);
 
+	/* Stdio plumbing (P4): dup2 /dev/null or an AF_UNIX socket onto
+	 * 0/1/2, or set up the PTY slave as a controlling tty. */
+	if (apply_stdio(ca) < 0)
+		child_fail(ca->c2p_w, errno, STAGE_STDIO);
+
 	/* Unblock SIGCHLD before execve so the workload sees default
 	 * signal-mask semantics -- the agent had it blocked so signalfd
 	 * could capture it, but the child inherits the mask across
@@ -587,24 +838,10 @@ static int child_fn(void *arg)
 	sigaddset(&mask, SIGCHLD);
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
 
-	/* execve. argv[0] is the binary; we don't shell-resolve, so a
-	 * relative-name argv[0] without a slash will be looked up against
-	 * the inherited PATH only if the caller's argv[0] is e.g. "/bin/sh
-	 * -c". The straightforward interpretation: argv[0] is the binary
-	 * to exec. */
 	execve(ca->argv[0], ca->argv, ca->env);
 
-	/* execve returned -> failure. Report errno + stage and exit. */
-	int err = errno;
-	uint8_t fail[6];
-	fail[0] = 'E';
-	fail[1] = (uint8_t)(err >> 24);
-	fail[2] = (uint8_t)(err >> 16);
-	fail[3] = (uint8_t)(err >> 8);
-	fail[4] = (uint8_t)err;
-	fail[5] = (uint8_t)STAGE_EXECVE;
-	(void)write_exact(ca->c2p_w, fail, sizeof fail);
-	_exit(127);
+	/* execve returned -> failure. */
+	child_fail(ca->c2p_w, errno, STAGE_EXECVE);
 }
 
 /* --- the relay (parent of clone) ---------------------------------------- */
@@ -668,13 +905,28 @@ static int await_proceed(void)
 	return -1;
 }
 
-/* Decode one {:packet, 4} ETF frame from the BEAM (post-:running). The
- * vocabulary in P2 is {:signal, n} only. Returns the signum, or -1 on
- * parse failure / unknown tag, or -2 on EOF/IO error so the caller can
- * distinguish "BEAM went away" from "garbled frame". */
-static int read_post_running_command(void)
+enum post_running_cmd_kind {
+	CMD_NONE = 0,
+	CMD_SIGNAL,
+	CMD_PTY_IN,
+};
+
+struct post_running_cmd {
+	enum post_running_cmd_kind kind;
+	int signum;        /* CMD_SIGNAL */
+	uint8_t *bytes;    /* CMD_PTY_IN -- malloc'd; caller frees */
+	size_t bytes_len;
+};
+
+/* Decode one {:packet, 4} ETF frame from the BEAM (post-:running):
+ *   {:signal, n}      -- forward to the workload
+ *   {:pty_in, binary} -- write to the PTY master (PTY mode only)
+ *
+ * Returns 0 on success (cmd filled), -1 on parse failure (cmd untouched),
+ * -2 on EOF/IO error so the caller can distinguish "BEAM went away". */
+static int read_post_running_command(struct post_running_cmd *cmd)
 {
-	uint8_t buf[64];
+	uint8_t buf[8192];
 	ssize_t len = read_frame(buf, sizeof buf);
 	if (len < 0)
 		return -2;
@@ -691,34 +943,75 @@ static int read_post_running_command(void)
 	char tag[MAXATOMLEN];
 	if (ei_decode_atom((const char *)buf, &idx, tag) < 0)
 		return -1;
-	if (strcmp(tag, "signal") != 0)
-		return -1;
 
-	long signum;
-	if (ei_decode_long((const char *)buf, &idx, &signum) < 0)
-		return -1;
-	if (signum <= 0 || signum > 64)
-		return -1;
-	return (int)signum;
+	if (strcmp(tag, "signal") == 0) {
+		long signum;
+		if (ei_decode_long((const char *)buf, &idx, &signum) < 0)
+			return -1;
+		if (signum <= 0 || signum > 64)
+			return -1;
+		cmd->kind = CMD_SIGNAL;
+		cmd->signum = (int)signum;
+		return 0;
+	}
+
+	if (strcmp(tag, "pty_in") == 0) {
+		int type, sz;
+		if (ei_get_type((const char *)buf, &idx, &type, &sz) < 0)
+			return -1;
+		if (type != ERL_BINARY_EXT)
+			return -1;
+		cmd->bytes = malloc((size_t)sz);
+		if (!cmd->bytes)
+			return -1;
+		long got;
+		if (ei_decode_binary((const char *)buf, &idx,
+				     cmd->bytes, &got) < 0) {
+			free(cmd->bytes);
+			cmd->bytes = NULL;
+			return -1;
+		}
+		cmd->bytes_len = (size_t)got;
+		cmd->kind = CMD_PTY_IN;
+		return 0;
+	}
+
+	return -1;
+}
+
+/* Emit {:pty_out, binary} on fd 4. */
+static void emit_pty_out(const uint8_t *bytes, size_t n)
+{
+	ei_x_buff x;
+	ei_x_new_with_version(&x);
+	ei_x_encode_tuple_header(&x, 2);
+	ei_x_encode_atom(&x, "pty_out");
+	ei_x_encode_binary(&x, bytes, (long)n);
+	emit_buff(&x);
 }
 
 /* The post-exec supervise loop: forward {:signal, n} from the BEAM to
- * the workload, and reap the workload via SIGCHLD-on-signalfd. Emits the
+ * the workload, reap the workload via SIGCHLD-on-signalfd, and (in PTY
+ * mode) shuttle bytes between the BEAM and the PTY master fd. Emits the
  * terminal event ({:status, :exited, _} or {:status, :signaled, _}) and
  * returns when the child is gone.
  *
  * SIGCHLD is captured via signalfd (set up in main, blocked from normal
  * delivery in the agent's signal mask); the child unblocks SIGCHLD again
- * before execve, so the workload sees default semantics. */
-static void supervise(pid_t child_pid, int sigfd)
+ * before execve, so the workload sees default semantics.
+ *
+ * `pty_master` is -1 when stdio is not :pty; otherwise it's the parent's
+ * end of the PTY pair created before clone/fork. */
+static void supervise(pid_t child_pid, int sigfd, int pty_master)
 {
-	struct pollfd pfds[2] = {
-		{ .fd = CTL_IN, .events = POLLIN },
-		{ .fd = sigfd,  .events = POLLIN },
+	struct pollfd pfds[3] = {
+		{ .fd = CTL_IN,    .events = POLLIN },
+		{ .fd = sigfd,     .events = POLLIN },
+		{ .fd = pty_master, .events = POLLIN }, /* fd = -1 when no PTY */
 	};
 
 	for (;;) {
-		int rc = poll(pfds, 2, -1);
+		int rc = poll(pfds, 3, -1);
 		if (rc < 0) {
 			if (errno == EINTR)
 				continue;
@@ -727,22 +1020,35 @@ static void supervise(pid_t child_pid, int sigfd)
 			return;
 		}
 
-		/* The BEAM sent us something -- {:signal, n} in P2. A
-		 * close on fd 3 (POLLHUP) means the BEAM disappeared; we
-		 * keep going so the child can finish on its own, but
-		 * stop polling that side of the channel. */
+		/* BEAM command on fd 3: {:signal, n} or {:pty_in, bytes}.
+		 * A POLLHUP on fd 3 means the BEAM disappeared -- keep
+		 * going so the child finishes naturally, but stop polling
+		 * that side. */
 		if (pfds[0].revents & POLLIN) {
-			int signum = read_post_running_command();
-			if (signum > 0)
-				kill(child_pid, signum);
+			struct post_running_cmd cmd = { 0 };
+			int r = read_post_running_command(&cmd);
+			if (r == 0) {
+				switch (cmd.kind) {
+				case CMD_SIGNAL:
+					kill(child_pid, cmd.signum);
+					break;
+				case CMD_PTY_IN:
+					if (pty_master >= 0)
+						(void)write_exact(pty_master,
+								  cmd.bytes,
+								  cmd.bytes_len);
+					free(cmd.bytes);
+					break;
+				case CMD_NONE:
+					break;
+				}
+			}
 		}
 		if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL))
 			pfds[0].fd = -1; /* poll(2) ignores fd < 0 */
 
-		/* SIGCHLD fired. Drain the signalfd (multiple SIGCHLDs can
-		 * coalesce into separate signalfd_siginfo records; the fd is
-		 * SFD_NONBLOCK so the drain returns EAGAIN once empty) and
-		 * waitpid the workload. */
+		/* SIGCHLD fired. Drain the signalfd (SFD_NONBLOCK; the loop
+		 * returns EAGAIN when empty) and waitpid the workload. */
 		if (pfds[1].revents & POLLIN) {
 			struct signalfd_siginfo si;
 			while (read(sigfd, &si, sizeof si) == sizeof si)
@@ -762,6 +1068,34 @@ static void supervise(pid_t child_pid, int sigfd)
 			/* Spurious SIGCHLD (not our child, or already
 			 * reaped). Ignore and keep polling. */
 		}
+
+		/* PTY master has bytes to read -- the workload wrote
+		 * something. Forward as {:pty_out, binary}. EIO on a
+		 * PTY master means the slave was closed (workload
+		 * exited); waitpid picks the exit up via SIGCHLD, so
+		 * we just stop polling the master. POLLHUP can arrive
+		 * with buffered data still pending, so drain it too
+		 * (the master is O_NONBLOCK, EAGAIN ends the drain). */
+		if (pty_master >= 0 &&
+		    (pfds[2].revents & (POLLIN | POLLHUP))) {
+			uint8_t buf[8192];
+			while (1) {
+				ssize_t n = read(pty_master, buf, sizeof buf);
+				if (n > 0) {
+					emit_pty_out(buf, (size_t)n);
+					continue;
+				}
+				if (n < 0 && errno == EAGAIN)
+					break;
+				/* n == 0, or n < 0 with EIO / EBADF /
+				 * EINTR-already-handled: peer closed. */
+				pfds[2].fd = -1;
+				break;
+			}
+		}
+		if (pty_master >= 0 &&
+		    pfds[2].revents & (POLLERR | POLLNVAL))
+			pfds[2].fd = -1;
 	}
 }
 
@@ -823,7 +1157,61 @@ int main(void)
 		.p2c_r = p2c[0],
 		.argv = req.argv,
 		.env = child_env,
+		.pty_master = -1,
+		.pty_slave = -1,
 	};
+	for (int i = 0; i < 3; i++)
+		ca.stdio[i] = req.stdio[i];
+
+	int pty_master = -1, pty_slave = -1;
+	if (req.pty) {
+		/* Create the PTY pair in the agent (parent) so it's inherited
+		 * across clone/fork. The child closes the master and dups the
+		 * slave onto 0/1/2; the parent closes the slave and shuttles
+		 * bytes between the master and fd 4 in the supervise loop. */
+		pty_master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK);
+		if (pty_master < 0) {
+			emit_error(errno, "posix_openpt");
+			free_request(&req);
+			return 4;
+		}
+		if (grantpt(pty_master) < 0 || unlockpt(pty_master) < 0) {
+			emit_error(errno, "ptsetup");
+			close(pty_master);
+			free_request(&req);
+			return 4;
+		}
+
+		/* ptsname(3) returns a pointer into a static buffer; copy out
+		 * before any other call could clobber it. */
+		char slave_path[64];
+		const char *p = ptsname(pty_master);
+		if (!p) {
+			emit_error(errno, "ptsname");
+			close(pty_master);
+			free_request(&req);
+			return 4;
+		}
+		size_t plen = strlen(p);
+		if (plen >= sizeof slave_path) {
+			emit_error(ENAMETOOLONG, "ptsname");
+			close(pty_master);
+			free_request(&req);
+			return 4;
+		}
+		memcpy(slave_path, p, plen + 1);
+
+		pty_slave = open(slave_path, O_RDWR | O_NOCTTY);
+		if (pty_slave < 0) {
+			emit_error(errno, "pts_open");
+			close(pty_master);
+			free_request(&req);
+			return 4;
+		}
+
+		ca.pty_master = pty_master;
+		ca.pty_slave = pty_slave;
+	}
 
 	pid_t pid;
 
@@ -879,6 +1267,13 @@ int main(void)
 	 * close here is the parent's copy. */
 	close(c2p[1]);
 	close(p2c[0]);
+	/* In PTY mode, the slave is for the child only; the parent keeps the
+	 * master. Closing the slave here removes the agent's extra reference;
+	 * once the child also closes it (via dup2 onto 0/1/2 + close), the
+	 * slave end goes away when the workload exits, triggering EIO on
+	 * the master so the supervise loop notices. */
+	if (pty_slave >= 0)
+		close(pty_slave);
 
 	emit_status_int("spawned", (long)pid);
 
@@ -900,9 +1295,11 @@ int main(void)
 			 ((long)ready_pid[2] << 8) | (long)ready_pid[3];
 	emit_status_int("ready", child_pid);
 
-	/* Wait for :proceed from the BEAM, forward as 'P' to the child. */
+	/* Wait for :proceed from the BEAM, forward as 'P' to the child.
+	 * A negative return here is most commonly EOF on fd 3 -- the BEAM
+	 * port closing because its owning GenServer died, which is a routine
+	 * cleanup path (not an error worth a stderr line). */
 	if (await_proceed() < 0) {
-		fprintf(stderr, "linx_process: expected :proceed from BEAM\n");
 		free_request(&req);
 		return 1;
 	}
@@ -949,8 +1346,10 @@ int main(void)
 		return 4;
 	}
 
-	supervise(pid, sigfd);
+	supervise(pid, sigfd, pty_master);
 	close(sigfd);
+	if (pty_master >= 0)
+		close(pty_master);
 
 	free_request(&req);
 	return 0;

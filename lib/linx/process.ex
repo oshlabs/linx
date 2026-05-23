@@ -55,6 +55,8 @@ defmodule Linx.Process do
   @type namespace :: :net | :mount | :pid | :uts | :ipc | :user | :cgroup | :time
 
   @valid_namespaces ~w(net mount pid uts ipc user cgroup time)a
+  @valid_stdio_atoms ~w(inherit devnull pty)a
+  @valid_per_fd_atoms ~w(inherit devnull)a
 
   # Atoms the C agent can send back as the `stage` field of {:error, errno,
   # stage}. The Port's data is decoded with `:safe`, which requires every
@@ -65,6 +67,11 @@ defmodule Linx.Process do
     :execve,
     :clone,
     :fork,
+    :stdio,
+    :posix_openpt,
+    :ptsetup,
+    :ptsname,
+    :pts_open,
     :setns_user,
     :setns_mount,
     :setns_uts,
@@ -102,6 +109,36 @@ defmodule Linx.Process do
     * `:env` — environment as a list of `"KEY=VALUE"` binaries. Defaults
       to inheriting the BEAM's environment.
     * `:owner` — pid to receive lifecycle events. Defaults to the caller.
+    * `:stdio` — workload fd 0/1/2 plumbing. See "Stdio plumbing" below.
+
+  ## Stdio plumbing
+
+  `:stdio` is either a single atom shorthand applying to all three fds,
+  or a keyword list giving per-fd directives.
+
+  **Shorthand atoms:**
+
+    * `:inherit` (default) — the workload inherits the BEAM's stdio.
+    * `:devnull` — all three fds are `/dev/null`.
+    * `:pty` — the agent creates a PTY pair; the workload becomes
+      session leader with the slave as its controlling terminal, with
+      0/1/2 dup'd onto it. The master end stays in the agent and the
+      bytes are proxied through the existing control channel: writes
+      via `pty_write/2`, reads delivered to the owner as
+      `{:linx_process, :pty_out, bytes}`.
+
+  **Per-fd keyword list** — `[stdin: dir, stdout: dir, stderr: dir]`,
+  each `dir` one of:
+
+    * `:inherit` — leave that fd untouched.
+    * `:devnull` — dup `/dev/null` onto it.
+    * `{:connect_unix, "/path/to/socket"}` — the workload connects an
+      `AF_UNIX` stream socket to `path` and dup2's it onto the fd. The
+      listener at `path` is the caller's responsibility (must be
+      `:gen_tcp.listen`-ing before `spawn/1`).
+
+  Per-fd PTY directives are not supported — a PTY is one device shared
+  across all three fds; use the `:pty` shorthand.
   """
   @spec spawn(keyword) :: {:ok, t()} | {:error, term}
   def spawn(opts) do
@@ -224,22 +261,43 @@ defmodule Linx.Process do
   def info(_session), do: {:error, :not_yet_implemented}
 
   @doc """
-  Returns a handle to the workload's PTY master, when the session was
-  started with `stdio: :pty`.
+  Writes bytes to the workload's PTY master, which the workload sees as
+  input on its stdin. Returns `{:error, :no_pty}` if the session was
+  not started with `stdio: :pty`.
 
-  Lands in P4; today returns `{:error, :not_yet_implemented}`.
+  Fire-and-forget — bytes are handed to the agent (and from there to
+  the PTY); there is no acknowledgement.
   """
-  @spec pty_master(t()) :: {:ok, port()} | {:error, term}
-  def pty_master(_session), do: {:error, :not_yet_implemented}
+  @spec pty_write(t(), iodata()) :: :ok | {:error, term}
+  def pty_write(session, bytes) when is_pid(session) do
+    GenServer.call(session, {:pty_write, IO.iodata_to_binary(bytes)})
+  end
+
+  @doc """
+  Returns `{:ok, session}` if the session was started with `stdio: :pty`
+  — the session pid is itself the handle to read from (via
+  `{:linx_process, :pty_out, _}` events on the owner) and to write to
+  (via `pty_write/2`). Returns `{:error, :no_pty}` otherwise.
+
+  A future `Linx.Tty` subsystem will likely return something richer here
+  — a struct wrapping the session, terminal-mode helpers, etc. For
+  now it just confirms PTY-mode-ness.
+  """
+  @spec pty_master(t()) :: {:ok, t()} | {:error, term}
+  def pty_master(session) when is_pid(session) do
+    GenServer.call(session, :pty_master)
+  end
 
   # --- input validation -----------------------------------------------------
 
   defp build_spawn_request(opts) do
     with {:ok, argv} <- fetch_argv(opts),
          {:ok, namespaces} <- fetch_namespaces(opts),
-         {:ok, env} <- fetch_env(opts) do
+         {:ok, env} <- fetch_env(opts),
+         {:ok, stdio} <- fetch_stdio(opts) do
       request = %{argv: argv, namespaces: namespaces}
       request = if env, do: Map.put(request, :env, env), else: request
+      request = if stdio, do: Map.put(request, :stdio, stdio), else: request
       {:ok, request}
     end
   end
@@ -250,10 +308,12 @@ defmodule Linx.Process do
   defp build_enter_request(target_pid, opts) do
     with {:ok, argv} <- fetch_argv(opts),
          {:ok, namespaces} <- fetch_optional_namespaces(opts),
-         {:ok, env} <- fetch_env(opts) do
+         {:ok, env} <- fetch_env(opts),
+         {:ok, stdio} <- fetch_stdio(opts) do
       request = %{target: target_pid, argv: argv}
       request = if namespaces, do: Map.put(request, :namespaces, namespaces), else: request
       request = if env, do: Map.put(request, :env, env), else: request
+      request = if stdio, do: Map.put(request, :stdio, stdio), else: request
       {:ok, request}
     end
   end
@@ -315,6 +375,43 @@ defmodule Linx.Process do
     end
   end
 
+  # Decode the :stdio option into a shape the C agent can parse:
+  # either an atom (:inherit / :devnull / :pty), or a keyword list of
+  # per-fd directives. Returns {:ok, nil} if the key was absent (so the
+  # agent uses its built-in default, :inherit).
+  defp fetch_stdio(opts) do
+    case Keyword.fetch(opts, :stdio) do
+      :error -> {:ok, nil}
+      {:ok, atom} when atom in @valid_stdio_atoms -> {:ok, atom}
+      {:ok, list} when is_list(list) -> validate_per_fd_stdio(list)
+      _ -> {:error, :bad_stdio}
+    end
+  end
+
+  defp validate_per_fd_stdio(list) do
+    Enum.reduce_while(list, {:ok, []}, fn
+      {fd, directive}, {:ok, acc} when fd in [:stdin, :stdout, :stderr] ->
+        case validate_per_fd_directive(directive) do
+          :ok -> {:cont, {:ok, [{fd, directive} | acc]}}
+          {:error, _} = err -> {:halt, err}
+        end
+
+      _other, _ ->
+        {:halt, {:error, :bad_stdio}}
+    end)
+    |> case do
+      {:ok, pairs} -> {:ok, Enum.reverse(pairs)}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp validate_per_fd_directive(atom) when atom in @valid_per_fd_atoms, do: :ok
+
+  defp validate_per_fd_directive({:connect_unix, path}) when is_binary(path),
+    do: :ok
+
+  defp validate_per_fd_directive(_), do: {:error, :bad_stdio}
+
   # --- GenServer ------------------------------------------------------------
 
   @impl true
@@ -340,12 +437,19 @@ defmodule Linx.Process do
         running?: false,
         pending_signals: [],
         waiters: [],
-        result: nil
+        result: nil,
+        pty?: pty?(command)
       }
 
       {:ok, state}
     end
   end
+
+  # A spawn/enter request is in PTY mode iff its :stdio key is exactly :pty.
+  # Per-fd keyword lists never carry PTY (PTY needs all three fds wired to
+  # the same slave).
+  defp pty?({_tag, %{stdio: :pty}}), do: true
+  defp pty?(_), do: false
 
   @impl true
   def handle_call(:proceed, _from, %{port: port, child_pid: child_pid} = state)
@@ -386,6 +490,29 @@ defmodule Linx.Process do
     {:noreply, %{state | waiters: [from | state.waiters]}}
   end
 
+  # PTY write -- only valid when the session is in PTY mode.
+  def handle_call({:pty_write, bytes}, _from, %{pty?: true, port: port} = state)
+      when port != nil do
+    Port.command(port, :erlang.term_to_binary({:pty_in, bytes}))
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:pty_write, _bytes}, _from, %{pty?: false} = state) do
+    {:reply, {:error, :no_pty}, state}
+  end
+
+  def handle_call({:pty_write, _bytes}, _from, state) do
+    {:reply, {:error, :session_ended}, state}
+  end
+
+  def handle_call(:pty_master, _from, %{pty?: true} = state) do
+    {:reply, {:ok, self()}, state}
+  end
+
+  def handle_call(:pty_master, _from, state) do
+    {:reply, {:error, :no_pty}, state}
+  end
+
   # Map the internal result tuple onto the shape `wait/1` documents.
   defp normalise_result({:exited, _} = r), do: {:ok, r}
   defp normalise_result({:signaled, _} = r), do: {:ok, r}
@@ -417,6 +544,10 @@ defmodule Linx.Process do
       {:error, errno, stage} ->
         send(state.owner, {:linx_process, :error, errno, stage})
         {:noreply, finalise(state, {:error, %{errno: errno, stage: stage}})}
+
+      {:pty_out, bytes} ->
+        send(state.owner, {:linx_process, :pty_out, bytes})
+        {:noreply, state}
     end
   end
 

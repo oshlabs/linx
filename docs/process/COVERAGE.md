@@ -45,9 +45,9 @@ A living doc — update as primitives ship. Status legend:
 | Directive | Status | Notes |
 |---|---|---|
 | `:inherit` (default) | ✅ | implicit — agent doesn't touch fds 0/1/2 |
-| `:devnull` | ⬜ | P4 |
-| `{:connect_unix, path}` | ⬜ | P4 |
-| `{:pty, opts}` (PTY master back to BEAM) | ⬜ | P4 — interactive pumping is `Linx.Tty` |
+| `:devnull` | ✅ | P4 |
+| `{:connect_unix, path}` | ✅ | P4 |
+| `:pty` (PTY master proxied through control channel) | ✅ | P4 — interactive pumping is `Linx.Tty` |
 
 ## Composition with other subsystems
 

@@ -1,11 +1,11 @@
 # Linx.Process — implementation plan
 
-> **P0–P3 have shipped** on branch `process-foundations`: the
+> **P0–P4 have shipped** on branch `process-foundations`: the
 > Port-based agent, `Linx.Process.spawn/1` with the checkpoint protocol,
 > namespace selection (`:net` verified end-to-end against `Linx.Netlink`),
 > structured pre-exec errors, `proceed/1`, `signal/2` (with pre-running
-> buffering), `wait/1`/`wait/2`, and `enter/2` for joining an existing
-> target's namespaces. P4 below is the roadmap.
+> buffering), `wait/1`/`wait/2`, `enter/2` for joining an existing
+> target's namespaces, and `:stdio` plumbing primitives including PTY.
 
 ## Goal
 
@@ -198,6 +198,8 @@ code that needs them; commit + push per milestone.
   (explicit) covered.
 
 ### P4 — Stdio plumbing primitives (including PTY)
+
+✅ **Shipped.**
 
 The C agent gains an optional `:stdio` directive controlling fd 0/1/2 in
 the child before `execve`. *Pure mechanism* — no listener ownership, no

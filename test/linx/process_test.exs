@@ -178,6 +178,129 @@ defmodule Linx.ProcessTest do
     end
   end
 
+  describe "stdio plumbing" do
+    test "stdio: :inherit is accepted (the default; happy path covered elsewhere)" do
+      # All the other tests run with implicit :inherit; this one just
+      # confirms passing the atom explicitly also works. Drives the full
+      # lifecycle so the agent doesn't linger in await_proceed past the
+      # end of the test.
+      {:ok, session} = P.spawn(argv: ["/bin/true"], stdio: :inherit)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+    end
+
+    test "rejects an unknown :stdio atom" do
+      assert {:error, :bad_stdio} = P.spawn(argv: ["/bin/true"], stdio: :tty)
+    end
+
+    test "rejects an invalid per-fd directive" do
+      assert {:error, :bad_stdio} =
+               P.spawn(argv: ["/bin/true"], stdio: [stdin: :something_weird])
+    end
+
+    test ":devnull silences a chatty workload" do
+      # echo writes to stdout; with stdio :devnull the test process should
+      # not see "noise" in its mailbox.
+      {:ok, session} =
+        P.spawn(argv: ["/bin/echo", "noise"], stdio: :devnull)
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      refute_received {:linx_process, :pty_out, _}
+    end
+
+    test "{:connect_unix, path} delivers stdout bytes to a host listener" do
+      socket_path =
+        Path.join(System.tmp_dir!(), "linx_test_#{System.unique_integer([:positive])}.sock")
+
+      _ = File.rm(socket_path)
+
+      {:ok, listener} =
+        :gen_tcp.listen(0, [
+          {:ifaddr, {:local, socket_path}},
+          :binary,
+          {:active, false}
+        ])
+
+      try do
+        {:ok, session} =
+          P.spawn(
+            argv: ["/bin/echo", "hello-from-the-child"],
+            stdio: [stdout: {:connect_unix, socket_path}]
+          )
+
+        assert_receive {:linx_process, :ready, _}, 2_000
+        :ok = P.proceed(session)
+
+        {:ok, sock} = :gen_tcp.accept(listener, 2_000)
+        assert {:ok, "hello-from-the-child\n"} = :gen_tcp.recv(sock, 0, 2_000)
+        :gen_tcp.close(sock)
+
+        assert_receive {:linx_process, :exited, 0}, 2_000
+      after
+        :gen_tcp.close(listener)
+        File.rm(socket_path)
+      end
+    end
+
+    test "stdio: :pty round-trips bytes through the control channel" do
+      # /bin/echo writes "hi" + newline to stdout. With stdio :pty the
+      # bytes flow back as {:linx_process, :pty_out, _}.
+      {:ok, session} = P.spawn(argv: ["/bin/echo", "hi"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      assert {:ok, ^session} = P.pty_master(session)
+
+      :ok = P.proceed(session)
+
+      # A PTY in cooked mode translates LF to CRLF on output -- expect "hi\r\n".
+      assert_pty_out_contains(session, "hi\r\n", 2_000)
+
+      assert {:ok, {:exited, 0}} = P.wait(session, 2_000)
+    end
+
+    test "pty_write/2 errors when the session isn't in PTY mode" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      assert {:error, :no_pty} = P.pty_write(session, "hello")
+      assert {:error, :no_pty} = P.pty_master(session)
+
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+  end
+
+  # Collect :pty_out chunks until the cumulative bytes contain `needle` or
+  # the timeout expires. The agent emits chunks as the workload writes
+  # them, so output can arrive split across messages.
+  defp assert_pty_out_contains(_session, needle, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    loop_pty_out("", needle, deadline)
+  end
+
+  defp loop_pty_out(seen, needle, deadline) do
+    if String.contains?(seen, needle) do
+      :ok
+    else
+      remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+      receive do
+        {:linx_process, :pty_out, chunk} ->
+          loop_pty_out(seen <> chunk, needle, deadline)
+      after
+        remaining ->
+          flunk("expected pty_out containing #{inspect(needle)}, got #{inspect(seen)}")
+      end
+    end
+  end
+
   describe "enter/2" do
     test "rejects a non-positive target pid" do
       assert_raise FunctionClauseError, fn -> P.enter(0, argv: ["/bin/true"]) end
