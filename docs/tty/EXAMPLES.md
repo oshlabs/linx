@@ -138,6 +138,30 @@ The mechanics:
      `restore_and_close/2` unconditionally — so your terminal can
      never be left in raw mode, even if the pump raises mid-flight.
 
+### Known limitation: input is unreliable when called from iex
+
+When `attach/2` runs from inside `iex -S mix`, you'll typically see
+*every other character you type* drop — they go to Erlang's
+`user_drv` / `prim_tty` driver (which is also reading `/dev/tty` to
+pre-buffer input for the next iex prompt) instead of to your
+attached workload.
+
+End-to-end the architecture works — `exit` from the attached bash
+does land you back at iex with the correct exit code — but typing
+arbitrary commands inside the attached shell is currently broken.
+
+**Workaround for now**: run iex with the shell input driver
+disabled. (The exact escape hatch is OTP-version-specific; this is
+the thing T4 needs to investigate.) Alternatively call `attach/2`
+from a non-iex context (`escript`, a supervised application, a
+test).
+
+**Proper fix**: lands in T4 — see `PLAN.md`. The leading candidate
+is `tcsetpgrp(2)` so attach becomes the foreground process group on
+`/dev/tty` for its duration, with the BEAM (including `user_drv`)
+backgrounded; `user_drv`'s reads then `SIGTTIN`/`EIO` and stop
+competing. Restored on exit.
+
 ### The owner requirement
 
 The pump waits for `{:linx_process, :pty_out, _}` in the caller's

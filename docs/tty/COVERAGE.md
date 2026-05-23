@@ -21,7 +21,7 @@ A living doc — update as primitives ship. Status legend:
 | `restore_and_close/2` | ✅ | T1 — idempotent against already-closed |
 | `window_size/1` (`TIOCGWINSZ`) | ✅ | T1 |
 | `set_window_size/2` (`TIOCSWINSZ`) | ✅ | T1 |
-| `attach/2` | ✅ | T2 — byte pump between local tty and `Linx.Process` PTY |
+| `attach/2` | 🟡 | T2 — byte pump works end-to-end; input racy when called from iex (Erlang's user_drv competes for `/dev/tty` reads — T4 follow-up) |
 | Initial winsize seed in `attach/2` | ✅ | T3 |
 | SIGWINCH-driven runtime propagation | ⬜ | follow-up — needs signalfd NIF |
 

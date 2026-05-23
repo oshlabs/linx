@@ -264,6 +264,85 @@ once at startup, which is exactly what the T3 initial seed gives
 them — but a true `docker attach` ergonomically wants the runtime
 updates too.
 
+### T4 — Coexisting with iex's tty driver
+
+✅ Manual sanity test confirmed end-to-end: spawn bash with
+`stdio: :pty` + `proceed` + `Tty.attach(:controlling, c)` from
+`iex -S mix` lands in a real bash inside the container; typing
+`exit` returns to iex with `{:ok, {:exited, 127}}`. But **input
+arrives every-other-character** — half the user's keystrokes never
+reach bash.
+
+**Root cause (high-confidence diagnosis).** Both readers are open on
+the same controlling terminal:
+
+  1. Our `attach/2` wraps `/dev/tty` via `:erlang.open_port({:fd, fd, fd}, …)`
+     and reads from it.
+  2. Erlang's `user_drv` / `prim_tty` (the new OTP 26+ shell tty
+     driver) *also* has `/dev/tty` (or fd 0, which is the same tty)
+     open and reads from it — pre-reading input so type-ahead at the
+     iex prompt works while iex is busy evaluating something.
+
+Both are blocked on `read(2)` against the same kernel tty buffer.
+The kernel hands each keystroke to whichever read is current; with
+two readers in tight alternation, you get exactly the observed
+every-other-byte split. The keystrokes that go to `user_drv` are
+buffered for the next iex `get_line` and never reach bash. The
+"extra space" in `p s` was probably a stray echo or filler from
+`prim_tty` interpreting its half of the bytes.
+
+**Confirmation test** (cheap, do this first): after `attach/2` returns
+from a session where bytes were lost, type some characters at the
+iex prompt without pressing Enter. If you see the "lost" bytes
+appear, that's `user_drv` replaying its pre-read buffer — definitive
+proof of the diagnosis.
+
+**Fix paths**, in increasing order of cleanness:
+
+1. **Public docs workaround** — start iex with `--no-shell` or
+   `--user :erl_init_no_input` (or whatever the OTP 28 escape hatch
+   is) when you want to use `attach/2`. Loses iex history but kills
+   the competing reader entirely. Cheap; gets the use case working
+   for early adopters while we build the proper fix.
+
+2. **`:io.setopts(:standard_io, …)`** — Erlang's documented IO
+   options. Worth investigating whether any combination
+   (`echo: false`, `expand_fun: nil`, etc.) actually suspends
+   `prim_tty`'s reader. Probably not — these affect echo and
+   line-edit behaviour but not the underlying read loop.
+
+3. **`prim_tty` private API** — OTP 26+'s `prim_tty` is the actual
+   driver; it must have some "pause" or "give up the tty" affordance
+   for `user_drv` to do its job correctly during job control. Read
+   the OTP source for `prim_tty.erl` and `user_drv.erl`, find the
+   API (likely undocumented), use it. Fragile across OTP versions
+   but probably the right answer.
+
+4. **Foreground-process-group trick** — `tcsetpgrp(2)` on `/dev/tty`
+   to put attach's caller in the foreground group, leaving the BEAM
+   in the background. `user_drv`'s reads then fail with `EIO` /
+   `SIGTTIN` (background process trying to read tty) and `user_drv`
+   stops trying. Restore on exit. This is what `vim` does when it
+   takes over the terminal. Needs `tcsetpgrp` exposed via NIF on
+   `Linx.Tty.Native`; the trick is well-trodden in C land.
+
+5. **`Linx.Tty.with_exclusive_tty/1`** — the public wrapper that
+   becomes the canonical entry point for attach-from-iex. Takes a
+   fun, suspends/foregrounds, runs it, restores. `Linx.Tty.attach/2`
+   internally calls through it (or its body) when the caller is iex.
+
+**Scope of T4 ship**: the *proper fix* via (3) or (4); update
+`attach/2` to use it; document in EXAMPLES.md; remove the
+known-limitation note. The pragmatic (1) workaround can be
+mentioned along the way for anyone wanting to test today.
+
+**Tests**: this is fundamentally interactive — hard to assert in
+`mix test`. The acceptance test lives in `docs/tty/EXAMPLES.md` as a
+specific manual procedure: spawn `cat` via stdio: :pty, attach,
+type "hello world", verify *every character* arrives, observe `cat`
+echoing the whole string. If T4 ships, that procedure must
+succeed.
+
 ## Testing
 
 Same three bands as the other subsystems; same commit-with-its-tests
