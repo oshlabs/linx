@@ -24,7 +24,53 @@ Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Wi
 
 ## The headline example
 
-The three subsystems composing into something concrete: spawn a real process in a fresh set of namespaces, configure its network from the outside while the child is parked, hand your terminal over to it, type into a shell inside the container.
+Spawn a rootless namespaced bash, attach our terminal to it, run a few real commands inside, exit back to iex — verbatim transcript from an actual session:
+
+```
+[ldr@fry linx]$ iex -S mix
+Erlang/OTP 28 [erts-16.3.1] [source] [64-bit] [smp:8:8] [ds:8:8:10] [async-threads:1] [jit:ns]
+
+Interactive Elixir (1.19.5) - press Ctrl+C to exit (type h() ENTER for help)
+iex(1)> {:ok, c} =
+          Linx.Process.spawn(
+            argv: ["/bin/bash"],
+            namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
+            stdio: :pty
+          )
+{:ok, #PID<0.179.0>}
+iex(2)> Linx.Process.proceed(c)
+:ok
+iex(3)> Linx.Tty.attach(:controlling, c)
+[nobody@fry linx]$ whoami
+nobody
+[nobody@fry linx]$ env | head -n3
+SHELL=/usr/bin/bash
+SESSION_MANAGER=local/fry:@/tmp/.ICE-unix/2936,unix/fry:/tmp/.ICE-unix/2936
+WINDOWID=94479143562352
+[nobody@fry linx]$ ps | head -n3
+    PID TTY          TIME CMD
+      1 ?        00:00:13 systemd
+      2 ?        00:00:00 kthreadd
+[nobody@fry linx]$ w
+ 23:11:36 up 3 days,  9:22,  1 user,  load average: 0.51, 1.12, 1.70
+USER     TTY       LOGIN@   IDLE   JCPU   PCPU  WHAT
+ldr      tty1      Wed13    3days  0.04s  0.04s /usr/lib/sddm/sddm-helper ...
+[nobody@fry linx]$ exit
+exit
+{:ok, {:exited, 0}}
+iex(4)>
+```
+
+A few things worth noticing in that session:
+
+- **Rootless.** No `sudo` to start iex. The `:user` namespace gives the BEAM ephemeral privilege inside the new user ns, which is what makes the other namespaces creatable — and inside, we're an unprivileged `nobody`.
+- **`ps` shows host processes.** The `:mount` namespace is fresh, but `/proc` hasn't been remounted inside it, so `ps` reads the host's `/proc` and sees host PIDs. `Linx.Mount` (next subsystem on the roadmap) is what will make a clean `/proc` view possible.
+- **`exit` returns to iex with `{:ok, {:exited, 0}}`.** The session's exit code propagates back as a plain Elixir return value, after `attach/2` restores the local terminal.
+- **No explicit `receive` for the lifecycle events.** The session emits `{:linx_process, :ready, _}` and `:running` into the iex evaluator's mailbox in the background; `attach/2`'s pump only matches on the messages it cares about, so the lifecycle events are just left there for a later `flush()` if you want to look. If you need the host pid (e.g. to configure the child's netns from the outside), `receive` for `:ready` before `proceed/1` — see the next example.
+
+### Going further: configure the container's network before bash starts
+
+The transcript above doesn't touch `Linx.Netlink`. Adding it lets you configure the child's network from the host *while the child is parked at the checkpoint between `clone()` and `execve()`*:
 
 ```elixir
 iex> alias Linx.Process, as: P
@@ -32,38 +78,29 @@ iex> alias Linx.Netlink.Rtnl
 iex> alias Linx.Netlink.Rtnl.{Address, Link, Route}
 iex> alias Linx.Tty
 
-# Spawn /bin/bash in fresh net + mount + pid + uts + ipc namespaces,
-# with a PTY for stdio. The child blocks at a checkpoint before exec.
-iex> {:ok, c} = P.spawn(
-...>   argv: ["/bin/bash"],
-...>   namespaces: [:net, :mount, :pid, :uts, :ipc],
-...>   stdio: :pty
-...> )
-iex> receive do {:linx_process, :ready, host_pid} -> host_pid end
-41234
+iex> {:ok, c} =
+...>   P.spawn(
+...>     argv: ["/bin/bash"],
+...>     namespaces: [:net, :mount, :pid, :uts, :ipc],
+...>     stdio: :pty
+...>   )
+iex> host_pid = receive do {:linx_process, :ready, p} -> p end
 
 # Host-side: build a macvlan off eth0 and hand it to the child as ct0.
 iex> {:ok, host} = Rtnl.open()
 iex> :ok = Link.create_macvlan(host, "ct0", "eth0", :bridge)
-iex> :ok = Link.move_to_netns(host, "ct0", 41234)
+iex> :ok = Link.move_to_netns(host, "ct0", host_pid)
 
 # Inside the child's still-fresh netns: configure ct0 and a default route.
-iex> {:ok, ns} = Rtnl.open({:pid, 41234})
+iex> {:ok, ns} = Rtnl.open({:pid, host_pid})
 iex> :ok = Link.set_up(ns, "lo")
 iex> :ok = Address.add(ns, "ct0", "10.0.0.5", 24)
 iex> :ok = Link.set_up(ns, "ct0")
 iex> :ok = Route.add_default(ns, "10.0.0.1")
 
-# Release the child past the checkpoint -- it execs bash now.
+# Release the child -- it execs bash now, with a fully configured network.
 iex> P.proceed(c)
-iex> receive do {:linx_process, :running} -> :ok end
-
-# Hand /dev/tty over to the workload's PTY master. Your iex prompt
-# *becomes* the bash inside the container -- type, run vim, resize the
-# terminal, exit. attach returns when bash does, and the original iex
-# prompt is back.
 iex> Tty.attach(:controlling, c)
-{:ok, {:exited, 0}}
 ```
 
 The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`. They compose because they share clean primitives, not because there's a framework holding them together.
