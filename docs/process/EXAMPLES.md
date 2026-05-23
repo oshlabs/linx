@@ -305,9 +305,35 @@ iex> P.wait(c)
 {:ok, {:signaled, 9}}
 ```
 
-This is the primitive the future [Linx.Tty](../tty/) subsystem will
-compose with — see the "iex on a Nerves device becomes a container's
-bash" use case in `PLAN.md`.
+### Setting the PTY's window size
+
+A PTY-mode session's window size starts at whatever the kernel
+defaulted to when the agent opened the slave (usually 0x0). Set it
+explicitly with `pty_set_winsize/2`, either before `proceed/1` (so the
+workload sees the right size from the moment it `execve`s) or
+post-running (so a runtime update reaches the workload via `SIGWINCH`):
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/bin/sh", "-c", "stty size"], stdio: :pty)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.pty_set_winsize(c, {24, 80, 0, 0})           # rows, cols, xpix, ypix
+:ok
+iex> P.proceed(c)
+iex> receive do {:linx_process, :pty_out, b} -> b end
+"24 80\r\n"
+```
+
+A struct (or any map) with `:rows`/`:cols`/`:xpixel`/`:ypixel` fields
+also works — `Linx.Tty.WindowSize` is the canonical such struct:
+
+```elixir
+iex> P.pty_set_winsize(c, %{rows: 42, cols: 132, xpixel: 0, ypixel: 0})
+:ok
+```
+
+This is the primitive the [`Linx.Tty`](../tty/) subsystem composes
+with — `Linx.Tty.attach/2` calls `pty_set_winsize/2` automatically at
+entry, seeding the workload with the caller's terminal size.
 
 ## Not yet implemented
 

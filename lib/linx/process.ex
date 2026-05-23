@@ -274,6 +274,43 @@ defmodule Linx.Process do
   end
 
   @doc """
+  Sets the workload's PTY window size (`TIOCSWINSZ` on the master end,
+  via the agent).
+
+  Accepts either a 4-tuple `{rows, cols, xpixel, ypixel}` or any map
+  / struct exposing those fields (`Linx.Tty.WindowSize` is the
+  canonical such struct, but `Linx.Process` deliberately doesn't
+  depend on `Linx.Tty` — duck-typing on the field shape avoids the
+  cross-subsystem dependency).
+
+  Best-effort on the agent side: the workload will see `SIGWINCH` and
+  the new size on its next `TIOCGWINSZ`, but no error is propagated
+  back if the ioctl fails. Returns `{:error, :no_pty}` if the session
+  wasn't started with `stdio: :pty`.
+  """
+  @spec pty_set_winsize(
+          t(),
+          {non_neg_integer, non_neg_integer, non_neg_integer, non_neg_integer}
+          | %{
+              :rows => non_neg_integer,
+              :cols => non_neg_integer,
+              :xpixel => non_neg_integer,
+              :ypixel => non_neg_integer,
+              optional(any) => any
+            }
+        ) :: :ok | {:error, term}
+  def pty_set_winsize(session, {rows, cols, xpix, ypix})
+      when is_pid(session) and is_integer(rows) and is_integer(cols) and
+             is_integer(xpix) and is_integer(ypix) and
+             rows >= 0 and cols >= 0 and xpix >= 0 and ypix >= 0 do
+    GenServer.call(session, {:pty_winsize, {rows, cols, xpix, ypix}})
+  end
+
+  def pty_set_winsize(session, %{rows: r, cols: c, xpixel: xp, ypixel: yp}) do
+    pty_set_winsize(session, {r, c, xp, yp})
+  end
+
+  @doc """
   Returns `{:ok, session}` if the session was started with `stdio: :pty`
   — the session pid is itself the handle to read from (via
   `{:linx_process, :pty_out, _}` events on the owner) and to write to
@@ -511,6 +548,20 @@ defmodule Linx.Process do
 
   def handle_call(:pty_master, _from, state) do
     {:reply, {:error, :no_pty}, state}
+  end
+
+  # Winsize forwarding -- only meaningful in PTY mode.
+  def handle_call({:pty_winsize, _ws}, _from, %{pty?: false} = state) do
+    {:reply, {:error, :no_pty}, state}
+  end
+
+  def handle_call({:pty_winsize, _ws}, _from, %{port: nil} = state) do
+    {:reply, {:error, :session_ended}, state}
+  end
+
+  def handle_call({:pty_winsize, ws}, _from, %{port: port} = state) do
+    Port.command(port, :erlang.term_to_binary({:pty_winsize, ws}))
+    {:reply, :ok, state}
   end
 
   # Map the internal result tuple onto the shape `wait/1` documents.

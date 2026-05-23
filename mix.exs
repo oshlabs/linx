@@ -14,8 +14,9 @@ defmodule Linx.MixProject do
       # `mix compile`:
       #   * :netlink_nif    -- the netlink_socket NIF (Linx.Netlink)
       #   * :linx_process   -- the linx_process Port binary (Linx.Process)
+      #   * :linx_tty       -- the linx_tty NIF (Linx.Tty)
       # See lib/mix/tasks/compile.*.ex.
-      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process],
+      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process, :linx_tty],
       deps: deps(),
       name: "Linx",
       description: "Linux kernel interfaces for Elixir — netlink, and more.",
@@ -50,7 +51,11 @@ defmodule Linx.MixProject do
         "docs/process/EXAMPLES.md",
         "docs/process/PLAN.md",
         "docs/process/COVERAGE.md",
-        "docs/process/REFERENCES.md"
+        "docs/process/REFERENCES.md",
+        "docs/tty/EXAMPLES.md",
+        "docs/tty/PLAN.md",
+        "docs/tty/COVERAGE.md",
+        "docs/tty/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -66,6 +71,12 @@ defmodule Linx.MixProject do
           "docs/process/COVERAGE.md",
           "docs/process/REFERENCES.md"
         ],
+        "Tty — guides": ["docs/tty/EXAMPLES.md"],
+        "Tty — design": [
+          "docs/tty/PLAN.md",
+          "docs/tty/COVERAGE.md",
+          "docs/tty/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -76,6 +87,12 @@ defmodule Linx.MixProject do
         ],
         Process: [
           Linx.Process
+        ],
+        Tty: [
+          Linx.Tty,
+          Linx.Tty.Saved,
+          Linx.Tty.WindowSize,
+          Linx.Tty.Native
         ],
         "Netlink core": [
           Linx.Netlink,

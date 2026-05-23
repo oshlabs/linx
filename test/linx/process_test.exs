@@ -269,11 +269,48 @@ defmodule Linx.ProcessTest do
 
       assert {:error, :no_pty} = P.pty_write(session, "hello")
       assert {:error, :no_pty} = P.pty_master(session)
+      assert {:error, :no_pty} = P.pty_set_winsize(session, {24, 80, 0, 0})
 
       :ok = P.proceed(session)
       assert_receive {:linx_process, :running}, 2_000
       :ok = P.signal(session, 9)
       assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "pty_set_winsize/2 propagates the size to the workload" do
+      # /usr/bin/stty (or /bin/stty -- via sh's PATH lookup) prints
+      # "<rows> <cols>" on stdout when called with `size`. With the
+      # workload running on a PTY, that's an observable signal that
+      # TIOCSWINSZ on the master propagated through.
+      {:ok, session} =
+        P.spawn(argv: ["/bin/sh", "-c", "stty size"], stdio: :pty)
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      # Set the size *before* proceed -- stty reads the size when it
+      # starts, so the ioctl needs to land on the master before the
+      # child execve's.
+      :ok = P.pty_set_winsize(session, {42, 132, 0, 0})
+
+      :ok = P.proceed(session)
+      assert_pty_out_contains(session, "42 132", 2_000)
+      assert {:ok, {:exited, 0}} = P.wait(session, 2_000)
+    end
+
+    test "pty_set_winsize/2 accepts a struct-shaped map" do
+      {:ok, session} =
+        P.spawn(argv: ["/bin/sh", "-c", "stty size"], stdio: :pty)
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      # Pretending to be %Linx.Tty.WindowSize{} -- Linx.Process duck-types
+      # on the field shape so it doesn't need to depend on Linx.Tty.
+      ws = %{rows: 21, cols: 99, xpixel: 0, ypixel: 0}
+      :ok = P.pty_set_winsize(session, ws)
+
+      :ok = P.proceed(session)
+      assert_pty_out_contains(session, "21 99", 2_000)
+      assert {:ok, {:exited, 0}} = P.wait(session, 2_000)
     end
   end
 
