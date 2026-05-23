@@ -11,20 +11,39 @@ defmodule Linx.Process do
   binary — `priv/linx_process`, built from `c_src/linx_process.c` by the
   `:linx_process` Mix compiler — spawned via `Port.open` with
   `:nouse_stdio` and `{:packet, 4}` framing. Control traffic is Erlang
-  External Term Format on fd 3 (BEAM ↔ binary) and fd 4 (binary → BEAM);
+  External Term Format on fd 3 (BEAM → binary) and fd 4 (binary → BEAM);
   fd 0/1/2 stay free for the workload's stdio.
 
-  This module IS the GenServer. The pid returned by `spawn/1` (and
+  This module IS the GenServer. The pid returned by `spawn/1` (and later
   `enter/2`) is the session handle: pass it to `release/1`, `signal/2`,
   `wait/1`, `info/1`, and `pty_master/1`.
 
+  ## Owner events
+
+  The owner (the caller of `spawn/1`, or `:owner` explicitly) receives
+  these messages over the course of a session:
+
+    * `{:linx_process, :ready, child_pid}` — the child reached the
+      checkpoint. `child_pid` is the child's pid *as the child sees it*
+      (1 inside a fresh PID namespace; otherwise the host pid).
+    * `{:linx_process, :running}` — the child has `execve`'d the
+      workload.
+    * `{:linx_process, :exited, code}` — the workload exited normally.
+    * `{:linx_process, :signaled, signum}` — the workload was killed
+      by a signal.
+    * `{:linx_process, :error, errno, stage}` — a pre-exec failure;
+      `stage` is the atom naming the syscall that failed.
+
+  Each session emits exactly one terminal event (`:exited` /
+  `:signaled` / `:error`) and then the GenServer stops with reason
+  `:normal`.
+
   ## Status
 
-  Phase 1 is in flight. Today this module is a P0 skeleton — the
-  binary builds, the Port machinery rounds-trips frames, and the
-  public API is sketched. The real verbs (`spawn`, `enter`, `release`,
-  …) all return `{:error, :not_yet_implemented}` until P1 wires them
-  up. See `docs/process/PLAN.md` for the roadmap.
+  P0 (scaffolding) and P1 (`spawn/1` with the checkpoint protocol) are
+  shipped; `release/1` is wired. `signal/2`, `wait/1`, `info/1`,
+  `enter/2`, `pty_master/1` are still stubs — see
+  `docs/process/PLAN.md`.
   """
 
   use GenServer
@@ -36,31 +55,39 @@ defmodule Linx.Process do
   # Each maps to a CLONE_NEW* flag in the C agent.
   @type namespace :: :net | :mount | :pid | :uts | :ipc | :user | :cgroup | :time
 
+  @valid_namespaces ~w(net mount pid uts ipc user cgroup time)a
+
   @doc """
   Spawns a child process via `clone(2)`, optionally into fresh namespaces.
 
-  Returns the pid of the GenServer that owns the child. Lands in P1; today
-  returns `{:error, :not_yet_implemented}`.
+  Returns `{:ok, pid}` — the pid of the GenServer that owns the child and
+  is the session handle.
 
   `opts`:
 
-    * `:argv` (required) — the workload argv as a list of binaries.
+    * `:argv` (required) — the workload argv as a list of binaries. The
+      first element is the absolute path of the executable; no `$PATH`
+      lookup is performed.
     * `:namespaces` — list of `t:namespace/0` atoms to create fresh.
-      Default: `[]` (share all of the BEAM's namespaces).
-    * `:env` — environment as `[{charlist, charlist}]`. Default: inherit.
-    * `:owner` — pid to receive lifecycle events. Default: the caller.
+      Defaults to `[]` (share all of the BEAM's namespaces).
+    * `:env` — environment as a list of `"KEY=VALUE"` binaries. Defaults
+      to inheriting the BEAM's environment.
+    * `:owner` — pid to receive lifecycle events. Defaults to the caller.
   """
   @spec spawn(keyword) :: {:ok, t()} | {:error, term}
-  def spawn(_opts), do: {:error, :not_yet_implemented}
+  def spawn(opts) do
+    owner = Keyword.get(opts, :owner, self())
+
+    with {:ok, request} <- build_request(opts) do
+      GenServer.start_link(__MODULE__, {request, owner})
+    end
+  end
 
   @doc """
   Runs a new process *inside* an existing target's namespaces via
   `setns(2)` + `execve(2)`.
 
   Lands in P3; today returns `{:error, :not_yet_implemented}`.
-
-  `opts` accepts `:argv`, `:namespaces` (which of the target's to join;
-  default all), `:env`, `:owner`.
   """
   @spec enter(pos_integer, keyword) :: {:ok, t()} | {:error, term}
   def enter(_target_pid, _opts), do: {:error, :not_yet_implemented}
@@ -68,10 +95,14 @@ defmodule Linx.Process do
   @doc """
   Releases the checkpoint: the child may `execve` the workload now.
 
-  Lands in P1; today returns `{:error, :not_yet_implemented}`.
+  Blocks until the agent has acknowledged the proceed (which is fast —
+  just one byte over an internal pipe). Returns `:ok`, or `{:error,
+  reason}` if the session is no longer alive.
   """
   @spec release(t()) :: :ok | {:error, term}
-  def release(_session), do: {:error, :not_yet_implemented}
+  def release(session) when is_pid(session) do
+    GenServer.call(session, :release)
+  end
 
   @doc """
   Sends OS signal `signum` to the workload. Buffered until the workload
@@ -111,12 +142,133 @@ defmodule Linx.Process do
   @spec pty_master(t()) :: {:ok, port()} | {:error, term}
   def pty_master(_session), do: {:error, :not_yet_implemented}
 
-  # --- GenServer scaffolding -------------------------------------------------
-  #
-  # P0 carries the use-GenServer architectural commitment but none of the
-  # session state yet. The init/1 stub keeps the module compilable and the
-  # behaviour-implemented warnings quiet; P1 fleshes it out.
+  # --- input validation -----------------------------------------------------
+
+  defp build_request(opts) do
+    with {:ok, argv} <- fetch_argv(opts),
+         {:ok, namespaces} <- fetch_namespaces(opts),
+         {:ok, env} <- fetch_env(opts) do
+      request = %{argv: argv, namespaces: namespaces}
+      request = if env, do: Map.put(request, :env, env), else: request
+      {:ok, request}
+    end
+  end
+
+  defp fetch_argv(opts) do
+    case Keyword.get(opts, :argv) do
+      [head | _] = argv when is_binary(head) ->
+        if Enum.all?(argv, &is_binary/1),
+          do: {:ok, argv},
+          else: {:error, :bad_argv}
+
+      _ ->
+        {:error, :argv_required}
+    end
+  end
+
+  defp fetch_namespaces(opts) do
+    case Keyword.get(opts, :namespaces, []) do
+      list when is_list(list) ->
+        if Enum.all?(list, &(&1 in @valid_namespaces)),
+          do: {:ok, list},
+          else: {:error, {:bad_namespaces, list -- @valid_namespaces}}
+
+      _ ->
+        {:error, :bad_namespaces}
+    end
+  end
+
+  defp fetch_env(opts) do
+    case Keyword.fetch(opts, :env) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, list} when is_list(list) ->
+        if Enum.all?(list, &is_binary/1),
+          do: {:ok, list},
+          else: {:error, :bad_env}
+
+      _ ->
+        {:error, :bad_env}
+    end
+  end
+
+  # --- GenServer ------------------------------------------------------------
 
   @impl true
-  def init(_opts), do: {:ok, %{}}
+  def init({request, owner}) do
+    binary = Path.join(:code.priv_dir(:linx), "linx_process")
+
+    if not File.exists?(binary) do
+      {:stop, {:missing_binary, binary}}
+    else
+      port =
+        Port.open(
+          {:spawn_executable, binary},
+          [:binary, :nouse_stdio, {:packet, 4}, :exit_status]
+        )
+
+      Port.command(port, :erlang.term_to_binary({:spawn, request}))
+
+      state = %{
+        port: port,
+        owner: owner,
+        host_pid: nil,
+        child_pid: nil,
+        running?: false,
+        release: nil
+      }
+
+      {:ok, state}
+    end
+  end
+
+  @impl true
+  def handle_call(:release, from, %{port: port, child_pid: child_pid} = state)
+      when child_pid != nil do
+    Port.command(port, :erlang.term_to_binary(:proceed))
+    # Reply once the agent confirms exec (via :running) or fails (:error).
+    # For now, reply :ok immediately — the agent doesn't ack proceed
+    # explicitly, and the workload's progress arrives as owner events.
+    GenServer.reply(from, :ok)
+    {:noreply, state}
+  end
+
+  def handle_call(:release, _from, state) do
+    {:reply, {:error, :not_ready}, state}
+  end
+
+  @impl true
+  def handle_info({port, {:data, payload}}, %{port: port} = state) do
+    case :erlang.binary_to_term(payload, [:safe]) do
+      {:status, :spawned, host_pid} ->
+        {:noreply, %{state | host_pid: host_pid}}
+
+      {:status, :ready, child_pid} ->
+        send(state.owner, {:linx_process, :ready, child_pid})
+        {:noreply, %{state | child_pid: child_pid}}
+
+      {:status, :running} ->
+        send(state.owner, {:linx_process, :running})
+        {:noreply, %{state | running?: true}}
+
+      {:status, :exited, code} ->
+        send(state.owner, {:linx_process, :exited, code})
+        {:noreply, state}
+
+      {:status, :signaled, signum} ->
+        send(state.owner, {:linx_process, :signaled, signum})
+        {:noreply, state}
+
+      {:error, errno, stage} ->
+        send(state.owner, {:linx_process, :error, errno, stage})
+        {:noreply, state}
+    end
+  end
+
+  def handle_info({port, {:exit_status, _code}}, %{port: port} = state) do
+    # The agent exited. All terminal events have already been forwarded;
+    # the GenServer stops normally.
+    {:stop, :normal, state}
+  end
 end

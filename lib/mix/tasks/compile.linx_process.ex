@@ -62,7 +62,9 @@ defmodule Mix.Tasks.Compile.LinxProcess do
     args =
       ~w(-std=c11 -Wall -Wextra -Wpedantic -D_GNU_SOURCE) ++
         debug ++
-        ["-o", output, source]
+        ["-I", ei_include_dir(), "-L", ei_lib_dir()] ++
+        ["-o", output, source] ++
+        ~w(-lei -lpthread)
 
     Mix.shell().info("compiling #{@source} -> priv/#{@artifact}")
 
@@ -74,4 +76,19 @@ defmodule Mix.Tasks.Compile.LinxProcess do
         Mix.raise("linx_process: #{cc} failed (exit #{status})\n#{output}")
     end
   end
+
+  # erl_interface ships with OTP under `erl_interface-<version>/`; libei.a
+  # is the static archive we link in. :code.lib_dir/1 is unreliable here
+  # (the app may not be loaded during `mix compile`), so we resolve the
+  # directory by globbing under the OTP root -- same strategy
+  # `compile.netlink_nif` uses for the erts include dir.
+  defp ei_dir do
+    case Path.wildcard(Path.join(:code.root_dir(), "lib/erl_interface-*")) do
+      [] -> Mix.raise("linx_process: erl_interface not found under #{:code.root_dir()}")
+      dirs -> dirs |> Enum.sort() |> List.last()
+    end
+  end
+
+  defp ei_include_dir, do: Path.join(ei_dir(), "include")
+  defp ei_lib_dir, do: Path.join(ei_dir(), "lib")
 end

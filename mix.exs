@@ -46,7 +46,11 @@ defmodule Linx.MixProject do
         "docs/netlink/EXAMPLES.md",
         "docs/netlink/PLAN.md",
         "docs/netlink/COVERAGE.md",
-        "docs/netlink/REFERENCES.md"
+        "docs/netlink/REFERENCES.md",
+        "docs/process/EXAMPLES.md",
+        "docs/process/PLAN.md",
+        "docs/process/COVERAGE.md",
+        "docs/process/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -56,6 +60,12 @@ defmodule Linx.MixProject do
           "docs/netlink/COVERAGE.md",
           "docs/netlink/REFERENCES.md"
         ],
+        "Process — guides": ["docs/process/EXAMPLES.md"],
+        "Process — design": [
+          "docs/process/PLAN.md",
+          "docs/process/COVERAGE.md",
+          "docs/process/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -63,6 +73,9 @@ defmodule Linx.MixProject do
           Linx.IP,
           Linx.IP.Subnet,
           Linx.MAC
+        ],
+        Process: [
+          Linx.Process
         ],
         "Netlink core": [
           Linx.Netlink,

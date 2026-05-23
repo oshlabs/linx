@@ -1,6 +1,10 @@
 # Linx.Process — implementation plan
 
-> Phase 1 (P0–P3) is the proposal below, for review. Nothing shipped yet.
+> **P0 and P1 have shipped** on branch `process-foundations`: the
+> Port-based agent, `Linx.Process.spawn/1` with the checkpoint protocol,
+> namespace selection (`:net` verified end-to-end against `Linx.Netlink`),
+> structured pre-exec errors, and `release/1`. P2–P4 below are the
+> roadmap.
 
 ## Goal
 
@@ -104,6 +108,8 @@ code that needs them; commit + push per milestone.
 
 ### P0 — Scaffolding & the Port
 
+✅ **Shipped.**
+
 - `Linx.Process` module skeleton with `@moduledoc` and the public API
   function stubs (no logic). The module `use`s `GenServer` from the start —
   no nested Session module; the pid is the handle.
@@ -116,6 +122,8 @@ code that needs them; commit + push per milestone.
   (e.g. `:ping` → `:pong`), assert clean exit. No root needed.
 
 ### P1 — `Linx.Process.spawn/1`: clone into fresh namespaces, checkpoint
+
+✅ **Shipped.**
 
 - Agent (create mode): `clone()` with namespace flags chosen by the request,
   emit `{:status, :spawned, host_pid}`, the child blocks at the checkpoint
