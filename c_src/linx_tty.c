@@ -37,11 +37,12 @@
 #include <fcntl.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
 
 /* Bumped per shipping milestone. */
-#define LINX_TTY_VERSION "linx_tty 0.1.0 (T1)"
+#define LINX_TTY_VERSION "linx_tty 0.1.0 (T2)"
 
 /* --- errno -> atom ------------------------------------------------------- */
 
@@ -254,6 +255,55 @@ static ERL_NIF_TERM set_window_size(ErlNifEnv *env, int argc,
 	return enif_make_atom(env, "ok");
 }
 
+/* --- socketpair/0 ------------------------------------------------------- */
+
+/* Create a connected AF_UNIX SOCK_STREAM pair (CLOEXEC on both ends).
+ *
+ * The two fds together act as an in-memory tube: bytes written to one
+ * appear readable on the other. Primarily here so `Linx.Tty.attach/2`
+ * tests can stand in for a real `/dev/tty` -- one end wrapped as the
+ * "user side" port the test drives, the other wrapped as the port the
+ * attach loop reads from. Useful enough as a general primitive that
+ * we expose it (under @doc false on the Elixir side).
+ *
+ * Returns {:ok, {Fd1, Fd2}} or {:error, {:socketpair, ErrnoAtom}}.
+ * Both fds belong to the caller -- close(2) them when done. */
+static ERL_NIF_TERM nif_socketpair(ErlNifEnv *env, int argc,
+				   const ERL_NIF_TERM argv[])
+{
+	(void)argc;
+	(void)argv;
+
+	int sv[2];
+	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0)
+		return make_error(env, "socketpair", errno);
+
+	return enif_make_tuple2(
+		env,
+		enif_make_atom(env, "ok"),
+		enif_make_tuple2(env,
+				 enif_make_int(env, sv[0]),
+				 enif_make_int(env, sv[1])));
+}
+
+/* --- close/1 ------------------------------------------------------------ */
+
+/* close(fd). Used by tests + by callers who own an fd handed back by
+ * `socketpair/0`. EBADF is swallowed (idempotent close). */
+static ERL_NIF_TERM nif_close(ErlNifEnv *env, int argc,
+			      const ERL_NIF_TERM argv[])
+{
+	(void)argc;
+
+	int fd;
+	if (!enif_get_int(env, argv[0], &fd))
+		return enif_make_badarg(env);
+
+	if (close(fd) < 0 && errno != EBADF)
+		return make_error(env, "close", errno);
+	return enif_make_atom(env, "ok");
+}
+
 /* --- NIF init ----------------------------------------------------------- */
 
 static ErlNifFunc nif_funcs[] = {
@@ -262,6 +312,8 @@ static ErlNifFunc nif_funcs[] = {
 	{ "restore_and_close",    2, restore_and_close,    0 },
 	{ "window_size",          1, window_size,          0 },
 	{ "set_window_size",      2, set_window_size,      0 },
+	{ "socketpair",           0, nif_socketpair,       0 },
+	{ "close",                1, nif_close,            0 },
 };
 
 ERL_NIF_INIT(Elixir.Linx.Tty.Native, nif_funcs, NULL, NULL, NULL, NULL)

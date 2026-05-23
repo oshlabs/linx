@@ -1,12 +1,12 @@
 # Linx.Tty — implementation plan
 
-> **T0 and T1 have shipped** on branch `tty-foundations`: the NIF
-> infrastructure (`Linx.Tty.Native` loads, `priv/linx_tty.so` builds
-> from `c_src/linx_tty.c` via `:linx_tty` Mix compiler), value-type
-> structs (`Linx.Tty.Saved`, `Linx.Tty.WindowSize`), and the termios
-> + ioctl primitives (`open_controlling_raw/0`, `restore_and_close/2`,
-> `window_size/1`, `set_window_size/2`). T2 (`attach/2`) and T3
-> (window-size propagation) below are the roadmap.
+> **T0, T1 and T2 have shipped** on branch `tty-foundations`: the NIF
+> infrastructure, value-type structs, the termios + ioctl primitives
+> (`open_controlling_raw/0`, `restore_and_close/2`, `window_size/1`,
+> `set_window_size/2`), and `attach/2` — the byte pump that hands the
+> caller's controlling terminal to a `Linx.Process` PTY session and
+> shuttles bytes both ways until the workload exits. T3 (window-size
+> propagation) is the roadmap.
 
 ## Goal
 
@@ -185,6 +185,8 @@ the code that needs them; commit + push per milestone.
     `iex -S mix`, real `window_size/1` numbers.
 
 ### T2 — `Linx.Tty.attach/2`
+
+✅ **Shipped.**
 
 - `Linx.Tty.attach(:controlling, session)` — the byte pump:
   1. `open_controlling_raw/0` to grab the local tty in raw mode.

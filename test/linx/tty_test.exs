@@ -8,8 +8,8 @@ defmodule Linx.TtyTest do
       v = Tty.version()
       assert is_binary(v)
       assert String.starts_with?(v, "linx_tty ")
-      # T1 marker -- bumped per milestone in c_src/linx_tty.c.
-      assert String.ends_with?(v, "(T1)")
+      # T2 marker -- bumped per milestone in c_src/linx_tty.c.
+      assert String.ends_with?(v, "(T2)")
     end
   end
 
@@ -98,9 +98,114 @@ defmodule Linx.TtyTest do
     end
   end
 
-  describe "attach/2 stub" do
-    test "attach/2 is not yet implemented (lands in T2)" do
-      assert {:error, :not_yet_implemented} = Tty.attach(:controlling, self())
+  describe "Native.socketpair/0" do
+    test "returns two connected fds" do
+      assert {:ok, {a, b}} = Linx.Tty.Native.socketpair()
+      assert is_integer(a) and is_integer(b)
+      assert a != b
+
+      # Sanity: writing to one shows up on the other via a wrapped port.
+      port_a = :erlang.open_port({:fd, a, a}, [:binary, :stream])
+      port_b = :erlang.open_port({:fd, b, b}, [:binary, :stream])
+
+      Port.command(port_a, "ping")
+      assert_receive {^port_b, {:data, "ping"}}, 1_000
+
+      Port.close(port_a)
+      Port.close(port_b)
+    end
+  end
+
+  describe "attach/2 via socketpair stand-in" do
+    # PLAN's T2 testing strategy: spawn /bin/cat with stdio: :pty, build
+    # a socketpair to stand in for /dev/tty, run the pump on one end and
+    # drive the "user side" from a helper process. The test's real
+    # terminal is never touched.
+
+    test "round-trips bytes through the pump" do
+      # PTY-mode cat -- the session's owner is this test process, so
+      # :pty_out events arrive in our mailbox where the pump can read
+      # them.
+      {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = Linx.Process.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      {:ok, {user_fd, attach_fd}} = Linx.Tty.Native.socketpair()
+      test_pid = self()
+
+      # The "user side" runs in its own process so it can drive the
+      # fake-tty independently of the pump (which blocks in this
+      # process). It writes "hello\n" and watches for cat's echo;
+      # once it sees the echo back, it signals the session so the
+      # pump returns with {:signaled, _}.
+      _user_pid =
+        spawn_link(fn ->
+          user_port = :erlang.open_port({:fd, user_fd, user_fd}, [:binary, :stream])
+          Port.command(user_port, "hello\n")
+          collect_until_seen(user_port, "", "hello", test_pid, session)
+        end)
+
+      attach_port = :erlang.open_port({:fd, attach_fd, attach_fd}, [:binary, :stream])
+
+      result = Linx.Tty.__pump__(attach_port, session)
+
+      # The user side caused the signal; the workload was SIGTERM'd.
+      assert {:ok, {:signaled, 15}} = result
+
+      # And the user side saw the cat-echoed bytes come back.
+      assert_receive {:user_saw, seen}, 2_000
+      assert String.contains?(seen, "hello")
+    end
+
+    test "returns terminal event when the workload exits naturally" do
+      # No bytes-in-flight; just spawn /bin/true via PTY, attach,
+      # observe :exited 0 propagating cleanly through the pump.
+      {:ok, session} = Linx.Process.spawn(argv: ["/bin/true"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = Linx.Process.proceed(session)
+      # /bin/true exits ~immediately; running/exited will arrive in our
+      # mailbox to be picked up by the pump.
+
+      {:ok, {_user_fd, attach_fd}} = Linx.Tty.Native.socketpair()
+      attach_port = :erlang.open_port({:fd, attach_fd, attach_fd}, [:binary, :stream])
+
+      assert {:ok, {:exited, 0}} = Linx.Tty.__pump__(attach_port, session)
+    end
+
+    test "propagates pre-exec errors as {:error, %{errno, stage}}" do
+      # execve fails on a missing binary; the session emits
+      # {:linx_process, :error, _, :execve}. The pump translates that
+      # into the public error shape.
+      {:ok, session} = Linx.Process.spawn(argv: ["/does/not/exist"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = Linx.Process.proceed(session)
+
+      {:ok, {_user_fd, attach_fd}} = Linx.Tty.Native.socketpair()
+      attach_port = :erlang.open_port({:fd, attach_fd, attach_fd}, [:binary, :stream])
+
+      assert {:error, %{errno: 2, stage: :execve}} =
+               Linx.Tty.__pump__(attach_port, session)
+    end
+  end
+
+  # Read from `port` until `seen` contains `needle`, then signal the
+  # session (so the pump returns) and forward what we saw back to
+  # `test_pid` for assertion.
+  defp collect_until_seen(port, acc, needle, test_pid, session) do
+    receive do
+      {^port, {:data, bytes}} ->
+        acc = acc <> bytes
+
+        if String.contains?(acc, needle) do
+          send(test_pid, {:user_saw, acc})
+          :ok = Linx.Process.signal(session, 15)
+        else
+          collect_until_seen(port, acc, needle, test_pid, session)
+        end
+    after
+      2_000 ->
+        send(test_pid, {:user_saw, acc})
     end
   end
 end

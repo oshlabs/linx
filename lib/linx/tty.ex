@@ -50,9 +50,9 @@ defmodule Linx.Tty do
 
   ## Status
 
-  T0 (scaffolding) and T1 (termios + ioctl primitives) are shipped.
-  `attach/2` lands in T2; window-size propagation across `Linx.Process`
-  lands in T3. See `docs/tty/PLAN.md` for the roadmap.
+  T0 (scaffolding), T1 (termios + ioctl primitives), and T2
+  (`attach/2`) are shipped. Window-size propagation across
+  `Linx.Process` lands in T3. See `docs/tty/PLAN.md` for the roadmap.
   """
 
   alias Linx.Tty.Native
@@ -157,14 +157,25 @@ defmodule Linx.Tty do
   and pumps bytes both ways until the workload exits, then restores
   the terminal.
 
-  Lands in T2; today returns `{:error, :not_yet_implemented}`.
-
   `target` chooses which local tty the caller hands over. Today only
   `:controlling` (open `/dev/tty`) is meaningful; future shapes may
   accept an explicit fd.
 
   Returns the terminal event from the session — `{:ok, {:exited, n}}`,
-  `{:ok, {:signaled, n}}` — or `{:error, _}` for a setup failure.
+  `{:ok, {:signaled, n}}` — or `{:error, _}` for a setup failure or
+  a pre-exec workload error.
+
+  ## Owner requirement
+
+  `attach/2` *must* be called from the process that owns `session` —
+  the pid that received `{:linx_process, :ready, _}` when the session
+  was spawned. The pump waits for `{:linx_process, :pty_out, _}`
+  events in the calling process's mailbox; if they go elsewhere it
+  blocks forever. The owner defaults to the caller of `spawn/1`, so
+  the natural case ("spawn and attach from the same place") works
+  without thought.
+
+  ## Restore is unconditional
 
   The byte pump runs in the *calling process* and blocks until the
   workload terminates. The caller's terminal is restored
@@ -174,5 +185,46 @@ defmodule Linx.Tty do
   @spec attach(:controlling, session()) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
           | {:error, term()}
-  def attach(:controlling, _session), do: {:error, :not_yet_implemented}
+  def attach(:controlling, session) when is_pid(session) do
+    with {:ok, fd, saved} <- open_controlling_raw() do
+      try do
+        port = :erlang.open_port({:fd, fd, fd}, [:binary, :stream])
+        __pump__(port, session)
+      after
+        restore_and_close(fd, saved)
+      end
+    end
+  end
+
+  @doc false
+  # The byte pump. Exposed (under @doc false) so tests can drive it
+  # through a port wrapping a socketpair stand-in for /dev/tty without
+  # touching the test runner's real terminal.
+  #
+  # The caller must own `session` -- the :pty_out events arrive in the
+  # owner's mailbox, and this function expects to receive them in its
+  # own mailbox. See attach/2's docs for the constraint.
+  @spec __pump__(port(), session()) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+          | {:error, term()}
+  def __pump__(port, session) when is_port(port) and is_pid(session) do
+    receive do
+      {^port, {:data, bytes}} ->
+        _ = Linx.Process.pty_write(session, bytes)
+        __pump__(port, session)
+
+      {:linx_process, :pty_out, bytes} ->
+        Port.command(port, bytes)
+        __pump__(port, session)
+
+      {:linx_process, :exited, code} ->
+        {:ok, {:exited, code}}
+
+      {:linx_process, :signaled, signum} ->
+        {:ok, {:signaled, signum}}
+
+      {:linx_process, :error, errno, stage} ->
+        {:error, %{errno: errno, stage: stage}}
+    end
+  end
 end

@@ -100,8 +100,85 @@ iex> Linx.Tty.restore_and_close(fd, saved)
 Setting a tty's size sends `SIGWINCH` to the foreground process group,
 so attached programs see the new size immediately.
 
+## Attaching to a workload's PTY
+
+`attach/2` is the composition that makes the whole subsystem
+worthwhile. Pair it with `Linx.Process` running a workload under
+`stdio: :pty` and the caller's controlling terminal *becomes* the
+workload's terminal until it exits.
+
+```elixir
+# In iex -- this requires a real controlling tty under the BEAM.
+iex> alias Linx.Process, as: P
+iex> alias Linx.Tty
+
+iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], stdio: :pty)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.proceed(c)
+iex> receive do {:linx_process, :running} -> :ok end
+
+# iex blocks here. Your terminal IS the bash inside the cloned
+# child. Type whatever; ^D or `exit` ends bash; attach restores your
+# terminal and returns the exit event.
+iex> Tty.attach(:controlling, c)
+{:ok, {:exited, 0}}
+```
+
+The mechanics:
+
+  1. `attach/2` calls `open_controlling_raw/0` to grab `/dev/tty` in
+     raw mode, saving the original termios.
+  2. The fd is wrapped as an Erlang port — keystrokes arrive as
+     `{port, {:data, bytes}}` messages.
+  3. The pump alternately reads from the port (forwarding to
+     `Linx.Process.pty_write/2`) and reads `{:linx_process, :pty_out, _}`
+     events (writing them back to the port via `Port.command/2`).
+  4. When the session terminates (`:exited` / `:signaled` / pre-exec
+     `:error`), the pump returns. A `try/after` runs
+     `restore_and_close/2` unconditionally — so your terminal can
+     never be left in raw mode, even if the pump raises mid-flight.
+
+### The owner requirement
+
+The pump waits for `{:linx_process, :pty_out, _}` in the caller's
+mailbox. The owner of those events defaults to the process that
+called `P.spawn/1` (you can override with the `:owner` option).
+**Call `attach/2` from the session's owner**, or the pump will block
+forever waiting on events that go to another process.
+
+In iex this is automatic — `spawn`, `proceed`, `attach` are all just
+sequential calls from the iex evaluator. In an OTP application you
+typically structure the calling process so it owns the session for
+the duration of the attach.
+
+### Composing with `Linx.Process` namespaces
+
+Putting it all together — the motivating use case from
+`PLAN.md`:
+
+```elixir
+{:ok, c} =
+  Linx.Process.spawn(
+    argv: ["/bin/bash"],
+    namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
+    stdio: :pty
+  )
+
+# Host-side setup: move a netlink interface into the new netns,
+# write cgroup state, etc., while the child waits at the checkpoint.
+
+Linx.Process.proceed(c)
+Linx.Tty.attach(:controlling, c)
+# -> your iex prompt becomes the container's bash until you exit
+```
+
+That's `docker attach` / `kubectl exec -it`, end-to-end inside the
+BEAM, from a few hundred lines of clean Elixir and a few thin NIFs.
+
 ## Not yet implemented
 
-`attach/2` is still a stub returning `{:error, :not_yet_implemented}`.
-T2 wires the byte pump; T3 adds window-size propagation across the
-`Linx.Process` boundary. See `PLAN.md` for the roadmap.
+Window-size propagation (`SIGWINCH` → `TIOCSWINSZ` on the workload's
+PTY master) lands in T3. Today the workload's view of its window size
+is whatever the kernel defaulted to when the PTY was created. `vim`
+and `less` work, but they won't redraw if you resize your terminal
+emulator. See `PLAN.md` for the roadmap.

@@ -63,4 +63,12 @@ defmodule Linx.Tty.Native do
           {non_neg_integer(), non_neg_integer(), non_neg_integer(), non_neg_integer()}
         ) :: :ok | error()
   def set_window_size(_fd, _ws), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec socketpair() :: {:ok, {non_neg_integer(), non_neg_integer()}} | error()
+  def socketpair, do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc false
+  @spec close(non_neg_integer()) :: :ok | error()
+  def close(_fd), do: :erlang.nif_error(:nif_not_loaded)
 end

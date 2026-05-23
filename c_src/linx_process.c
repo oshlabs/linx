@@ -1057,6 +1057,25 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 			int status;
 			pid_t r = waitpid(child_pid, &status, WNOHANG);
 			if (r == child_pid) {
+				/* Workload exited. In PTY mode the master may
+				 * still have buffered output the workload
+				 * wrote just before exit; drain it before the
+				 * terminal event so callers don't lose the
+				 * final bytes. The master is O_NONBLOCK so
+				 * the drain terminates on EAGAIN. */
+				if (pty_master >= 0) {
+					uint8_t buf[8192];
+					while (1) {
+						ssize_t n = read(pty_master,
+								 buf, sizeof buf);
+						if (n > 0) {
+							emit_pty_out(buf, (size_t)n);
+							continue;
+						}
+						break;
+					}
+				}
+
 				if (WIFEXITED(status))
 					emit_status_int("exited",
 							WEXITSTATUS(status));
