@@ -62,7 +62,7 @@ defmodule Linx.Netlink.Rtnl.Stats.Link64 do
   def encode(%__MODULE__{} = stats) do
     for name <- @counters,
         into: <<>>,
-        do: <<(Map.fetch!(stats, name) || 0)::native-unsigned-64>>
+        do: <<Map.fetch!(stats, name) || 0::native-unsigned-64>>
   end
 
   @doc """
