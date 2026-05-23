@@ -50,7 +50,8 @@ defmodule Linx.MixProject do
         "docs/process/EXAMPLES.md",
         "docs/process/PLAN.md",
         "docs/process/COVERAGE.md",
-        "docs/process/REFERENCES.md"
+        "docs/process/REFERENCES.md",
+        "docs/tty/PLAN.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -66,6 +67,7 @@ defmodule Linx.MixProject do
           "docs/process/COVERAGE.md",
           "docs/process/REFERENCES.md"
         ],
+        "Tty — design": ["docs/tty/PLAN.md"],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
