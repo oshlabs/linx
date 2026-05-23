@@ -1,8 +1,9 @@
 # Linx.Netlink — implementation plan
 
-> **Phase 1 (M0–M4) has shipped** on branch `netlink-foundations` — the
-> family-agnostic core and the first rtnetlink slice. **Phase 2** (below,
-> after the Decisions section) is a proposal, for review.
+> **Phase 1 (M0–M4) and Phase 2 (M5–M7) have shipped** on branch
+> `netlink-foundations`, together with post-Phase-2 polish (rich errors,
+> `Linx.IP` / `Linx.MAC` value types, ExDoc setup, `COVERAGE.md`).
+> **Phase 3** (at the bottom) is a proposal, for review.
 
 ## Goal
 
@@ -129,6 +130,9 @@ in each `attr`.
 Each milestone is an independently reviewable commit.
 
 ### M0 — Scaffolding & the NIF
+
+✅ **Shipped.**
+
 - Module skeleton: every module above with `@moduledoc`, no logic yet.
 - Port `silo`'s `netlink_nif.c` → `c_src/netlink_socket.c`, **parameterized by
   protocol number** (`open_in_netns(path, protocol)`), so genl and others reuse
@@ -144,6 +148,9 @@ Each milestone is an independently reviewable commit.
   the NIF is tagged `:integration`.
 
 ### M1 — Level A wire primitives (hand-written, no DSL yet)
+
+✅ **Shipped.**
+
 - `Linx.Netlink.Constants`.
 - `Linx.Netlink.Attr`: `rtattr` TLV encode/decode, nested attributes, 4-byte
   padding. Pure.
@@ -158,6 +165,9 @@ Each milestone is an independently reviewable commit.
   plain.
 
 ### M2 — First rtnetlink message, hand-written explicit
+
+✅ **Shipped.**
+
 - `Linx.Netlink.Rtnl` namespace (the `NETLINK_ROUTE` family; `open/1`);
   `Linx.Netlink.Rtnl.Link` written **by hand, explicit** — no DSL: the
   `%Link{}` struct, a hand-written `decode/1`, the `ifinfomsg` header and a
@@ -172,6 +182,9 @@ Each milestone is an independently reviewable commit.
   `mix test`.
 
 ### M3 — Extract the DSL
+
+✅ **Shipped.**
+
 - Extract the codec DSL into `Linx.Netlink.Codec` — its own module, kept
   separate from the `Message` nlmsghdr struct. A codec module does
   `use Linx.Netlink.Codec` and declares its wire format in one `codec do … end`
@@ -188,6 +201,9 @@ Each milestone is an independently reviewable commit.
   and `__codec__/0` reflection.
 
 ### M4 — Complete the rtnetlink first-release scope, via the DSL
+
+✅ **Shipped.**
+
 - `Rtnl.Link` full: `create_macvlan`/`create_ipvlan`, `delete`,
   `move_to_netns`, `set_up`/`set_down`. The regular attributes (`IFLA_LINK`,
   `IFLA_NET_NS_PID`, …) are DSL-declared; `IFLA_LINKINFO` — whose data is
@@ -257,6 +273,8 @@ codecs, `:integration` for mutating verbs), commit and push per milestone.
 
 ## M5 — Address & Route: full CRUD, IPv4 and IPv6
 
+✅ **Shipped.**
+
 The cheapest, highest-value gap: each resource has one write verb and no reads.
 
 - `Rtnl.Address` — `list/1` (and per-link `list/2`) via an `RTM_GETADDR` dump;
@@ -272,6 +290,8 @@ The cheapest, highest-value gap: each resource has one write verb and no reads.
 
 ## M6 — Link kinds, and DSL sub-message dispatch
 
+✅ **Shipped.**
+
 - More virtual link kinds — at least **veth** (the pair that, with a bridge,
   is the other container-networking model), **vlan**, **bridge**; `dummy` and
   `vxlan` as they fall out cheaply.
@@ -286,6 +306,8 @@ The cheapest, highest-value gap: each resource has one write verb and no reads.
 
 ## M7 — Neighbours and Rules
 
+✅ **Shipped.**
+
 New resource modules, the same machinery:
 
 - `Rtnl.Neighbour` — the ARP / NDP table (`RTM_*NEIGH`): `add`, `delete`,
@@ -294,16 +316,121 @@ New resource modules, the same machinery:
   `list`.
 - **Tests:** as above.
 
-## Beyond Phase 2 — separate tracks
+## Post-Phase 2 polish
 
-- **Traffic control** (`RTM_*QDISC` / `*TCLASS` / `*TFILTER`) — qdiscs,
-  classes, filters, actions: the largest part of rtnetlink by far. Its own
-  later effort, not a Phase 2 milestone.
-- **The process layer** — `Linx.Netlink.Connection` (a supervised socket with
-  concurrent in-flight requests) and `Linx.Netlink.Monitor` (multicast
-  link/addr/route events). Cross-cutting, not rtnetlink-specific; the
-  synchronous `Request` engine was built to accept this without rework.
-- **Generic netlink** (`Linx.Netlink.Generic`) — genl family resolution and
-  subsystems (WireGuard, nl80211). Where the kernel's YAML specs become
-  attractive: breadth turns into a code-generation problem feeding the same
-  `Codec` DSL, rather than hand-writing.
+Polish and tooling that landed after M7, each its own commit:
+
+- **`Linx.Netlink.Error`** — a `defexception` with errno → POSIX atom
+  translation and parsing of the kernel's extended-ack `NLMSGERR_ATTR_MSG`,
+  enabled per-socket via `NETLINK_EXT_ACK`. Verbs return
+  `{:error, %Linx.Netlink.Error{}}` everywhere; the verbs that resolve a
+  name synthesize context when the kernel doesn't (e.g. `create_macvlan`
+  sharpens "no such interface" into "no such parent interface").
+
+- **`Linx.IP` / `Linx.IP.Subnet` / `Linx.MAC`** — first-class address values
+  with `~IP` / `~MAC` sigils, `Inspect` impls that round-trip back to the
+  sigil, and subnet math (`contains?/2`, `network/1`, `broadcast/1`).
+  Decoded netlink fields carry them instead of raw bytes; verbs accept
+  either the struct or the equivalent string.
+
+- **Per-resource `Inspect`** for `Rtnl.Link` / `Address` / `Route` /
+  `Neighbour` / `Rule` — one-line forms like `#…Link<"lo" (1) UP MTU=65536>`
+  for legible iex dumps.
+
+- **ExDoc** — `mix docs` generates into `doc/`. Module groups (Public types,
+  Netlink core, rtnetlink), extras (README, EXAMPLES, PLAN, COVERAGE,
+  AGENTS), source-line links. Nine doctests run from `Linx.IP` / `.Subnet`
+  / `Linx.MAC` moduledocs.
+
+- **`COVERAGE.md`** — a living tracker of what Linx exposes vs. what
+  netlink offers, with priority hints driving Phase 3.
+
+---
+
+# Phase 3 — observability, process layer, and genl breadth
+
+Phase 2 closed out a solid rtnetlink slice — full CRUD across Link,
+Address, Route, Neighbour, Rule, with IPv4 and IPv6. Phase 3 picks up the
+threads `COVERAGE.md` flagged as high-priority: read-side polish, the
+multicast event story (architected-for since M0), and the first protocol
+family beyond rtnetlink.
+
+Same rules as before: each milestone ships code + tests + EXAMPLES /
+COVERAGE updates; commit and push per milestone.
+
+## M8 — Interface stats and `Route.get`
+
+The cheap read-side wins from `COVERAGE.md`:
+
+- **`Rtnl.Stats`** — interface counters via `RTM_GETSTATS`. A `%Stats{}`
+  struct carrying `rtnl_link_stats64` (rx/tx packets, bytes, dropped,
+  errors, multicast, …). `Stats.get(socket, link_name)` returns one;
+  `Stats.list/1` dumps every interface's counters.
+- **`Rtnl.Route.get/2`** — destination lookup. `RTM_GETROUTE` *without*
+  `NLM_F_DUMP`, with `RTA_DST` set: the kernel resolves and returns the
+  matching route. Returns a single `%Route{}` or
+  `{:error, %Linx.Netlink.Error{}}` for an unroutable address.
+- **Tests:** plain codec round-trips; live host-netns reads (both verbs
+  are read-only, no root needed); `EXAMPLES.md` updated.
+
+## M9 — Process layer: Connection + Monitor
+
+The architected-for multicast event story finally lands. The synchronous
+`Request.talk` engine was designed to slot into a process-owned socket
+without rework — M9 cashes that in.
+
+- **`Linx.Netlink.Connection`** — a supervised `GenServer` owning one
+  socket. Concurrent in-flight requests correlated by sequence number; the
+  GenServer demultiplexes replies back to callers. `start_link/1`, `call/4`
+  (the equivalent of `Request.talk`).
+- **`Linx.Netlink.Monitor`** — a `GenServer` that opens a socket, joins the
+  rtnetlink multicast groups (`RTNLGRP_LINK`, `IPV4_IFADDR`, `IPV6_IFADDR`,
+  `IPV4_ROUTE`, `IPV6_ROUTE`, `NEIGH`), decodes incoming messages with the
+  existing codecs, and fans out to subscribers. `start_link/1`,
+  `subscribe/2` — subscribers receive `{:netlink_event, event_type,
+  %Link{} | %Address{} | %Route{} | %Neighbour{}}` tagged messages.
+- **Tests:** `Connection` against the host with parallel requests (seq
+  correlation); a `Monitor` integration test that creates a link in a
+  fresh netns and asserts the subscriber sees the event.
+
+## M10 — Generic netlink foundation + WireGuard
+
+The first protocol family beyond rtnetlink. `Linx.Netlink.Generic` does
+the family-id resolution; **WireGuard** is the proof.
+
+- **`Linx.Netlink.Generic`** — the `NETLINK_GENERIC` family. The `CTRL`
+  family (id 16) provides `Generic.resolve(socket, "wireguard")` →
+  `{:ok, family_id}`. The 4-byte `genlmsghdr` (cmd, version, pad) becomes
+  a `Codec` header for genl-subsystem messages.
+- **`Linx.Netlink.Generic.WireGuard`** — uses the `wireguard` genl family.
+  `list/1`, `get/2` (by ifname), `set/3` (with private key, listen port,
+  peers, allowed_ips). Peers and allowed_ips are nested lists — exactly
+  the codec dispatch escape hatch's bread and butter.
+- **Tests:** plain codec round-trips for `genlmsghdr` + wireguard messages;
+  integration against a `wg` interface in a fresh netns.
+
+## M11 — Breadth: more link kinds + ethtool
+
+Filling in commonly-asked link kinds, plus a first cut at `ethtool` now
+that `Generic` exists.
+
+- **`Link.create_bond`, `create_vxlan`, `create_tun`** — three more link
+  kinds via the codec DSL's dispatch. Each is a new `LinkInfo.*`
+  sub-module.
+- **`Linx.Netlink.Generic.Ethtool`** — basic link info dump
+  (`ETHTOOL_MSG_LINKINFO_GET`, `LINKMODES_GET`, `LINKSTATE_GET`): speed,
+  duplex, port, autoneg, link state. The bigger ethtool surface (features,
+  rings, full stats) is a later expansion.
+- **Tests:** plain codec round-trips; integration creating each link kind
+  in a fresh netns; `ethtool` reads against a `dummy`.
+
+## Beyond Phase 3 — separate tracks
+
+Items that stay carved out as their own large efforts:
+
+- **Traffic control** (`tc`) — qdiscs / classes / filters / actions.
+- **netfilter** (`nftables`, conntrack).
+- **`ss`** (`NETLINK_INET_DIAG`) — socket dump.
+- **The long tail of genl** — nl80211, devlink, xfrm, mptcp_pm, …
+- **Kernel-YAML-driven codegen** for genl families — once two or three
+  hand-written customers prove the shape.
