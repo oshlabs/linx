@@ -22,13 +22,14 @@ A living doc — update as primitives ship. Status legend:
 | `window_size/1` (`TIOCGWINSZ`) | ✅ | T1 |
 | `set_window_size/2` (`TIOCSWINSZ`) | ✅ | T1 |
 | `attach/2` | ✅ | T2 — byte pump between local tty and `Linx.Process` PTY |
-| SIGWINCH propagation in `attach/2` | ⬜ | T3 |
+| Initial winsize seed in `attach/2` | ✅ | T3 |
+| SIGWINCH-driven runtime propagation | ⬜ | follow-up — needs signalfd NIF |
 
 ## Cross-subsystem (new verbs on `Linx.Process`)
 
 | Feature | Status | Notes |
 |---|---|---|
-| `Linx.Process.pty_set_winsize/2` | ⬜ | T3 — agent gains `{:pty_winsize, _}` command |
+| `Linx.Process.pty_set_winsize/2` | ✅ | T3 — agent gains `{:pty_winsize, _}` (both pre-proceed and post-running) |
 
 ## Value types
 

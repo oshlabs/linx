@@ -188,6 +188,17 @@ defmodule Linx.Tty do
   def attach(:controlling, session) when is_pid(session) do
     with {:ok, fd, saved} <- open_controlling_raw() do
       try do
+        # Best-effort: tell the workload's PTY about our terminal's
+        # current dimensions before it sees anything. Runtime
+        # SIGWINCH-driven updates aren't wired yet (Erlang's signal
+        # surface doesn't include SIGWINCH out of the box -- see
+        # PLAN.md's "deferred to a follow-up"), so for now the
+        # workload sees the size at attach time and that's it.
+        case window_size(fd) do
+          {:ok, ws} -> _ = Linx.Process.pty_set_winsize(session, ws)
+          {:error, _} -> :ok
+        end
+
         port = :erlang.open_port({:fd, fd, fd}, [:binary, :stream])
         __pump__(port, session)
       after

@@ -175,10 +175,43 @@ Linx.Tty.attach(:controlling, c)
 That's `docker attach` / `kubectl exec -it`, end-to-end inside the
 BEAM, from a few hundred lines of clean Elixir and a few thin NIFs.
 
+## Window size: initial seed
+
+`attach/2` reads the local terminal's `TIOCGWINSZ` at entry and forwards
+it to the workload's PTY via `Linx.Process.pty_set_winsize/2`. So a
+fresh `bash` inside the container sees the right `$LINES`/`$COLUMNS`
+from the moment it starts — `vim` and `less` open at the correct
+size, prompts wrap correctly.
+
+```elixir
+# Manually inspect what attach/2 will seed:
+iex> {:ok, fd, saved} = Linx.Tty.open_controlling_raw()
+iex> Linx.Tty.window_size(fd)
+{:ok, #Linx.Tty.WindowSize<132x42>}
+iex> Linx.Tty.restore_and_close(fd, saved)
+```
+
+You can also set the workload's size manually at any point — before
+`proceed/1` for "start the workload at this size", or post-running
+(once the session is `:running`) to push an update:
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], stdio: :pty)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.pty_set_winsize(c, %{rows: 50, cols: 200, xpixel: 0, ypixel: 0})
+:ok
+iex> P.proceed(c)
+# bash starts thinking the terminal is 200x50.
+```
+
 ## Not yet implemented
 
-Window-size propagation (`SIGWINCH` → `TIOCSWINSZ` on the workload's
-PTY master) lands in T3. Today the workload's view of its window size
-is whatever the kernel defaulted to when the PTY was created. `vim`
-and `less` work, but they won't redraw if you resize your terminal
-emulator. See `PLAN.md` for the roadmap.
+Runtime `SIGWINCH`-driven updates — the "user drags the terminal
+corner while a process is running" case — are deferred to a follow-up.
+Erlang's `:os.set_signal/2` doesn't include `:sigwinch` in its
+supported-signals list, so a small `signalfd`-based NIF would be the
+natural next step. Most workloads survive without it (vim/less read
+the size at startup, which T3 already delivers), but a true
+`docker attach` ergonomically wants the runtime updates too. See
+`PLAN.md` for the roadmap.

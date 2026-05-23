@@ -8,8 +8,8 @@ defmodule Linx.TtyTest do
       v = Tty.version()
       assert is_binary(v)
       assert String.starts_with?(v, "linx_tty ")
-      # T2 marker -- bumped per milestone in c_src/linx_tty.c.
-      assert String.ends_with?(v, "(T2)")
+      # T3 marker -- bumped per milestone in c_src/linx_tty.c.
+      assert String.ends_with?(v, "(T3)")
     end
   end
 

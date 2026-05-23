@@ -48,6 +48,7 @@ A living doc — update as primitives ship. Status legend:
 | `:devnull` | ✅ | P4 |
 | `{:connect_unix, path}` | ✅ | P4 |
 | `:pty` (PTY master proxied through control channel) | ✅ | P4 — interactive pumping is `Linx.Tty` |
+| `pty_set_winsize/2` (TIOCSWINSZ on the master) | ✅ | T3 (cross-subsystem from `Linx.Tty`) |
 
 ## Composition with other subsystems
 

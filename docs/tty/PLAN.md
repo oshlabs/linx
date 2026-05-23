@@ -1,12 +1,14 @@
 # Linx.Tty — implementation plan
 
-> **T0, T1 and T2 have shipped** on branch `tty-foundations`: the NIF
-> infrastructure, value-type structs, the termios + ioctl primitives
-> (`open_controlling_raw/0`, `restore_and_close/2`, `window_size/1`,
-> `set_window_size/2`), and `attach/2` — the byte pump that hands the
-> caller's controlling terminal to a `Linx.Process` PTY session and
-> shuttles bytes both ways until the workload exits. T3 (window-size
-> propagation) is the roadmap.
+> **T0–T3 have shipped** on branch `tty-foundations`: the NIF
+> infrastructure, value-type structs, the termios + ioctl primitives,
+> `attach/2`, and initial window-size propagation (one new verb on
+> `Linx.Process`, `pty_set_winsize/2`; agent learns `{:pty_winsize, _}`
+> in both pre-proceed and post-running windows; `attach/2` seeds the
+> workload's size from the local tty at entry). Runtime
+> SIGWINCH-driven updates remain a follow-up — Erlang's `:os.set_signal/2`
+> doesn't currently cover `SIGWINCH`, so a small NIF + signalfd would
+> be the natural next step.
 
 ## Goal
 
@@ -217,26 +219,50 @@ the code that needs them; commit + push per milestone.
     NIF restore + close ran (visible via a flag in the saved struct
     or via observing the fd is closed after).
 
-### T3 — Window size propagation
+### T3 — Window size propagation (initial seed)
 
-The piece that makes `vim` and `top` usable inside the attached
-container.
+✅ **Shipped.**
+
+The piece that gives `vim` and `top` correct dimensions at the moment
+the workload starts inside the attached container.
 
 - `Linx.Process` (one new verb):
-  - `Linx.Process.pty_set_winsize(session, %Linx.Tty.WindowSize{...})`
-    — sends `{:pty_winsize, {rows, cols, xpix, ypix}}` to the agent.
-    Returns `{:error, :no_pty}` if the session wasn't started with
+  - `Linx.Process.pty_set_winsize(session, ws)` — accepts a map or
+    struct with `:rows`/`:cols`/`:xpixel`/`:ypixel` fields (the
+    `Linx.Tty.WindowSize` shape, without taking a Tty dependency) or
+    a `{rows, cols, xpix, ypix}` tuple. Sends
+    `{:pty_winsize, {rows, cols, xpix, ypix}}` to the agent. Returns
+    `{:error, :no_pty}` if the session wasn't started with
     `stdio: :pty`.
 - Agent (`c_src/linx_process.c`): `read_post_running_command` learns
   `{:pty_winsize, _}`; `supervise` calls
-  `ioctl(pty_master, TIOCSWINSZ, &ws)`.
-- `Linx.Tty.attach/2`: catches `SIGWINCH` via `:os.set_signal/2`,
-  re-reads `window_size(local_tty_fd)`, forwards via
-  `pty_set_winsize/2`. Initial size is seeded the same way on entry
-  to the loop.
-- **Tests:** assert the new agent vocabulary parses (plain codec
-  round-trip); the SIGWINCH propagation is fundamentally interactive
-  and lives in `docs/tty/EXAMPLES.md` rather than `mix test`.
+  `ioctl(pty_master, TIOCSWINSZ, &ws)` best-effort.
+- `Linx.Tty.attach/2`: reads `window_size(local_tty_fd)` at entry and
+  forwards via `pty_set_winsize/2` before running the pump.
+- **Tests:** `pty_set_winsize/2` on a non-PTY session returns
+  `{:error, :no_pty}`; on a PTY session, running `stty size` inside
+  reports the size we set.
+
+### Deferred to a follow-up — runtime SIGWINCH propagation
+
+The piece that lets the workload also see *later* resizes (you drag
+the terminal-emulator corner while a process is running).
+
+Erlang's `:os.set_signal/2` doesn't currently cover `SIGWINCH` — its
+supported set is `sighup`/`sigchld`/`sigterm` and friends. Hooking
+the signal into the attach loop therefore needs either:
+
+- A small NIF wrapping `signalfd(2)` for `SIGWINCH`, that the pump
+  poll's alongside the local tty port and the `:linx_process, …`
+  events; or
+- `sigaction(2)` + self-pipe in a NIF, same idea.
+
+Either approach is small in code but warrants its own milestone with
+its own tests (interactive resize is hard to assert in `mix test`).
+Most workloads survive without it — `vim` and `less` read the size
+once at startup, which is exactly what the T3 initial seed gives
+them — but a true `docker attach` ergonomically wants the runtime
+updates too.
 
 ## Testing
 

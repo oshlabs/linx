@@ -874,41 +874,88 @@ static int await_exec_outcome(int c2p_r)
 	return 1;
 }
 
-/* Block reading one {:packet, 4} frame from the BEAM and decode it. For
- * now :proceed is the only command we recognise. */
-static int await_proceed(void)
+/* Block on the BEAM control channel until :proceed arrives, handling any
+ * pre-proceed commands that are valid during the checkpoint window
+ * (currently just {:pty_winsize, _} for callers wanting to seed the
+ * workload's PTY size before exec). {:signal, _} and {:pty_in, _} are
+ * post-running-only and treated as protocol errors if they show up here.
+ *
+ * `pty_master` is the agent's master fd in PTY mode (or -1 otherwise);
+ * passed in so the winsize handler can apply the ioctl in place. */
+static int await_proceed(int pty_master)
 {
-	uint8_t buf[64];
-	ssize_t len = read_frame(buf, sizeof buf);
-	if (len < 0)
-		return -1;
-
-	int idx = 0, version;
-	if (ei_decode_version((const char *)buf, &idx, &version) < 0)
-		return -1;
-
-	int type, size;
-	if (ei_get_type((const char *)buf, &idx, &type, &size) < 0)
-		return -1;
-
-	if (type == ERL_SMALL_ATOM_UTF8_EXT || type == ERL_ATOM_UTF8_EXT ||
-	    type == ERL_ATOM_EXT || type == ERL_SMALL_ATOM_EXT) {
-		char atom[MAXATOMLEN];
-		if (ei_decode_atom((const char *)buf, &idx, atom) < 0)
+	for (;;) {
+		uint8_t buf[256];
+		ssize_t len = read_frame(buf, sizeof buf);
+		if (len < 0)
 			return -1;
-		if (strcmp(atom, "proceed") == 0)
-			return 0;
-	}
 
-	/* Unknown command at the checkpoint -- ignore quietly for now;
-	 * later phases add vocabulary and warn or error. */
-	return -1;
+		int idx = 0, version;
+		if (ei_decode_version((const char *)buf, &idx, &version) < 0)
+			return -1;
+
+		int type, size;
+		if (ei_get_type((const char *)buf, &idx, &type, &size) < 0)
+			return -1;
+
+		if (type == ERL_SMALL_ATOM_UTF8_EXT || type == ERL_ATOM_UTF8_EXT ||
+		    type == ERL_ATOM_EXT || type == ERL_SMALL_ATOM_EXT) {
+			char atom[MAXATOMLEN];
+			if (ei_decode_atom((const char *)buf, &idx, atom) < 0)
+				return -1;
+			if (strcmp(atom, "proceed") == 0)
+				return 0;
+			return -1;
+		}
+
+		/* Tuple commands. Only {:pty_winsize, _} is valid here. */
+		if (type != ERL_SMALL_TUPLE_EXT && type != ERL_LARGE_TUPLE_EXT)
+			return -1;
+
+		int arity;
+		if (ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0 ||
+		    arity != 2)
+			return -1;
+
+		char tag[MAXATOMLEN];
+		if (ei_decode_atom((const char *)buf, &idx, tag) < 0)
+			return -1;
+		if (strcmp(tag, "pty_winsize") != 0)
+			return -1;
+
+		int tarity;
+		if (ei_decode_tuple_header((const char *)buf, &idx, &tarity) < 0 ||
+		    tarity != 4)
+			return -1;
+
+		long rows, cols, xpix, ypix;
+		if (ei_decode_long((const char *)buf, &idx, &rows) < 0 ||
+		    ei_decode_long((const char *)buf, &idx, &cols) < 0 ||
+		    ei_decode_long((const char *)buf, &idx, &xpix) < 0 ||
+		    ei_decode_long((const char *)buf, &idx, &ypix) < 0)
+			return -1;
+
+		if (pty_master >= 0 &&
+		    rows >= 0 && cols >= 0 && xpix >= 0 && ypix >= 0 &&
+		    rows <= 0xFFFF && cols <= 0xFFFF &&
+		    xpix <= 0xFFFF && ypix <= 0xFFFF) {
+			struct winsize ws = {
+				.ws_row    = (unsigned short)rows,
+				.ws_col    = (unsigned short)cols,
+				.ws_xpixel = (unsigned short)xpix,
+				.ws_ypixel = (unsigned short)ypix,
+			};
+			(void)ioctl(pty_master, TIOCSWINSZ, &ws);
+		}
+		/* Loop for the next command. */
+	}
 }
 
 enum post_running_cmd_kind {
 	CMD_NONE = 0,
 	CMD_SIGNAL,
 	CMD_PTY_IN,
+	CMD_PTY_WINSIZE,
 };
 
 struct post_running_cmd {
@@ -916,6 +963,9 @@ struct post_running_cmd {
 	int signum;        /* CMD_SIGNAL */
 	uint8_t *bytes;    /* CMD_PTY_IN -- malloc'd; caller frees */
 	size_t bytes_len;
+	/* CMD_PTY_WINSIZE -- struct winsize is unsigned short per field;
+	 * we store as unsigned so decode bounds-checks are clear. */
+	unsigned ws_rows, ws_cols, ws_xpix, ws_ypix;
 };
 
 /* Decode one {:packet, 4} ETF frame from the BEAM (post-:running):
@@ -973,6 +1023,31 @@ static int read_post_running_command(struct post_running_cmd *cmd)
 		}
 		cmd->bytes_len = (size_t)got;
 		cmd->kind = CMD_PTY_IN;
+		return 0;
+	}
+
+	if (strcmp(tag, "pty_winsize") == 0) {
+		int tarity;
+		if (ei_decode_tuple_header((const char *)buf, &idx, &tarity) < 0 ||
+		    tarity != 4)
+			return -1;
+
+		long rows, cols, xpix, ypix;
+		if (ei_decode_long((const char *)buf, &idx, &rows) < 0 ||
+		    ei_decode_long((const char *)buf, &idx, &cols) < 0 ||
+		    ei_decode_long((const char *)buf, &idx, &xpix) < 0 ||
+		    ei_decode_long((const char *)buf, &idx, &ypix) < 0)
+			return -1;
+		if (rows < 0 || cols < 0 || xpix < 0 || ypix < 0 ||
+		    rows > 0xFFFF || cols > 0xFFFF ||
+		    xpix > 0xFFFF || ypix > 0xFFFF)
+			return -1;
+
+		cmd->kind = CMD_PTY_WINSIZE;
+		cmd->ws_rows = (unsigned)rows;
+		cmd->ws_cols = (unsigned)cols;
+		cmd->ws_xpix = (unsigned)xpix;
+		cmd->ws_ypix = (unsigned)ypix;
 		return 0;
 	}
 
@@ -1038,6 +1113,21 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 								  cmd.bytes,
 								  cmd.bytes_len);
 					free(cmd.bytes);
+					break;
+				case CMD_PTY_WINSIZE:
+					if (pty_master >= 0) {
+						struct winsize ws = {
+							.ws_row    = (unsigned short)cmd.ws_rows,
+							.ws_col    = (unsigned short)cmd.ws_cols,
+							.ws_xpixel = (unsigned short)cmd.ws_xpix,
+							.ws_ypixel = (unsigned short)cmd.ws_ypix,
+						};
+						/* Best-effort: a stale fd or
+						 * a kernel that rejects the
+						 * value just gets ignored. */
+						(void)ioctl(pty_master,
+							    TIOCSWINSZ, &ws);
+					}
 					break;
 				case CMD_NONE:
 					break;
@@ -1318,7 +1408,7 @@ int main(void)
 	 * A negative return here is most commonly EOF on fd 3 -- the BEAM
 	 * port closing because its owning GenServer died, which is a routine
 	 * cleanup path (not an error worth a stderr line). */
-	if (await_proceed() < 0) {
+	if (await_proceed(pty_master) < 0) {
 		free_request(&req);
 		return 1;
 	}

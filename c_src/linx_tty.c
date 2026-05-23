@@ -42,7 +42,7 @@
 #include <unistd.h>
 
 /* Bumped per shipping milestone. */
-#define LINX_TTY_VERSION "linx_tty 0.1.0 (T2)"
+#define LINX_TTY_VERSION "linx_tty 0.1.0 (T3)"
 
 /* --- errno -> atom ------------------------------------------------------- */
 
