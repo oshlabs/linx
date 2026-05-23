@@ -4,6 +4,8 @@ defmodule Linx.MACTest do
   import Linx.MAC
   alias Linx.MAC
 
+  doctest Linx.MAC
+
   describe "parse/1" do
     test "parses a lowercase colon-hex MAC" do
       assert {:ok, %MAC{bytes: <<0x00, 0x11, 0x22, 0x33, 0x44, 0x55>>}} =

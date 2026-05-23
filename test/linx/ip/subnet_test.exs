@@ -4,6 +4,8 @@ defmodule Linx.IP.SubnetTest do
   import Linx.IP
   alias Linx.IP.Subnet
 
+  doctest Linx.IP.Subnet
+
   describe "parse/1" do
     test "parses an IPv4 CIDR" do
       assert {:ok, %Subnet{prefix: 24}} = Subnet.parse("10.0.0.0/24")

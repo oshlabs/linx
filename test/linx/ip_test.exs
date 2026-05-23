@@ -5,6 +5,8 @@ defmodule Linx.IPTest do
   alias Linx.IP
   alias Linx.IP.Subnet
 
+  doctest Linx.IP
+
   describe "parse/1" do
     test "parses an IPv4 dotted-quad" do
       assert {:ok, %IP{family: :inet, bytes: <<10, 0, 0, 5>>}} = IP.parse("10.0.0.5")

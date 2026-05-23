@@ -133,8 +133,8 @@ Each milestone is an independently reviewable commit.
 - Port `silo`'s `netlink_nif.c` → `c_src/netlink_socket.c`, **parameterized by
   protocol number** (`open_in_netns(path, protocol)`), so genl and others reuse
   it. `Linx.Netlink.Socket.Native`.
-- Port the custom Mix compiler → `Mix.Tasks.Compile.NetlinkNif`; wire into
-  `mix.exs` `:compilers`.
+- Port the custom Mix compiler → `lib/mix/tasks/compile.netlink_nif.ex`; wire
+  into `mix.exs` `:compilers`.
 - `Linx.Netlink.Socket`: `%Socket{}` struct (`@enforce_keys`); `open/2`
   (`:host` opens directly via `:socket`; `{:pid,_}`/`{:path,_}` via the NIF),
   `close/1`, `next_seq/1`. The struct carries an `:atomics` sequence counter,

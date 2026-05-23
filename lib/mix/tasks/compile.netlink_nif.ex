@@ -1,15 +1,15 @@
 defmodule Mix.Tasks.Compile.NetlinkNif do
-  @moduledoc """
-  Mix compiler for the native `netlink_socket` NIF.
-
-  Compiles `c_src/netlink_socket.c` into a shared library in the application's
-  `priv/` directory, where `Linx.Netlink.Socket.Native` loads it with
-  `:erlang.load_nif/2`. It runs as part of `mix compile` (and therefore
-  `iex -S mix`, `mix test`, releases), so there is no separate Makefile step.
-
-  Set `LINX_DEBUG=1` to build with `-g -O0`. Override the compiler with the
-  `CC` environment variable.
-  """
+  # Mix compiler for the native `netlink_socket` NIF.
+  #
+  # Compiles `c_src/netlink_socket.c` into a shared library in the
+  # application's `priv/` directory, where `Linx.Netlink.Socket.Native` loads
+  # it with `:erlang.load_nif/2`. It runs as part of `mix compile` (and
+  # therefore `iex -S mix`, `mix test`, releases), so there is no separate
+  # Makefile step.
+  #
+  # Set `LINX_DEBUG=1` to build with `-g -O0`. Override the compiler with the
+  # `CC` environment variable.
+  @moduledoc false
   use Mix.Task.Compiler
 
   @source "c_src/netlink_socket.c"

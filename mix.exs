@@ -1,31 +1,76 @@
 defmodule Linx.MixProject do
   use Mix.Project
 
+  @version "0.1.0"
+  @source_url "https://github.com/oshlabs/linx"
+
   def project do
     [
       app: :linx,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
       # The :netlink_nif compiler builds the netlink_socket NIF as part of
       # `mix compile`. See lib/mix/tasks/compile.netlink_nif.ex.
       compilers: Mix.compilers() ++ [:netlink_nif],
-      deps: deps()
+      deps: deps(),
+      name: "Linx",
+      description: "Linux kernel interfaces for Elixir — netlink, and more.",
+      source_url: @source_url,
+      docs: docs()
     ]
   end
 
-  # Run "mix help compile.app" to learn about applications.
   def application do
-    [
-      extra_applications: [:logger]
-    ]
+    [extra_applications: [:logger]]
   end
 
-  # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      # {:dep_from_hexpm, "~> 0.3.0"},
-      # {:dep_from_git, git: "https://github.com/elixir-lang/my_dep.git", tag: "0.1.0"}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      extras: ["README.md", "EXAMPLES.md", "PLAN.md", "AGENTS.md"],
+      source_ref: "v#{@version}",
+      groups_for_extras: [
+        Guides: ["EXAMPLES.md"],
+        Design: ["PLAN.md", "AGENTS.md"]
+      ],
+      groups_for_modules: [
+        "Public types": [
+          Linx.IP,
+          Linx.IP.Subnet,
+          Linx.MAC
+        ],
+        "Netlink core": [
+          Linx.Netlink,
+          Linx.Netlink.Socket,
+          Linx.Netlink.Socket.Native,
+          Linx.Netlink.Attr,
+          Linx.Netlink.Message,
+          Linx.Netlink.Request,
+          Linx.Netlink.Constants,
+          Linx.Netlink.Codec,
+          Linx.Netlink.Error
+        ],
+        rtnetlink: [
+          Linx.Netlink.Rtnl,
+          Linx.Netlink.Rtnl.Link,
+          Linx.Netlink.Rtnl.LinkInfo,
+          Linx.Netlink.Rtnl.LinkInfo.Macvlan,
+          Linx.Netlink.Rtnl.LinkInfo.Ipvlan,
+          Linx.Netlink.Rtnl.LinkInfo.Vlan,
+          Linx.Netlink.Rtnl.LinkInfo.Veth,
+          Linx.Netlink.Rtnl.Address,
+          Linx.Netlink.Rtnl.Route,
+          Linx.Netlink.Rtnl.Neighbour,
+          Linx.Netlink.Rtnl.Rule
+        ]
+      ]
     ]
   end
 end
