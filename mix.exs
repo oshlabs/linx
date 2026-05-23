@@ -34,18 +34,26 @@ defmodule Linx.MixProject do
   defp docs do
     [
       main: "readme",
+      # Generated HTML lands under _build/, alongside other build artefacts,
+      # so the top-level `doc/` slot stays free for the `docs/` source tree.
+      output: "_build/docs",
       extras: [
         "README.md",
-        "EXAMPLES.md",
-        "PLAN.md",
-        "COVERAGE.md",
-        "REFERENCES.md",
-        "AGENTS.md"
+        "AGENTS.md",
+        "docs/netlink/EXAMPLES.md",
+        "docs/netlink/PLAN.md",
+        "docs/netlink/COVERAGE.md",
+        "docs/netlink/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
-        Guides: ["EXAMPLES.md"],
-        Design: ["PLAN.md", "COVERAGE.md", "REFERENCES.md", "AGENTS.md"]
+        "Netlink — guides": ["docs/netlink/EXAMPLES.md"],
+        "Netlink — design": [
+          "docs/netlink/PLAN.md",
+          "docs/netlink/COVERAGE.md",
+          "docs/netlink/REFERENCES.md"
+        ],
+        "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
         "Public types": [
