@@ -48,11 +48,27 @@ defmodule Linx.Tty do
   with `restore_and_close/2`) and the `attach/2` `try/after` finalisation
   exist so this can't happen accidentally.
 
+  ## Coexisting with iex's tty driver
+
+  When `attach/2` is called from `iex -S mix`, the BEAM already has
+  Erlang's `user_drv` / `prim_tty` driver reading `/dev/tty` to support
+  type-ahead at the iex prompt. Two readers on the same kernel tty
+  buffer alternate-steal each other's bytes — the user sees roughly
+  every other keystroke vanish.
+
+  `attach/2` handles this by bracketing its pump with
+  `:prim_tty.disable_reader/1` / `:prim_tty.enable_reader/1`, reaching
+  into `user_drv`'s state via `:sys.get_state/1` to find the
+  `prim_tty` state record. The competing reader process parks in an
+  inner `receive` until attach returns and re-enables it. When the
+  BEAM isn't running under `user_drv` (escripts, non-shell apps,
+  ssh-shell driver variants), the bracket is a no-op.
+
   ## Status
 
-  T0 (scaffolding), T1 (termios + ioctl primitives), and T2
-  (`attach/2`) are shipped. Window-size propagation across
-  `Linx.Process` lands in T3. See `docs/tty/PLAN.md` for the roadmap.
+  T0–T4 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
+  window-size propagation, and coexistence with `iex`'s tty driver.
+  See `docs/tty/PLAN.md` for the roadmap.
   """
 
   alias Linx.Tty.Native
@@ -187,6 +203,13 @@ defmodule Linx.Tty do
           | {:error, term()}
   def attach(:controlling, session) when is_pid(session) do
     with {:ok, fd, saved} <- open_controlling_raw() do
+      # Pause Erlang's prim_tty reader so it stops competing with us
+      # for /dev/tty reads. See the module doc's "Coexisting with
+      # iex's tty driver". `nil` when no user_drv (escript, etc.) --
+      # then no one else is reading the tty and there's nothing to
+      # pause.
+      tty_state = take_tty_quietly()
+
       try do
         # Best-effort: tell the workload's PTY about our terminal's
         # current dimensions before it sees anything. Runtime
@@ -203,7 +226,66 @@ defmodule Linx.Tty do
         __pump__(port, session)
       after
         restore_and_close(fd, saved)
+        give_tty_back(tty_state)
       end
+    end
+  end
+
+  # Suspend `prim_tty`'s reader process so it doesn't pull keystrokes
+  # out from under our port. Returns the opaque prim_tty state on
+  # success (hand it back to give_tty_back/1) or nil if there is no
+  # competing reader to suspend.
+  #
+  # `user_drv` is a gen_statem registered as `:user_drv`. Its state
+  # data is the record `#state{tty, write, read, ...}`; field 1 (after
+  # the record-name tag at position 0) is the prim_tty state, which is
+  # what `prim_tty:disable_reader/1` operates on.
+  #
+  # We touch internal record layout here intentionally and isolated to
+  # this one helper -- see the module doc. Anything unexpected (no
+  # user_drv, surprising state shape, prim_tty rejecting the state)
+  # falls through to "no suspend": the every-other-byte bug returns
+  # for that session but nothing crashes.
+  defp take_tty_quietly do
+    with pid when is_pid(pid) <- Process.whereis(:user_drv),
+         {_state_name, state_data} <- safe_get_state(pid),
+         tty when not is_nil(tty) <- safe_elem(state_data, 1),
+         :ok <- safe_disable(tty) do
+      tty
+    else
+      _ -> nil
+    end
+  end
+
+  defp give_tty_back(nil), do: :ok
+
+  defp give_tty_back(tty) do
+    try do
+      :prim_tty.enable_reader(tty)
+    catch
+      _, _ -> :ok
+    end
+  end
+
+  defp safe_get_state(pid) do
+    try do
+      :sys.get_state(pid, 1000)
+    catch
+      _, _ -> nil
+    end
+  end
+
+  defp safe_elem(tuple, idx) when is_tuple(tuple) and tuple_size(tuple) > idx do
+    elem(tuple, idx)
+  end
+
+  defp safe_elem(_, _), do: nil
+
+  defp safe_disable(tty) do
+    try do
+      :prim_tty.disable_reader(tty)
+    catch
+      _, _ -> :error
     end
   end
 

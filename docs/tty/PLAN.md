@@ -266,7 +266,18 @@ updates too.
 
 ### T4 — Coexisting with iex's tty driver
 
-✅ Manual sanity test confirmed end-to-end: spawn bash with
+✅ **Shipped.** Path (3) below was implemented: `attach/2` brackets
+its pump with `:prim_tty.disable_reader/1` /
+`:prim_tty.enable_reader/1`, reaching into `user_drv`'s state via
+`:sys.get_state(:user_drv)` to find the `prim_tty` state record.
+The competing reader process parks in its inner `receive` until
+attach returns and re-enables it. When the BEAM is not running
+under `user_drv` (escripts, non-shell apps), the bracket is a
+no-op. Keystrokes now arrive intact.
+
+#### Background — the symptom and diagnosis
+
+Manual sanity test confirmed end-to-end: spawn bash with
 `stdio: :pty` + `proceed` + `Tty.attach(:controlling, c)` from
 `iex -S mix` lands in a real bash inside the container; typing
 `exit` returns to iex with `{:ok, {:exited, 127}}`. But **input
@@ -297,51 +308,72 @@ iex prompt without pressing Enter. If you see the "lost" bytes
 appear, that's `user_drv` replaying its pre-read buffer — definitive
 proof of the diagnosis.
 
-**Fix paths**, in increasing order of cleanness:
+#### Why path (3) and not path (4)
 
-1. **Public docs workaround** — start iex with `--no-shell` or
-   `--user :erl_init_no_input` (or whatever the OTP 28 escape hatch
-   is) when you want to use `attach/2`. Loses iex history but kills
-   the competing reader entirely. Cheap; gets the use case working
-   for early adopters while we build the proper fix.
+The original sketch had five candidate paths in increasing order of
+cleanness:
 
-2. **`:io.setopts(:standard_io, …)`** — Erlang's documented IO
-   options. Worth investigating whether any combination
-   (`echo: false`, `expand_fun: nil`, etc.) actually suspends
-   `prim_tty`'s reader. Probably not — these affect echo and
-   line-edit behaviour but not the underlying read loop.
+1. **Public docs workaround** — start iex with `--no-shell` so the
+   shell input driver isn't there to compete. Loses iex history.
+2. **`:io.setopts/2`** — Erlang's documented IO options. Doesn't
+   actually expose a "suspend the reader" knob.
+3. **`prim_tty` private API** — the actual driver in OTP 26+; it
+   must have some pause affordance for `user_drv`'s own job-control
+   needs. **This is what shipped.** See "What we built" below.
+4. **Foreground-process-group trick** — `tcsetpgrp(2)` to background
+   the BEAM. **Rejected as unworkable**: `tcsetpgrp` operates on OS
+   process groups, and the BEAM is a single OS process. Both readers
+   (ours and `prim_tty`'s) live in the same BEAM and share the same
+   pgrp; backgrounding one would background the other.
+5. **`Linx.Tty.with_exclusive_tty/1`** — a public wrapper. Made
+   unnecessary by (3): the bracket lives inside `attach/2`, no
+   caller-visible wrapper needed.
 
-3. **`prim_tty` private API** — OTP 26+'s `prim_tty` is the actual
-   driver; it must have some "pause" or "give up the tty" affordance
-   for `user_drv` to do its job correctly during job control. Read
-   the OTP source for `prim_tty.erl` and `user_drv.erl`, find the
-   API (likely undocumented), use it. Fragile across OTP versions
-   but probably the right answer.
+#### What we built
 
-4. **Foreground-process-group trick** — `tcsetpgrp(2)` on `/dev/tty`
-   to put attach's caller in the foreground group, leaving the BEAM
-   in the background. `user_drv`'s reads then fail with `EIO` /
-   `SIGTTIN` (background process trying to read tty) and `user_drv`
-   stops trying. Restore on exit. This is what `vim` does when it
-   takes over the terminal. Needs `tcsetpgrp` exposed via NIF on
-   `Linx.Tty.Native`; the trick is well-trodden in C land.
+`prim_tty.erl` exports `disable_reader/1` and `enable_reader/1` —
+intended for `user_drv`'s own job-control flow (e.g. when it spawns
+`$EDITOR`). They send `{Alias, disable}` / `{Alias, enable}`
+messages to the reader pid stored inside the `prim_tty` state
+record. On `disable`, the reader parks in an inner `receive`
+waiting only for `enable`; no further `read(2)` against `/dev/tty`.
+Exactly the "pause the competing reader" hook T4 needed.
 
-5. **`Linx.Tty.with_exclusive_tty/1`** — the public wrapper that
-   becomes the canonical entry point for attach-from-iex. Takes a
-   fun, suspends/foregrounds, runs it, restores. `Linx.Tty.attach/2`
-   internally calls through it (or its body) when the caller is iex.
+The implementation in `Linx.Tty.attach/2`:
 
-**Scope of T4 ship**: the *proper fix* via (3) or (4); update
-`attach/2` to use it; document in EXAMPLES.md; remove the
-known-limitation note. The pragmatic (1) workaround can be
-mentioned along the way for anyone wanting to test today.
+- `Process.whereis(:user_drv)` → pid (or `nil` for escripts etc.).
+- `:sys.get_state(pid)` returns `{state_name, state_record}`;
+  `state_record` is `#state{tty, write, read, …}` from
+  `user_drv.erl` line 109. Field at tuple-index 1 (after the record
+  tag at 0) is the `prim_tty` state.
+- `:prim_tty.disable_reader(tty_state)` before the pump.
+- `:prim_tty.enable_reader(tty_state)` in `try/after` so iex resumes
+  cleanly even on a crash in the pump body.
+- Every step is wrapped in a `safe_*` helper that catches and falls
+  through to `nil`, so if any of the OTP internals change shape in a
+  future release we degrade to "old broken behaviour" rather than
+  crashing.
 
-**Tests**: this is fundamentally interactive — hard to assert in
-`mix test`. The acceptance test lives in `docs/tty/EXAMPLES.md` as a
-specific manual procedure: spawn `cat` via stdio: :pty, attach,
-type "hello world", verify *every character* arrives, observe `cat`
-echoing the whole string. If T4 ships, that procedure must
-succeed.
+#### Acceptance test
+
+This is fundamentally interactive — hard to assert in `mix test`.
+The manual acceptance procedure lives in `docs/tty/EXAMPLES.md`:
+spawn bash via `stdio: :pty`, attach, type `hello world<Enter>`,
+verify *every character* arrives, observe the shell echoing the
+whole line.
+
+#### Coupling to OTP internals
+
+This touches three OTP-private interfaces: the `:user_drv`
+registered name, the `#state{}` record layout (specifically that
+the `prim_tty` state is at field 1), and the
+`disable_reader/enable_reader` exports on `prim_tty`. All three are
+stable across OTP 26+ at time of writing, but they are
+implementation details. If a future OTP rearranges them, the
+fallback path (no bracketing) is taken and the every-other-byte
+behaviour returns — visibly broken, but not crashy. That's an
+acceptable failure mode; the value of the brackets is too large to
+not take this dependency.
 
 ## Testing
 

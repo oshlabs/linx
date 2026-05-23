@@ -138,29 +138,24 @@ The mechanics:
      `restore_and_close/2` unconditionally — so your terminal can
      never be left in raw mode, even if the pump raises mid-flight.
 
-### Known limitation: input is unreliable when called from iex
+### Coexisting with iex's tty driver
 
-When `attach/2` runs from inside `iex -S mix`, you'll typically see
-*every other character you type* drop — they go to Erlang's
-`user_drv` / `prim_tty` driver (which is also reading `/dev/tty` to
-pre-buffer input for the next iex prompt) instead of to your
-attached workload.
+When `attach/2` runs from `iex -S mix`, the BEAM already has
+Erlang's `user_drv` / `prim_tty` driver reading `/dev/tty` to
+support type-ahead at the iex prompt. Two readers on the same
+kernel tty buffer alternate-steal each other's bytes — without
+mitigation you'd lose roughly every other keystroke.
 
-End-to-end the architecture works — `exit` from the attached bash
-does land you back at iex with the correct exit code — but typing
-arbitrary commands inside the attached shell is currently broken.
+`attach/2` handles this internally: it grabs the `prim_tty` state
+out of `user_drv` (via `:sys.get_state(:user_drv)`) and calls
+`:prim_tty.disable_reader/1` before the pump, then
+`:prim_tty.enable_reader/1` in the `try/after` so iex's reader
+resumes cleanly on return. No caller action required — type into
+the attached shell as you would any normal terminal.
 
-**Workaround for now**: run iex with the shell input driver
-disabled. (The exact escape hatch is OTP-version-specific; this is
-the thing T4 needs to investigate.) Alternatively call `attach/2`
-from a non-iex context (`escript`, a supervised application, a
-test).
-
-**Proper fix**: lands in T4 — see `PLAN.md`. The leading candidate
-is `tcsetpgrp(2)` so attach becomes the foreground process group on
-`/dev/tty` for its duration, with the BEAM (including `user_drv`)
-backgrounded; `user_drv`'s reads then `SIGTTIN`/`EIO` and stop
-competing. Restored on exit.
+When the BEAM is not running under `user_drv` (escripts,
+non-shell apps, ssh-shell driver variants), the suspend is a
+no-op — there's no competing reader to worry about.
 
 ### The owner requirement
 
