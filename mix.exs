@@ -10,9 +10,12 @@ defmodule Linx.MixProject do
       version: @version,
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
-      # The :netlink_nif compiler builds the netlink_socket NIF as part of
-      # `mix compile`. See lib/mix/tasks/compile.netlink_nif.ex.
-      compilers: Mix.compilers() ++ [:netlink_nif],
+      # Custom compilers for the project's native code, run as part of
+      # `mix compile`:
+      #   * :netlink_nif    -- the netlink_socket NIF (Linx.Netlink)
+      #   * :linx_process   -- the linx_process Port binary (Linx.Process)
+      # See lib/mix/tasks/compile.*.ex.
+      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process],
       deps: deps(),
       name: "Linx",
       description: "Linux kernel interfaces for Elixir — netlink, and more.",
