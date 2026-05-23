@@ -64,11 +64,27 @@ defmodule Linx.Tty do
   BEAM isn't running under `user_drv` (escripts, non-shell apps,
   ssh-shell driver variants), the bracket is a no-op.
 
+  ## Runtime SIGWINCH propagation
+
+  `attach/2` also forwards live terminal resizes (drag the corner of
+  your emulator while inside the attached shell) to the workload's
+  PTY. It does this by registering a `Linx.Tty.SigwinchHandler`
+  instance on OTP's `:erl_signal_server` for the lifetime of the
+  attach; each `SIGWINCH` becomes a `{:linx_tty, :sigwinch}` message
+  in the pump's mailbox, which re-reads `TIOCGWINSZ` on the local tty
+  and pushes the new size through `Linx.Process.pty_set_winsize/2`.
+  Inside the container, `bash` / `vim` / `top` then see `SIGWINCH`
+  through their *own* (slave-side) tty and redraw at the new size.
+
+  Coexists with `prim_tty_sighandler` (iex's own SIGWINCH consumer):
+  `:gen_event` broadcasts to every registered handler.
+
   ## Status
 
-  T0–T4 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
-  window-size propagation, and coexistence with `iex`'s tty driver.
-  See `docs/tty/PLAN.md` for the roadmap.
+  T0–T5 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
+  window-size propagation, coexistence with `iex`'s tty driver, and
+  runtime SIGWINCH-driven resize updates. See `docs/tty/PLAN.md` for
+  the roadmap.
   """
 
   alias Linx.Tty.Native
@@ -209,22 +225,27 @@ defmodule Linx.Tty do
       # then no one else is reading the tty and there's nothing to
       # pause.
       tty_state = take_tty_quietly()
+      sigwinch_id = make_ref()
 
       try do
-        # Best-effort: tell the workload's PTY about our terminal's
-        # current dimensions before it sees anything. Runtime
-        # SIGWINCH-driven updates aren't wired yet (Erlang's signal
-        # surface doesn't include SIGWINCH out of the box -- see
-        # PLAN.md's "deferred to a follow-up"), so for now the
-        # workload sees the size at attach time and that's it.
+        # Arm a SIGWINCH forwarder so the pump sees terminal-resize
+        # events (drag the corner of the emulator while inside the
+        # attached shell) and re-seeds the workload's PTY size on the
+        # fly. See `Linx.Tty.SigwinchHandler` and the module doc.
+        arm_sigwinch(sigwinch_id)
+
+        # Tell the workload's PTY about our terminal's current
+        # dimensions before it sees anything, so a fresh bash inside
+        # the attached child opens at the right size.
         case window_size(fd) do
           {:ok, ws} -> _ = Linx.Process.pty_set_winsize(session, ws)
           {:error, _} -> :ok
         end
 
         port = :erlang.open_port({:fd, fd, fd}, [:binary, :stream])
-        __pump__(port, session)
+        __pump__(port, session, fd)
       after
+        disarm_sigwinch(sigwinch_id)
         restore_and_close(fd, saved)
         give_tty_back(tty_state)
       end
@@ -289,26 +310,73 @@ defmodule Linx.Tty do
     end
   end
 
+  # Register a `Linx.Tty.SigwinchHandler` instance on
+  # `:erl_signal_server` keyed by `{handler, id}` so multiple
+  # concurrent attaches can coexist (each `id` is a unique ref made by
+  # the caller). The signal disposition is set to `:handle` regardless
+  # -- it's a global property and harmless when no handlers are
+  # registered.
+  #
+  # Soft-fails: SIGWINCH propagation is a quality-of-life feature; if
+  # OTP's signal infrastructure isn't available we degrade to the
+  # initial-seed-only behaviour T3 gave us, without crashing attach.
+  defp arm_sigwinch(id) do
+    try do
+      :os.set_signal(:sigwinch, :handle)
+      :gen_event.add_handler(:erl_signal_server, {Linx.Tty.SigwinchHandler, id}, self())
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
+  end
+
+  defp disarm_sigwinch(id) do
+    try do
+      :gen_event.delete_handler(:erl_signal_server, {Linx.Tty.SigwinchHandler, id}, [])
+    catch
+      _, _ -> :ok
+    end
+
+    :ok
+  end
+
   @doc false
   # The byte pump. Exposed (under @doc false) so tests can drive it
   # through a port wrapping a socketpair stand-in for /dev/tty without
   # touching the test runner's real terminal.
   #
+  # `local_fd` is the fd of the local tty we wrapped as `port` (or
+  # `nil` from the socketpair test path). When non-nil and a
+  # SIGWINCH event arrives, the pump re-reads `TIOCGWINSZ` on it and
+  # forwards the new size to the workload's PTY.
+  #
   # The caller must own `session` -- the :pty_out events arrive in the
   # owner's mailbox, and this function expects to receive them in its
   # own mailbox. See attach/2's docs for the constraint.
-  @spec __pump__(port(), session()) ::
+  @spec __pump__(port(), session(), fd() | nil) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
           | {:error, term()}
-  def __pump__(port, session) when is_port(port) and is_pid(session) do
+  def __pump__(port, session, local_fd \\ nil)
+      when is_port(port) and is_pid(session) and (is_integer(local_fd) or is_nil(local_fd)) do
     receive do
       {^port, {:data, bytes}} ->
         _ = Linx.Process.pty_write(session, bytes)
-        __pump__(port, session)
+        __pump__(port, session, local_fd)
 
       {:linx_process, :pty_out, bytes} ->
         Port.command(port, bytes)
-        __pump__(port, session)
+        __pump__(port, session, local_fd)
+
+      {:linx_tty, :sigwinch} ->
+        if is_integer(local_fd) do
+          case window_size(local_fd) do
+            {:ok, ws} -> _ = Linx.Process.pty_set_winsize(session, ws)
+            {:error, _} -> :ok
+          end
+        end
+
+        __pump__(port, session, local_fd)
 
       {:linx_process, :exited, code} ->
         {:ok, {:exited, code}}

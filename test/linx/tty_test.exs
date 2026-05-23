@@ -189,6 +189,83 @@ defmodule Linx.TtyTest do
     end
   end
 
+  describe "SigwinchHandler" do
+    # The gen_event-side machinery is straightforward to test against a
+    # bespoke event manager (no need to touch the real
+    # `:erl_signal_server` and risk SIGWINCH-while-tests-run flakes).
+
+    test "forwards :sigwinch to the target pid" do
+      {:ok, mgr} = :gen_event.start_link()
+      :ok = :gen_event.add_handler(mgr, Linx.Tty.SigwinchHandler, self())
+
+      :ok = :gen_event.notify(mgr, :sigwinch)
+      assert_receive {:linx_tty, :sigwinch}, 500
+
+      :ok = :gen_event.stop(mgr)
+    end
+
+    test "ignores other events" do
+      {:ok, mgr} = :gen_event.start_link()
+      :ok = :gen_event.add_handler(mgr, Linx.Tty.SigwinchHandler, self())
+
+      :ok = :gen_event.notify(mgr, :sigterm)
+      :ok = :gen_event.notify(mgr, :sigchld)
+      refute_receive {:linx_tty, _}, 100
+
+      :ok = :gen_event.stop(mgr)
+    end
+
+    test "ID-keyed instances coexist (concurrent attaches)" do
+      # Each attach uses {SigwinchHandler, ref}; two parallel
+      # registrations should both receive the broadcast.
+      {:ok, mgr} = :gen_event.start_link()
+
+      ref_a = make_ref()
+      ref_b = make_ref()
+      :ok = :gen_event.add_handler(mgr, {Linx.Tty.SigwinchHandler, ref_a}, self())
+      :ok = :gen_event.add_handler(mgr, {Linx.Tty.SigwinchHandler, ref_b}, self())
+
+      :ok = :gen_event.notify(mgr, :sigwinch)
+      # Both handlers fire; both forward to us.
+      assert_receive {:linx_tty, :sigwinch}, 500
+      assert_receive {:linx_tty, :sigwinch}, 500
+
+      :ok = :gen_event.stop(mgr)
+    end
+  end
+
+  describe "__pump__/3 sigwinch handling" do
+    # Verify the pump's sigwinch clause: when a sigwinch event arrives,
+    # if local_fd is nil (test path) it's a no-op; if it's a real tty
+    # fd, the pump re-reads window_size and forwards. We test the
+    # arity-2 / nil-local_fd path here -- the integration path is
+    # covered manually (resize the terminal during an attached vim).
+
+    test "ignores :sigwinch when local_fd is nil" do
+      {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = Linx.Process.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      {:ok, {_user_fd, attach_fd}} = Linx.Tty.Native.socketpair()
+      attach_port = :erlang.open_port({:fd, attach_fd, attach_fd}, [:binary, :stream])
+
+      # Inject a sigwinch into our own mailbox. With local_fd
+      # defaulting to nil (arity-2 call) the pump should consume it
+      # without crashing and continue waiting for other messages.
+      send(self(), {:linx_tty, :sigwinch})
+
+      # Helper signals after a moment so the pump returns with a
+      # known terminal event.
+      spawn_link(fn ->
+        Process.sleep(100)
+        :ok = Linx.Process.signal(session, 15)
+      end)
+
+      assert {:ok, {:signaled, 15}} = Linx.Tty.__pump__(attach_port, session)
+    end
+  end
+
   # Read from `port` until `seen` contains `needle`, then signal the
   # session (so the pump returns) and forward what we saw back to
   # `test_pid` for assertion.

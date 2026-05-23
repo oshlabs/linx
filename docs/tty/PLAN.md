@@ -1,14 +1,16 @@
 # Linx.Tty — implementation plan
 
-> **T0–T3 have shipped** on branch `tty-foundations`: the NIF
+> **T0–T5 have shipped** on branch `tty-foundations`: the NIF
 > infrastructure, value-type structs, the termios + ioctl primitives,
-> `attach/2`, and initial window-size propagation (one new verb on
-> `Linx.Process`, `pty_set_winsize/2`; agent learns `{:pty_winsize, _}`
-> in both pre-proceed and post-running windows; `attach/2` seeds the
-> workload's size from the local tty at entry). Runtime
-> SIGWINCH-driven updates remain a follow-up — Erlang's `:os.set_signal/2`
-> doesn't currently cover `SIGWINCH`, so a small NIF + signalfd would
-> be the natural next step.
+> `attach/2`, initial window-size propagation, coexistence with
+> `iex`'s tty driver (`:prim_tty.disable_reader/1` bracket around the
+> pump), and **runtime SIGWINCH-driven resize updates** (a
+> `:gen_event` handler on OTP's `:erl_signal_server` forwards
+> `:sigwinch` into the pump's mailbox, which re-reads `TIOCGWINSZ` on
+> the local tty and pushes the size through
+> `Linx.Process.pty_set_winsize/2`). OTP 28's expanded
+> `:os.set_signal/2` (which now covers `:sigwinch`) made the
+> originally-proposed signalfd NIF unnecessary.
 
 ## Goal
 
@@ -243,26 +245,57 @@ the workload starts inside the attached container.
   `{:error, :no_pty}`; on a PTY session, running `stty size` inside
   reports the size we set.
 
-### Deferred to a follow-up — runtime SIGWINCH propagation
+### T5 — Runtime SIGWINCH propagation
 
-The piece that lets the workload also see *later* resizes (you drag
-the terminal-emulator corner while a process is running).
+✅ **Shipped.** Drag the corner of your terminal emulator while
+inside an attached shell and `bash` / `vim` / `top` redraw at the new
+size in real time.
 
-Erlang's `:os.set_signal/2` doesn't currently cover `SIGWINCH` — its
-supported set is `sighup`/`sigchld`/`sigterm` and friends. Hooking
-the signal into the attach loop therefore needs either:
+#### What changed since the original sketch
 
-- A small NIF wrapping `signalfd(2)` for `SIGWINCH`, that the pump
-  poll's alongside the local tty port and the `:linx_process, …`
-  events; or
-- `sigaction(2)` + self-pipe in a NIF, same idea.
+The PLAN's original deferred section assumed Erlang's
+`:os.set_signal/2` didn't cover `SIGWINCH` (true under OTP 26) and
+proposed a `signalfd(2)`-based NIF as the fix. **OTP 28 added
+`:sigwinch` to `:os.set_signal/2`**, and `prim_tty_sighandler`
+itself uses it for iex's own line-editor refresh. So the
+implementation is pure Elixir — no C, no signalfd, no self-pipe.
 
-Either approach is small in code but warrants its own milestone with
-its own tests (interactive resize is hard to assert in `mix test`).
-Most workloads survive without it — `vim` and `less` read the size
-once at startup, which is exactly what the T3 initial seed gives
-them — but a true `docker attach` ergonomically wants the runtime
-updates too.
+#### How it works
+
+`SIGWINCH` is delivered to the BEAM by the kernel whenever the
+controlling terminal resizes. The BEAM forwards each signal as a
+`:gen_event` broadcast on the registered manager
+`:erl_signal_server`. Multiple handlers can be registered; each
+receives every broadcast. `prim_tty_sighandler` is already on the
+list (iex needs the geometry refresh).
+
+`Linx.Tty.SigwinchHandler` is a tiny `:gen_event` handler that
+forwards `:sigwinch` to a target pid as `{:linx_tty, :sigwinch}`.
+`Linx.Tty.attach/2` registers an instance keyed by
+`{Linx.Tty.SigwinchHandler, make_ref()}` on entry and removes it on
+exit (in the `try/after`). The `make_ref()` discriminator lets
+concurrent attaches coexist trivially.
+
+The pump grew one new `receive` clause:
+
+```elixir
+{:linx_tty, :sigwinch} ->
+  case window_size(local_fd) do
+    {:ok, ws} -> _ = Linx.Process.pty_set_winsize(session, ws)
+    {:error, _} -> :ok
+  end
+  __pump__(port, session, local_fd)
+```
+
+`__pump__` gained a third argument (`local_fd`, default `nil`) so the
+socketpair test path stays arity-2 and ignores `:sigwinch` cleanly.
+
+#### Acceptance test
+
+Manual, lives in `EXAMPLES.md`: from `iex -S mix`, spawn bash with
+`stdio: :pty`, attach, open `vim`, drag the terminal emulator's
+corner. vim must redraw at the new size without exiting or
+corrupting.
 
 ### T4 — Coexisting with iex's tty driver
 

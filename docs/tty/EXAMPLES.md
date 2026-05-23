@@ -224,13 +224,49 @@ iex> P.proceed(c)
 # bash starts thinking the terminal is 200x50.
 ```
 
-## Not yet implemented
+## Live resize (`SIGWINCH`)
 
-Runtime `SIGWINCH`-driven updates — the "user drags the terminal
-corner while a process is running" case — are deferred to a follow-up.
-Erlang's `:os.set_signal/2` doesn't include `:sigwinch` in its
-supported-signals list, so a small `signalfd`-based NIF would be the
-natural next step. Most workloads survive without it (vim/less read
-the size at startup, which T3 already delivers), but a true
-`docker attach` ergonomically wants the runtime updates too. See
-`PLAN.md` for the roadmap.
+While `attach/2` is running, dragging the corner of your terminal
+emulator sends `SIGWINCH` to the BEAM. `attach/2` registers a
+`Linx.Tty.SigwinchHandler` on OTP's `:erl_signal_server` for the
+lifetime of the call, so each resize becomes a `{:linx_tty, :sigwinch}`
+message in the pump's mailbox — the pump re-reads `TIOCGWINSZ` on the
+local tty and forwards the new size through
+`Linx.Process.pty_set_winsize/2`. Inside the container, `bash` / `vim`
+/ `top` then see their own (slave-side) `SIGWINCH` and redraw at the
+new size.
+
+### Manual acceptance test
+
+```elixir
+# In iex -S mix
+iex> alias Linx.Process, as: P
+iex> alias Linx.Tty
+iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], stdio: :pty)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.proceed(c)
+iex> receive do {:linx_process, :running} -> :ok end
+iex> Tty.attach(:controlling, c)
+# Inside the attached bash:
+#   $ vim
+#   <drag the terminal emulator's corner while vim is open>
+#   <vim redraws cleanly at the new dimensions>
+#   :q
+#   $ exit
+{:ok, {:exited, 0}}
+```
+
+The trick — and the reason this required OTP 28 — is that OTP 26
+hadn't yet added `:sigwinch` to `:os.set_signal/2`. `prim_tty` got
+SIGWINCH support partway through the OTP 27/28 series; we now ride on
+the same plumbing iex itself uses for its line-editor geometry
+refresh. No NIF needed.
+
+### Why this composes safely with iex
+
+`:gen_event` broadcasts each signal to every registered handler.
+`prim_tty_sighandler` (iex's handler, which refreshes its line
+editor's idea of width) stays armed throughout — we register
+*alongside* it, not in place of it. Handler IDs (`{Module, ref}`)
+keep multiple concurrent attaches independent: each one removes only
+its own handler on teardown.

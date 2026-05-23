@@ -23,7 +23,7 @@ A living doc — update as primitives ship. Status legend:
 | `set_window_size/2` (`TIOCSWINSZ`) | ✅ | T1 |
 | `attach/2` | ✅ | T2 — byte pump; T4 — brackets pump with `:prim_tty.disable_reader/1` so iex's tty driver stops competing |
 | Initial winsize seed in `attach/2` | ✅ | T3 |
-| SIGWINCH-driven runtime propagation | ⬜ | follow-up — needs signalfd NIF |
+| SIGWINCH-driven runtime propagation | ✅ | T5 — `Linx.Tty.SigwinchHandler` gen_event on `:erl_signal_server`; OTP 28 made the NIF unnecessary |
 
 ## Cross-subsystem (new verbs on `Linx.Process`)
 
