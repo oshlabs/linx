@@ -360,18 +360,24 @@ COVERAGE updates; commit and push per milestone.
 
 ## M8 — Interface stats and `Route.get`
 
+✅ **Shipped.**
+
 The cheap read-side wins from `COVERAGE.md`:
 
 - **`Rtnl.Stats`** — interface counters via `RTM_GETSTATS`. A `%Stats{}`
-  struct carrying `rtnl_link_stats64` (rx/tx packets, bytes, dropped,
-  errors, multicast, …). `Stats.get(socket, link_name)` returns one;
+  struct (header: `if_stats_msg`) carrying a
+  `Linx.Netlink.Rtnl.Stats.Link64` sub-struct with the 25 fields of
+  `struct rtnl_link_stats64` (rx/tx packets, bytes, dropped, errors,
+  multicast, …). The Link64 codec tolerates the older 24-field
+  (pre-5.19) layout. `Stats.get(socket, link_name)` returns one;
   `Stats.list/1` dumps every interface's counters.
 - **`Rtnl.Route.get/2`** — destination lookup. `RTM_GETROUTE` *without*
   `NLM_F_DUMP`, with `RTA_DST` set: the kernel resolves and returns the
   matching route. Returns a single `%Route{}` or
   `{:error, %Linx.Netlink.Error{}}` for an unroutable address.
 - **Tests:** plain codec round-trips; live host-netns reads (both verbs
-  are read-only, no root needed); `EXAMPLES.md` updated.
+  are read-only, no root needed); `EXAMPLES.md` and `COVERAGE.md`
+  updated.
 
 ## M9 — Process layer: Connection + Monitor
 

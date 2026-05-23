@@ -75,7 +75,9 @@ defmodule Linx.MixProject do
           Linx.Netlink.Rtnl.Address,
           Linx.Netlink.Rtnl.Route,
           Linx.Netlink.Rtnl.Neighbour,
-          Linx.Netlink.Rtnl.Rule
+          Linx.Netlink.Rtnl.Rule,
+          Linx.Netlink.Rtnl.Stats,
+          Linx.Netlink.Rtnl.Stats.Link64
         ]
       ]
     ]

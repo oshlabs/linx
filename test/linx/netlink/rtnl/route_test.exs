@@ -68,4 +68,30 @@ defmodule Linx.Netlink.Rtnl.RouteTest do
 
     assert :ok = Socket.close(socket)
   end
+
+  test "get/2 resolves loopback to its loopback route" do
+    {:ok, socket} = Rtnl.open()
+
+    # 127.0.0.1 always routes through the local table on a Linux host.
+    assert {:ok, %Route{family: 2, dst: dst}} = Route.get(socket, "127.0.0.1")
+    assert dst == ~IP"127.0.0.1"
+
+    assert :ok = Socket.close(socket)
+  end
+
+  test "get/2 accepts a Linx.IP" do
+    {:ok, socket} = Rtnl.open()
+
+    assert {:ok, %Route{family: 2}} = Route.get(socket, ~IP"127.0.0.1")
+
+    assert :ok = Socket.close(socket)
+  end
+
+  test "get/2 returns a parse error for a malformed address" do
+    {:ok, socket} = Rtnl.open()
+
+    assert {:error, {:bad_address, "not-an-ip"}} = Route.get(socket, "not-an-ip")
+
+    assert :ok = Socket.close(socket)
+  end
 end

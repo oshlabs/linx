@@ -58,7 +58,7 @@ Status: **🟡 partial.** Core CRUD plus common virtual link kinds.
 | set xdp | ⬜ | low | XDP program attach |
 | `delete` | ✅ | — | M4 |
 | `move_to_netns` | ✅ | — | M4 |
-| stats (`RTM_GETSTATS`) | ⬜ | **high** | interface counters; small effort |
+| stats (`RTM_GETSTATS`) | ✅ | — | M8 — `Rtnl.Stats` (link_64 counters) |
 
 ### Addresses — `ip addr` / `RTM_*ADDR`
 
@@ -87,7 +87,7 @@ and metrics.
 | `add_default` / `delete_default` | ✅ | — | M4 / M5 |
 | `delete` | ✅ | — | M5 |
 | `list` | ✅ | — | M5 |
-| `get` (lookup a destination) | ⬜ | **high** | the kernel-side `ip route get` |
+| `get` (lookup a destination) | ✅ | — | M8 — `Route.get/2` |
 | multipath / nexthop groups | ⬜ | med | container / cloud routing |
 | route metrics (`RTAX_*`: mtu, hoplimit, rtt) | ⬜ | med | |
 | route types (blackhole, prohibit, unreachable, throw) | ⬜ | med | |
@@ -157,7 +157,7 @@ becoming a full reimplementation.
 | Feature | Status | Priority | Notes |
 |---|---|---|---|
 | Nexthop objects (`RTM_*NEXTHOP`) | ⬜ | med | modern multipath |
-| Network statistics (`RTM_GETSTATS`) | ⬜ | **high** | interface counters |
+| Network statistics (`RTM_GETSTATS`) | ✅ | — | M8 (see Links / stats) |
 | netconf (`RTM_*NETCONF`) | ⬜ | low | per-iface IP config (forwarding, rp_filter) |
 | addrlabel | ⬜ | low | IPv6 source selection |
 | mroute (multicast routing) | ⬜ | low | |
@@ -252,10 +252,9 @@ unlock or polish what is already there.
 
 Filtered down from the matrix above — "useful, achievable in a milestone":
 
-1. **Interface statistics** — `Rtnl.Stats` via `RTM_GETSTATS`. Small, big
-   observability win.
-2. **`Rtnl.Route.get/2`** — lookup a destination (`ip route get` equivalent).
-   Common in debugging and orchestration.
+1. ✅ **Interface statistics** — `Rtnl.Stats` via `RTM_GETSTATS`. Shipped in M8.
+2. ✅ **`Rtnl.Route.get/2`** — lookup a destination (`ip route get`
+   equivalent). Shipped in M8.
 3. **`Linx.Netlink.Connection` + `Linx.Netlink.Monitor`** — the multicast
    event story. Unblocks "watch this namespace for link/addr/route changes"
    and is what the synchronous `Request` engine was designed to accept.

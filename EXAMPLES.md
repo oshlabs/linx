@@ -65,6 +65,11 @@ iex> {:ok, routes} = Route.list(sock)
 iex> routes
 [#Linx.Netlink.Rtnl.Route<default via 192.168.1.1 oif=2>,
  #Linx.Netlink.Rtnl.Route<192.168.1.0/24 oif=2>, ...]
+
+# resolve a destination — what route would the kernel use?
+iex> {:ok, route} = Route.get(sock, "1.1.1.1")
+iex> route
+#Linx.Netlink.Rtnl.Route<1.1.1.1/32 via 192.168.1.1 oif=2>
 ```
 
 ### Neighbours (ARP / NDP table)
@@ -76,6 +81,28 @@ iex> {:ok, neighbours} = Neighbour.list(sock)
 iex> neighbours
 [#Linx.Netlink.Rtnl.Neighbour<192.168.1.1 -> aa:bb:cc:dd:ee:ff ifindex=2>, ...]
 ```
+
+### Interface statistics
+
+```elixir
+iex> alias Linx.Netlink.Rtnl.Stats
+
+iex> {:ok, stats} = Stats.get(sock, "eth0")
+iex> stats
+#Linx.Netlink.Rtnl.Stats<ifindex=2 rx=128431p/189204771B tx=85912p/12504331B>
+
+iex> stats.link.rx_packets
+128431
+iex> stats.link.tx_dropped
+0
+
+iex> {:ok, all_stats} = Stats.list(sock)   # every interface's counters
+```
+
+The counters live on `%Stats{}.link` as a
+`%Linx.Netlink.Rtnl.Stats.Link64{}` — the 25 fields of the kernel's
+`struct rtnl_link_stats64` (`rx_packets`, `tx_bytes`, `multicast`,
+`rx_dropped`, …; full list in the moduledoc).
 
 ### Policy-routing rules
 

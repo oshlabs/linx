@@ -21,7 +21,7 @@ defmodule Linx.Netlink.Rtnl.Route do
   import Linx.Netlink.Constants
 
   alias Linx.IP
-  alias Linx.Netlink.{Request, Socket}
+  alias Linx.Netlink.{Message, Request, Socket}
 
   # rtnetlink route message types.
   @rtm_newroute 24
@@ -64,6 +64,30 @@ defmodule Linx.Netlink.Rtnl.Route do
     case Request.talk(socket, @rtm_getroute, nlm_f_dump(), encode(%__MODULE__{})) do
       {:ok, messages} -> {:ok, Enum.map(messages, &decode(&1.payload))}
       {:error, _} = error -> error
+    end
+  end
+
+  @doc """
+  Looks up the route the kernel would use to reach `destination`.
+
+  The kernel-side `ip route get` equivalent: an `RTM_GETROUTE` *without*
+  `NLM_F_DUMP`, with `RTA_DST` set, so the kernel resolves the lookup and
+  returns the matching `%Route{}`. For an unroutable destination the
+  kernel returns `ENETUNREACH` — surfaced as
+  `{:error, %Linx.Netlink.Error{}}`.
+
+  `destination` is a string (`"10.0.0.1"`, `"fc00::1"`) or an `Linx.IP`.
+  """
+  @spec get(Socket.t(), binary | IP.t()) :: {:ok, t()} | {:error, term}
+  def get(%Socket{} = socket, destination) do
+    with {:ok, %IP{family: family} = dst} <- coerce_ip(destination) do
+      message = %__MODULE__{family: family_int(family), dst: dst}
+
+      case Request.talk(socket, @rtm_getroute, 0, encode(message)) do
+        {:ok, [%Message{payload: body} | _]} -> {:ok, decode(body)}
+        {:ok, []} -> {:error, :no_reply}
+        {:error, _} = error -> error
+      end
     end
   end
 
