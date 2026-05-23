@@ -37,8 +37,6 @@ defmodule Linx.ProcessTest do
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 0}, 2_000
-
-      assert_down(session)
     end
 
     test "runs /bin/false and reports exit 1" do
@@ -49,8 +47,6 @@ defmodule Linx.ProcessTest do
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 1}, 2_000
-
-      assert_down(session)
     end
 
     test "execve failure surfaces as {:linx_process, :error, errno, :execve}" do
@@ -61,8 +57,6 @@ defmodule Linx.ProcessTest do
 
       # ENOENT = 2 on Linux.
       assert_receive {:linx_process, :error, 2, :execve}, 2_000
-
-      assert_down(session)
     end
 
     test "child argv is honored" do
@@ -75,8 +69,83 @@ defmodule Linx.ProcessTest do
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 42}, 2_000
+    end
+  end
 
-      assert_down(session)
+  describe "signal/2 and wait/1" do
+    test "signal/2 delivers SIGTERM to a running workload (-> :signaled)" do
+      # /bin/sleep is a plain workload (not PID 1 of a fresh PID
+      # namespace), so the kernel delivers SIGTERM with the default
+      # action (terminate).
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.release(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      :ok = P.signal(session, 15)
+
+      assert_receive {:linx_process, :signaled, 15}, 2_000
+      assert {:ok, {:signaled, 15}} = P.wait(session)
+    end
+
+    test "signal/2 buffers pre-running and flushes on :running" do
+      # /bin/sleep 60 again, but the signal is sent *before* release.
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      # Buffered: not yet running.
+      :ok = P.signal(session, 15)
+
+      :ok = P.release(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # The buffered signal lands -- the workload dies.
+      assert_receive {:linx_process, :signaled, 15}, 2_000
+      assert {:ok, {:signaled, 15}} = P.wait(session)
+    end
+
+    test "wait/1 returns immediately when the terminal already arrived" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.release(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert {:ok, {:exited, 0}} = P.wait(session)
+    end
+
+    test "wait/1 blocks until the terminal event arrives" do
+      {:ok, session} = P.spawn(argv: ["/bin/sh", "-c", "sleep 0.1; exit 7"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.release(session)
+
+      # Don't drain the :running / :exited messages -- wait/1 should
+      # block on its own and return when the workload finishes.
+      assert {:ok, {:exited, 7}} = P.wait(session, 2_000)
+    end
+
+    test "wait/2 returns {:error, :timeout} while the workload is alive" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.release(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # 100 ms is far short of /bin/sleep 60 -- we should time out cleanly.
+      assert {:error, :timeout} = P.wait(session, 100)
+
+      # The session is still alive; clean up.
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "signal/2 after the workload has ended returns {:error, :ended}" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.release(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      # The workload no longer exists.
+      assert {:error, :ended} = P.signal(session, 15)
     end
   end
 
@@ -106,19 +175,6 @@ defmodule Linx.ProcessTest do
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 0}, 2_000
-
-      assert_down(session)
     end
-  end
-
-  # Block until the GenServer exits. Used after the terminal owner event so
-  # tests don't leak processes across runs. `Process.monitor` on a
-  # already-dead process delivers `:noproc` immediately rather than
-  # `:normal`; accept either — we've already asserted the lifecycle
-  # events arrived correctly above, so the only thing to confirm here is
-  # the GenServer is gone.
-  defp assert_down(pid) do
-    ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _}, 2_000
   end
 end

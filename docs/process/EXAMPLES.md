@@ -115,6 +115,61 @@ iex> flush()
 {:linx_process, :running}
 ```
 
+## Signals and synchronous waits
+
+```elixir
+# Send SIGTERM (15) to a running workload.
+iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.release(child)
+iex> receive do {:linx_process, :running} -> :ok end
+iex> P.signal(child, 15)
+:ok
+iex> receive do {:linx_process, :signaled, n} -> n end
+15
+```
+
+Signals sent before the workload has `execve`'d are *buffered* and
+flushed in order at the moment of `:running`:
+
+```elixir
+iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+
+# Buffered -- the workload doesn't exist yet.
+iex> P.signal(child, 15)
+:ok
+
+iex> P.release(child)
+iex> flush()
+{:linx_process, :running}
+{:linx_process, :signaled, 15}      # the buffered SIGTERM landed
+```
+
+`wait/1` is the synchronous way to learn the terminal outcome (or
+block until it arrives). It can be called before or after the terminal
+event has been delivered as a message:
+
+```elixir
+iex> {:ok, child} = P.spawn(argv: ["/bin/true"])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.release(child)
+iex> P.wait(child)
+{:ok, {:exited, 0}}
+
+# wait/2 with a timeout returns {:error, :timeout} if the workload is
+# still alive after `timeout` ms -- the session is *not* affected.
+iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> P.release(child)
+iex> P.wait(child, 100)
+{:error, :timeout}
+
+iex> P.signal(child, 9)                       # clean up
+iex> P.wait(child)
+{:ok, {:signaled, 9}}
+```
+
 ## Error paths
 
 ```elixir
@@ -135,7 +190,7 @@ iex> P.spawn(argv: ["/bin/true"], namespaces: [:typo])
 
 ## Not yet implemented
 
-`enter/2` (P3), `signal/2` + `wait/1` (P2), `info/1`, `pty_master/1`
-(P4) and `:stdio` directives are still stubs — they return
+`enter/2` (P3), `info/1`, `pty_master/1` (P4), and `:stdio`
+directives are still stubs — they return
 `{:error, :not_yet_implemented}` for now. See `PLAN.md` for the
 roadmap.

@@ -1,10 +1,10 @@
 # Linx.Process — implementation plan
 
-> **P0 and P1 have shipped** on branch `process-foundations`: the
+> **P0, P1 and P2 have shipped** on branch `process-foundations`: the
 > Port-based agent, `Linx.Process.spawn/1` with the checkpoint protocol,
 > namespace selection (`:net` verified end-to-end against `Linx.Netlink`),
-> structured pre-exec errors, and `release/1`. P2–P4 below are the
-> roadmap.
+> structured pre-exec errors, `release/1`, `signal/2` (with pre-running
+> buffering), and `wait/1`/`wait/2`. P3–P4 below are the roadmap.
 
 ## Goal
 
@@ -146,17 +146,30 @@ code that needs them; commit + push per milestone.
 
 ### P2 — Lifecycle: `signal/2`, `wait/1`, exit status
 
+✅ **Shipped.**
+
 - `Linx.Process.signal(pid, signum)` — sends `{:signal, signum}` to the
-  agent; buffered if the workload hasn't reached `:running` yet (matches
-  silo's behaviour).
+  agent; buffered if the workload hasn't reached `:running` yet
+  (matches silo's behaviour). Returns `{:error, :ended}` after the
+  workload has finished.
 - `Linx.Process.wait(pid, timeout \\ :infinity)` — synchronous wait for
   the terminal event; returns `{:ok, {:exited, code}}` /
-  `{:ok, {:signaled, signum}}` / `{:error, term}`.
-- Exit-status reporting in the agent: `waitpid()`-based, distinguishing
-  normal exit from signal termination.
-- **Tests:** integration — spawn `/bin/sleep 60`, send SIGTERM after
-  release, assert `{:signaled, 15}`. Spawn `/bin/true`, assert
-  `{:exited, 0}`.
+  `{:ok, {:signaled, signum}}` / `{:error, %{errno: _, stage: _}}` /
+  `{:error, :timeout}` / `{:error, :session_ended}`.
+- Agent: SIGCHLD captured via `signalfd(2)` (blocked in the agent,
+  unblocked in the child before `execve`), multiplexed against fd 3
+  through a single `poll(2)` loop after `:running`. Workload exit
+  reaped with `waitpid(2)` and reported as
+  `{:status, :exited, code}` or `{:status, :signaled, signum}`.
+- The session GenServer stays alive after the agent exits (no
+  `{:stop, ...}` on the port's `:exit_status`) so `wait/1` races
+  cleanly. Cleanup happens through `start_link`'s link to the spawn
+  caller.
+- **Tests:** plain — SIGTERM kills `/bin/sleep 60`; signal buffered
+  pre-`release/1` lands on `:running`; `wait/1` returns immediately
+  when the terminal already arrived; `wait/2` times out cleanly with
+  `{:error, :timeout}`; `signal/2` after exit returns
+  `{:error, :ended}`.
 
 ### P3 — `Linx.Process.enter/2`: exec inside an existing process
 

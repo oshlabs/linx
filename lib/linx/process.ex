@@ -105,23 +105,51 @@ defmodule Linx.Process do
   end
 
   @doc """
-  Sends OS signal `signum` to the workload. Buffered until the workload
-  has `execve`'d.
+  Sends OS signal `signum` to the workload.
 
-  Lands in P2; today returns `{:error, :not_yet_implemented}`.
+  Signals delivered before the workload has `execve`'d (between
+  `spawn/1` and `release/1`, or before the agent emits `:running`) are
+  buffered and flushed in order at the moment of `:running`. Signals
+  delivered after the workload has exited return `{:error, :ended}`.
+
+  This is fire-and-forget — `signal/2` returns as soon as the signal
+  has been handed to the agent (or buffered), without waiting for the
+  kernel to deliver it. Use `wait/1` to observe the workload's
+  response.
   """
   @spec signal(t(), pos_integer) :: :ok | {:error, term}
-  def signal(_session, _signum), do: {:error, :not_yet_implemented}
+  def signal(session, signum) when is_pid(session) and is_integer(signum) and signum > 0 do
+    GenServer.call(session, {:signal, signum})
+  end
 
   @doc """
   Synchronously waits for the workload's terminal event.
 
-  Lands in P2; today returns `{:error, :not_yet_implemented}`.
+  Returns one of:
+
+    * `{:ok, {:exited, code}}` — workload exited with `code`.
+    * `{:ok, {:signaled, signum}}` — workload was killed by `signum`.
+    * `{:error, %{errno: errno, stage: stage}}` — a pre-exec failure;
+      the workload never ran.
+    * `{:error, :timeout}` — `timeout` elapsed before any terminal
+      event arrived. The session is still alive; call `wait/1` again.
+    * `{:error, :session_ended}` — the session GenServer is gone (e.g.
+      the agent crashed before reporting a terminal event).
+
+  Multiple processes may wait on the same session concurrently; all
+  receive the same answer when it arrives.
   """
   @spec wait(t(), timeout()) ::
-          {:ok, {:exited, non_neg_integer} | {:signaled, pos_integer}} | {:error, term}
+          {:ok, {:exited, non_neg_integer} | {:signaled, pos_integer}}
+          | {:error, term}
   def wait(session, timeout \\ :infinity)
-  def wait(_session, _timeout), do: {:error, :not_yet_implemented}
+
+  def wait(session, timeout) when is_pid(session) do
+    GenServer.call(session, :wait, timeout)
+  catch
+    :exit, {:timeout, _} -> {:error, :timeout}
+    :exit, _ -> {:error, :session_ended}
+  end
 
   @doc """
   Returns a snapshot of the session's state — mode, host pid, current
@@ -216,7 +244,9 @@ defmodule Linx.Process do
         host_pid: nil,
         child_pid: nil,
         running?: false,
-        release: nil
+        pending_signals: [],
+        waiters: [],
+        result: nil
       }
 
       {:ok, state}
@@ -224,19 +254,48 @@ defmodule Linx.Process do
   end
 
   @impl true
-  def handle_call(:release, from, %{port: port, child_pid: child_pid} = state)
+  def handle_call(:release, _from, %{port: port, child_pid: child_pid} = state)
       when child_pid != nil do
     Port.command(port, :erlang.term_to_binary(:proceed))
-    # Reply once the agent confirms exec (via :running) or fails (:error).
-    # For now, reply :ok immediately — the agent doesn't ack proceed
-    # explicitly, and the workload's progress arrives as owner events.
-    GenServer.reply(from, :ok)
-    {:noreply, state}
+    {:reply, :ok, state}
   end
 
   def handle_call(:release, _from, state) do
     {:reply, {:error, :not_ready}, state}
   end
+
+  # The workload has already terminated; sending a signal would have no
+  # target.
+  def handle_call({:signal, _signum}, _from, %{result: result} = state)
+      when result != nil do
+    {:reply, {:error, :ended}, state}
+  end
+
+  # Pre-running: buffer signals; flushed in handle_info on :running.
+  def handle_call({:signal, signum}, _from, %{running?: false} = state) do
+    {:reply, :ok, %{state | pending_signals: [signum | state.pending_signals]}}
+  end
+
+  # Running: forward directly to the agent.
+  def handle_call({:signal, signum}, _from, %{port: port} = state) do
+    Port.command(port, :erlang.term_to_binary({:signal, signum}))
+    {:reply, :ok, state}
+  end
+
+  # Terminal event already arrived -- answer immediately.
+  def handle_call(:wait, _from, %{result: result} = state) when result != nil do
+    {:reply, normalise_result(result), state}
+  end
+
+  # Otherwise enqueue the caller; reply when the terminal event arrives.
+  def handle_call(:wait, from, state) do
+    {:noreply, %{state | waiters: [from | state.waiters]}}
+  end
+
+  # Map the internal result tuple onto the shape `wait/1` documents.
+  defp normalise_result({:exited, _} = r), do: {:ok, r}
+  defp normalise_result({:signaled, _} = r), do: {:ok, r}
+  defp normalise_result({:error, _} = error), do: error
 
   @impl true
   def handle_info({port, {:data, payload}}, %{port: port} = state) do
@@ -250,25 +309,52 @@ defmodule Linx.Process do
 
       {:status, :running} ->
         send(state.owner, {:linx_process, :running})
-        {:noreply, %{state | running?: true}}
+        flush_pending_signals(state)
+        {:noreply, %{state | running?: true, pending_signals: []}}
 
       {:status, :exited, code} ->
         send(state.owner, {:linx_process, :exited, code})
-        {:noreply, state}
+        {:noreply, finalise(state, {:exited, code})}
 
       {:status, :signaled, signum} ->
         send(state.owner, {:linx_process, :signaled, signum})
-        {:noreply, state}
+        {:noreply, finalise(state, {:signaled, signum})}
 
       {:error, errno, stage} ->
         send(state.owner, {:linx_process, :error, errno, stage})
-        {:noreply, state}
+        {:noreply, finalise(state, {:error, %{errno: errno, stage: stage}})}
     end
   end
 
   def handle_info({port, {:exit_status, _code}}, %{port: port} = state) do
-    # The agent exited. All terminal events have already been forwarded;
-    # the GenServer stops normally.
-    {:stop, :normal, state}
+    # The agent exited. Don't stop the GenServer yet -- a wait/1 caller
+    # racing the port shutdown should still see the recorded result. The
+    # GenServer is linked to the spawn/1 caller, so it dies with that
+    # process and nothing accumulates; meanwhile, `:result` remains
+    # queryable. An explicit `stop/1` may land later for early cleanup.
+    {:noreply, %{state | port: nil}}
+  end
+
+  # Any waiters still in the queue when the GenServer goes down -- e.g.
+  # the spawn/1 caller dies before a terminal event arrives -- get
+  # :session_ended so they don't sit blocked forever.
+  @impl true
+  def terminate(_reason, state) do
+    Enum.each(state.waiters, &GenServer.reply(&1, {:error, :session_ended}))
+    :ok
+  end
+
+  # Drain pending_signals to the agent in the order they were queued.
+  defp flush_pending_signals(%{port: port, pending_signals: signals}) do
+    Enum.each(Enum.reverse(signals), fn signum ->
+      Port.command(port, :erlang.term_to_binary({:signal, signum}))
+    end)
+  end
+
+  # Store the terminal result and answer every blocked wait/1 caller.
+  defp finalise(state, result) do
+    answer = normalise_result(result)
+    Enum.each(state.waiters, &GenServer.reply(&1, answer))
+    %{state | result: result, waiters: []}
   end
 end

@@ -64,6 +64,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -71,6 +72,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/signalfd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -440,6 +442,15 @@ static int child_fn(void *arg)
 	if (cmd != 'P')
 		_exit(103);
 
+	/* Unblock SIGCHLD before execve so the workload sees default
+	 * signal-mask semantics -- the agent had it blocked so signalfd
+	 * could capture it, but the child inherits the mask across
+	 * execve and would surprise the workload otherwise. */
+	sigset_t mask;
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGCHLD);
+	sigprocmask(SIG_UNBLOCK, &mask, NULL);
+
 	/* execve. argv[0] is the binary; we don't shell-resolve, so a
 	 * relative-name argv[0] without a slash will be looked up against
 	 * the inherited PATH only if the caller's argv[0] is e.g. "/bin/sh
@@ -516,15 +527,128 @@ static int await_proceed(void)
 			return 0;
 	}
 
-	/* Unknown command -- ignore quietly for now; later phases add a
-	 * vocabulary (`{:signal, n}`, etc.) and warn or error. */
+	/* Unknown command at the checkpoint -- ignore quietly for now;
+	 * later phases add vocabulary and warn or error. */
 	return -1;
+}
+
+/* Decode one {:packet, 4} ETF frame from the BEAM (post-:running). The
+ * vocabulary in P2 is {:signal, n} only. Returns the signum, or -1 on
+ * parse failure / unknown tag, or -2 on EOF/IO error so the caller can
+ * distinguish "BEAM went away" from "garbled frame". */
+static int read_post_running_command(void)
+{
+	uint8_t buf[64];
+	ssize_t len = read_frame(buf, sizeof buf);
+	if (len < 0)
+		return -2;
+
+	int idx = 0, version;
+	if (ei_decode_version((const char *)buf, &idx, &version) < 0)
+		return -1;
+
+	int arity;
+	if (ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0 ||
+	    arity != 2)
+		return -1;
+
+	char tag[MAXATOMLEN];
+	if (ei_decode_atom((const char *)buf, &idx, tag) < 0)
+		return -1;
+	if (strcmp(tag, "signal") != 0)
+		return -1;
+
+	long signum;
+	if (ei_decode_long((const char *)buf, &idx, &signum) < 0)
+		return -1;
+	if (signum <= 0 || signum > 64)
+		return -1;
+	return (int)signum;
+}
+
+/* The post-exec supervise loop: forward {:signal, n} from the BEAM to
+ * the workload, and reap the workload via SIGCHLD-on-signalfd. Emits the
+ * terminal event ({:status, :exited, _} or {:status, :signaled, _}) and
+ * returns when the child is gone.
+ *
+ * SIGCHLD is captured via signalfd (set up in main, blocked from normal
+ * delivery in the agent's signal mask); the child unblocks SIGCHLD again
+ * before execve, so the workload sees default semantics. */
+static void supervise(pid_t child_pid, int sigfd)
+{
+	struct pollfd pfds[2] = {
+		{ .fd = CTL_IN, .events = POLLIN },
+		{ .fd = sigfd,  .events = POLLIN },
+	};
+
+	for (;;) {
+		int rc = poll(pfds, 2, -1);
+		if (rc < 0) {
+			if (errno == EINTR)
+				continue;
+			fprintf(stderr, "linx_process: poll: %s\n",
+				strerror(errno));
+			return;
+		}
+
+		/* The BEAM sent us something -- {:signal, n} in P2. A
+		 * close on fd 3 (POLLHUP) means the BEAM disappeared; we
+		 * keep going so the child can finish on its own, but
+		 * stop polling that side of the channel. */
+		if (pfds[0].revents & POLLIN) {
+			int signum = read_post_running_command();
+			if (signum > 0)
+				kill(child_pid, signum);
+		}
+		if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL))
+			pfds[0].fd = -1; /* poll(2) ignores fd < 0 */
+
+		/* SIGCHLD fired. Drain the signalfd (multiple SIGCHLDs can
+		 * coalesce into separate signalfd_siginfo records; the fd is
+		 * SFD_NONBLOCK so the drain returns EAGAIN once empty) and
+		 * waitpid the workload. */
+		if (pfds[1].revents & POLLIN) {
+			struct signalfd_siginfo si;
+			while (read(sigfd, &si, sizeof si) == sizeof si)
+				;
+
+			int status;
+			pid_t r = waitpid(child_pid, &status, WNOHANG);
+			if (r == child_pid) {
+				if (WIFEXITED(status))
+					emit_status_int("exited",
+							WEXITSTATUS(status));
+				else if (WIFSIGNALED(status))
+					emit_status_int("signaled",
+							WTERMSIG(status));
+				return;
+			}
+			/* Spurious SIGCHLD (not our child, or already
+			 * reaped). Ignore and keep polling. */
+		}
+	}
 }
 
 /* --- main -------------------------------------------------------------- */
 
 int main(void)
 {
+	/* Don't let a vanished BEAM kill us with SIGPIPE on a stale fd 4 --
+	 * we'd rather see EPIPE from write() and drop out cleanly. */
+	signal(SIGPIPE, SIG_IGN);
+
+	/* Block SIGCHLD so signalfd can capture it (signals delivered the
+	 * normal way bypass signalfd). The child unblocks SIGCHLD again
+	 * before execve so the workload sees default semantics. */
+	sigset_t chld_mask;
+	sigemptyset(&chld_mask);
+	sigaddset(&chld_mask, SIGCHLD);
+	if (sigprocmask(SIG_BLOCK, &chld_mask, NULL) < 0) {
+		fprintf(stderr, "linx_process: sigprocmask: %s\n",
+			strerror(errno));
+		return 4;
+	}
+
 	/* Read the spawn request. */
 	uint8_t req_buf[8192];
 	ssize_t req_len = read_frame(req_buf, sizeof req_buf);
@@ -642,21 +766,20 @@ int main(void)
 
 	emit_status_running();
 
-	/* Reap the workload and report. */
-	int status;
-	while (waitpid(pid, &status, 0) < 0) {
-		if (errno != EINTR) {
-			fprintf(stderr, "linx_process: waitpid: %s\n",
-				strerror(errno));
-			free_spawn_req(&req);
-			return 4;
-		}
+	/* Capture SIGCHLD via signalfd so the supervise loop can multiplex
+	 * it against fd 3 in a single poll(). The mask was blocked early
+	 * in main. Non-blocking so the drain loop in supervise() terminates
+	 * rather than hanging on a quiet signalfd. */
+	int sigfd = signalfd(-1, &chld_mask, SFD_CLOEXEC | SFD_NONBLOCK);
+	if (sigfd < 0) {
+		fprintf(stderr, "linx_process: signalfd: %s\n",
+			strerror(errno));
+		free_spawn_req(&req);
+		return 4;
 	}
 
-	if (WIFEXITED(status))
-		emit_status_int("exited", WEXITSTATUS(status));
-	else if (WIFSIGNALED(status))
-		emit_status_int("signaled", WTERMSIG(status));
+	supervise(pid, sigfd);
+	close(sigfd);
 
 	free_spawn_req(&req);
 	return 0;
