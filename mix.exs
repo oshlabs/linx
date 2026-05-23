@@ -34,11 +34,18 @@ defmodule Linx.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "EXAMPLES.md", "PLAN.md", "COVERAGE.md", "AGENTS.md"],
+      extras: [
+        "README.md",
+        "EXAMPLES.md",
+        "PLAN.md",
+        "COVERAGE.md",
+        "REFERENCES.md",
+        "AGENTS.md"
+      ],
       source_ref: "v#{@version}",
       groups_for_extras: [
         Guides: ["EXAMPLES.md"],
-        Design: ["PLAN.md", "COVERAGE.md", "AGENTS.md"]
+        Design: ["PLAN.md", "COVERAGE.md", "REFERENCES.md", "AGENTS.md"]
       ],
       groups_for_modules: [
         "Public types": [
