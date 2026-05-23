@@ -1,7 +1,12 @@
 # Linx.Tty — implementation plan
 
-> All milestones (T0–T3) below are the proposal, for review. Nothing
-> shipped yet.
+> **T0 and T1 have shipped** on branch `tty-foundations`: the NIF
+> infrastructure (`Linx.Tty.Native` loads, `priv/linx_tty.so` builds
+> from `c_src/linx_tty.c` via `:linx_tty` Mix compiler), value-type
+> structs (`Linx.Tty.Saved`, `Linx.Tty.WindowSize`), and the termios
+> + ioctl primitives (`open_controlling_raw/0`, `restore_and_close/2`,
+> `window_size/1`, `set_window_size/2`). T2 (`attach/2`) and T3
+> (window-size propagation) below are the roadmap.
 
 ## Goal
 
@@ -136,6 +141,8 @@ the code that needs them; commit + push per milestone.
 
 ### T0 — Scaffolding & the NIF
 
+✅ **Shipped.**
+
 - `Linx.Tty` module skeleton (`@moduledoc`, public API stubs returning
   `{:error, :not_yet_implemented}`).
 - `Linx.Tty.Native` skeleton; `c_src/linx_tty.c` with the bare `erl_nif`
@@ -149,23 +156,33 @@ the code that needs them; commit + push per milestone.
 
 ### T1 — Termios primitives + `/dev/tty`
 
+✅ **Shipped.**
+
 - `Linx.Tty.open_controlling_raw/0` — opens `/dev/tty`, saves the
   current termios, applies raw mode, returns
   `{:ok, fd, %Linx.Tty.Saved{...}}` where `Saved` wraps the opaque
   binary so it can't be mistaken for arbitrary bytes.
 - `Linx.Tty.restore_and_close/2` — symmetric. Closes the fd, restores
-  the saved state.
+  the saved state. Idempotent against already-closed fds (treats
+  `EBADF` from `tcsetattr` and `close` as success).
 - `Linx.Tty.window_size/1` — `TIOCGWINSZ` over a tty fd; returns
   `{:ok, %Linx.Tty.WindowSize{...}}` (a struct, so Inspect is legible).
-- `Linx.Tty.set_window_size/2` — `TIOCSWINSZ`.
+- `Linx.Tty.set_window_size/2` — `TIOCSWINSZ`. Rejects dimensions
+  above 65535 (the `struct winsize` field width).
+- C-side errno → POSIX-atom mapping (`:enxio`, `:enotty`, `:ebadf`,
+  `:einval`, `:eperm`, …); unknown errnos fall back to the raw
+  integer.
 - **Tests:**
-  - Plain (CI-friendly): when there is no controlling terminal —
-    e.g. inside ExUnit — `open_controlling_raw/0` returns
-    `{:error, {:open, :enxio}}` cleanly. Don't try to actually run the
-    raw-mode round-trip in `mix test`.
-  - Manual (`docs/tty/EXAMPLES.md`): in an `iex` session attached to a
-    real tty, the open/raw/restore round-trip leaves the terminal
-    unchanged; `window_size/1` returns plausible numbers.
+  - Plain: `window_size/1` on a non-tty fd returns
+    `{:error, {:ioctl, :enotty}}`; on an invalid fd, `:ebadf`.
+    `set_window_size/2` on a non-tty returns `:enotty`; on
+    out-of-range dimensions, `:einval`.
+  - Plain (guarded round-trip): `open_controlling_raw/0` accepts
+    either success (immediately restored) or `{:error, {:open,
+    :enxio}}` — covering both the local-terminal `mix test` case
+    and CI without a controlling tty.
+  - Manual (`docs/tty/EXAMPLES.md`): full open/raw/restore from
+    `iex -S mix`, real `window_size/1` numbers.
 
 ### T2 — `Linx.Tty.attach/2`
 
