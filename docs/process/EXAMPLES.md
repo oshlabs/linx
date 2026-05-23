@@ -27,7 +27,7 @@ with `flush()` in iex.
 ## The checkpoint
 
 The child blocks at a checkpoint between `clone()` and `execve()` so the
-host side can do setup before the workload runs. `release/1` lets it
+host side can do setup before the workload runs. `proceed/1` lets it
 proceed.
 
 ```elixir
@@ -39,7 +39,7 @@ iex> receive do {:linx_process, :ready, _} -> :ok end
 # child's netns, write cgroup state, etc. (See "Composing with
 # Linx.Netlink" below.)
 
-iex> P.release(child)
+iex> P.proceed(child)
 :ok
 
 iex> flush()
@@ -82,7 +82,7 @@ otherwise its host pid.
 ## Composing with `Linx.Netlink`
 
 The motivating use case: spawn a child into a fresh netns, set the netns
-up from the host while the child waits at the checkpoint, then release.
+up from the host while the child waits at the checkpoint, then proceed/1.
 
 ```elixir
 iex> alias Linx.Process, as: P
@@ -106,9 +106,9 @@ iex> :ok = Address.add(ns, "ct0", "10.0.0.5", 24)
 iex> :ok = Link.set_up(ns, "ct0")
 iex> :ok = Route.add_default(ns, "10.0.0.1")
 
-# Release the child — it now exec's the workload with a fully configured
-# network already in place.
-iex> P.release(child)
+# Advance the child past the checkpoint — it now exec's the workload
+# with a fully configured network already in place.
+iex> P.proceed(child)
 :ok
 
 iex> flush()
@@ -121,7 +121,7 @@ iex> flush()
 # Send SIGTERM (15) to a running workload.
 iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
 iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.release(child)
+iex> P.proceed(child)
 iex> receive do {:linx_process, :running} -> :ok end
 iex> P.signal(child, 15)
 :ok
@@ -140,7 +140,7 @@ iex> receive do {:linx_process, :ready, _} -> :ok end
 iex> P.signal(child, 15)
 :ok
 
-iex> P.release(child)
+iex> P.proceed(child)
 iex> flush()
 {:linx_process, :running}
 {:linx_process, :signaled, 15}      # the buffered SIGTERM landed
@@ -153,7 +153,7 @@ event has been delivered as a message:
 ```elixir
 iex> {:ok, child} = P.spawn(argv: ["/bin/true"])
 iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.release(child)
+iex> P.proceed(child)
 iex> P.wait(child)
 {:ok, {:exited, 0}}
 
@@ -161,7 +161,7 @@ iex> P.wait(child)
 # still alive after `timeout` ms -- the session is *not* affected.
 iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
 iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.release(child)
+iex> P.proceed(child)
 iex> P.wait(child, 100)
 {:error, :timeout}
 
@@ -173,10 +173,10 @@ iex> P.wait(child)
 ## Error paths
 
 ```elixir
-# Bad argv (no such binary) — execve fails after release.
+# Bad argv (no such binary) — execve fails after proceed/1.
 iex> {:ok, child} = P.spawn(argv: ["/this/does/not/exist"])
 iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.release(child)
+iex> P.proceed(child)
 iex> flush()
 {:linx_process, :error, 2, :execve}     # ENOENT = 2
 

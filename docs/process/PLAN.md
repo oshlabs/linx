@@ -3,7 +3,7 @@
 > **P0, P1 and P2 have shipped** on branch `process-foundations`: the
 > Port-based agent, `Linx.Process.spawn/1` with the checkpoint protocol,
 > namespace selection (`:net` verified end-to-end against `Linx.Netlink`),
-> structured pre-exec errors, `release/1`, `signal/2` (with pre-running
+> structured pre-exec errors, `proceed/1`, `signal/2` (with pre-running
 > buffering), and `wait/1`/`wait/2`. P3–P4 below are the roadmap.
 
 ## Goal
@@ -13,7 +13,7 @@ Build the foundations of `Linx.Process`: a small set of Linux process-lifecycle
 existing process's namespaces, wait for exit, send signals. The primitives are
 designed to compose with `Linx.Netlink` (so a caller can clone a child with
 `CLONE_NEWNET`, drive netlink inside the new netns through the child's pid,
-then release the child to exec).
+then have the child proceed past the checkpoint to exec).
 
 `Linx.Process` is **not** a container runtime. It provides the primitives a
 runtime is built from. Image management, supervision policies, rootfs setup,
@@ -45,7 +45,7 @@ failed.
 **Pure primitives.** The Elixir side exposes operations, not policy. A
 `Linx.Process.Session` represents one cloned child or exec session; callers
 get events on its lifecycle (`:ready`, `:running`, `:exit`, `:error`) and
-drive it with `release/1`, `signal/2`, `wait/1`. Anything higher-level
+drive it with `proceed/1`, `signal/2`, `wait/1`. Anything higher-level
 (stdio capture, mini-init, rootfs choreography) lives in a consumer.
 
 **AGENTS.md style throughout:** `@moduledoc`/`@doc`/`@spec` everywhere; structs
@@ -56,7 +56,7 @@ UAPI struct / kernel source) in comments.
 
 ```
 Linx.Process                    — the GenServer + public API:
-                                  spawn/1, enter/2, release/1, signal/2, wait/1,
+                                  spawn/1, enter/2, proceed/1, signal/2, wait/1,
                                   info/1, pty_master/1. Owns the Port to
                                   linx_process. No nested Session module — the
                                   GenServer pid IS the session handle.
@@ -94,7 +94,7 @@ the same vocabulary:
 
 **Inbound (BEAM → agent):**
 
-  * `:proceed` — release the checkpoint; the child may now `execve`.
+  * `:proceed` — advance past the checkpoint; the child may now `execve`.
   * `{:signal, signum}` — forward signal `signum` to the workload.
 
 The agent owns no rootfs, no cgroup, no mount logic. Its job is *only*
@@ -138,11 +138,11 @@ code that needs them; commit + push per milestone.
   - `{:linx_process, :error, errno, stage}`
 - `opts`: `:argv` (required), `:namespaces` (list of atoms `:net`, `:mount`,
   `:pid`, `:uts`, `:ipc`, `:user`, `:cgroup`, `:time`), `:env`, `:owner`.
-- `Linx.Process.release(pid)` sends `:proceed`.
+- `Linx.Process.proceed(pid)` sends `:proceed`.
 - **Tests:** integration (`:integration`, needs root) — spawn with
   `namespaces: [:net]`, in the checkpoint window open netlink in
-  `{:pid, child_pid}` and assert the netns has only `lo`, release, assert
-  the child exec'd and exited cleanly.
+  `{:pid, child_pid}` and assert the netns has only `lo`, call
+  `proceed/1`, assert the child exec'd and exited cleanly.
 
 ### P2 — Lifecycle: `signal/2`, `wait/1`, exit status
 
@@ -166,7 +166,7 @@ code that needs them; commit + push per milestone.
   cleanly. Cleanup happens through `start_link`'s link to the spawn
   caller.
 - **Tests:** plain — SIGTERM kills `/bin/sleep 60`; signal buffered
-  pre-`release/1` lands on `:running`; `wait/1` returns immediately
+  pre-`proceed/1` lands on `:running`; `wait/1` returns immediately
   when the terminal already arrived; `wait/2` times out cleanly with
   `{:error, :timeout}`; `signal/2` after exit returns
   `{:error, :ended}`.
@@ -243,8 +243,8 @@ subsystem; see "Deferred"). The split:
   )
 
 # Host-side setup (e.g. configure the netns via Linx.Netlink) happens here
-# while the child waits at the checkpoint. Then release.
-:ok = Linx.Process.release(child)
+# while the child waits at the checkpoint. Then proceed/1.
+:ok = Linx.Process.proceed(child)
 
 # Hand the iex *controlling tty* over to the PTY master until bash exits.
 # Linx.Tty.attach/2 opens /dev/tty, puts it in raw mode, propagates

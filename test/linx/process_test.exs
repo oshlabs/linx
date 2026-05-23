@@ -26,14 +26,14 @@ defmodule Linx.ProcessTest do
     end
   end
 
-  describe "spawn/1 → release/1 → exit (no namespaces, no root)" do
+  describe "spawn/1 → proceed/1 → exit (no namespaces, no root)" do
     test "runs /bin/true and reports exit 0" do
       {:ok, session} = P.spawn(argv: ["/bin/true"])
 
       assert_receive {:linx_process, :ready, child_pid}, 2_000
       assert is_integer(child_pid) and child_pid > 0
 
-      :ok = P.release(session)
+      :ok = P.proceed(session)
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 0}, 2_000
@@ -43,7 +43,7 @@ defmodule Linx.ProcessTest do
       {:ok, session} = P.spawn(argv: ["/bin/false"])
 
       assert_receive {:linx_process, :ready, _}, 2_000
-      :ok = P.release(session)
+      :ok = P.proceed(session)
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 1}, 2_000
@@ -53,7 +53,7 @@ defmodule Linx.ProcessTest do
       {:ok, session} = P.spawn(argv: ["/this/does/not/exist"])
 
       assert_receive {:linx_process, :ready, _}, 2_000
-      :ok = P.release(session)
+      :ok = P.proceed(session)
 
       # ENOENT = 2 on Linux.
       assert_receive {:linx_process, :error, 2, :execve}, 2_000
@@ -65,7 +65,7 @@ defmodule Linx.ProcessTest do
       {:ok, session} = P.spawn(argv: ["/bin/sh", "-c", "exit 42"])
 
       assert_receive {:linx_process, :ready, _}, 2_000
-      :ok = P.release(session)
+      :ok = P.proceed(session)
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 42}, 2_000
@@ -80,7 +80,7 @@ defmodule Linx.ProcessTest do
       {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
 
       assert_receive {:linx_process, :ready, _}, 2_000
-      :ok = P.release(session)
+      :ok = P.proceed(session)
       assert_receive {:linx_process, :running}, 2_000
 
       :ok = P.signal(session, 15)
@@ -90,14 +90,14 @@ defmodule Linx.ProcessTest do
     end
 
     test "signal/2 buffers pre-running and flushes on :running" do
-      # /bin/sleep 60 again, but the signal is sent *before* release.
+      # /bin/sleep 60 again, but the signal is sent *before* proceed/1.
       {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
       assert_receive {:linx_process, :ready, _}, 2_000
 
       # Buffered: not yet running.
       :ok = P.signal(session, 15)
 
-      :ok = P.release(session)
+      :ok = P.proceed(session)
       assert_receive {:linx_process, :running}, 2_000
 
       # The buffered signal lands -- the workload dies.
@@ -108,7 +108,7 @@ defmodule Linx.ProcessTest do
     test "wait/1 returns immediately when the terminal already arrived" do
       {:ok, session} = P.spawn(argv: ["/bin/true"])
       assert_receive {:linx_process, :ready, _}, 2_000
-      :ok = P.release(session)
+      :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
       assert {:ok, {:exited, 0}} = P.wait(session)
@@ -117,7 +117,7 @@ defmodule Linx.ProcessTest do
     test "wait/1 blocks until the terminal event arrives" do
       {:ok, session} = P.spawn(argv: ["/bin/sh", "-c", "sleep 0.1; exit 7"])
       assert_receive {:linx_process, :ready, _}, 2_000
-      :ok = P.release(session)
+      :ok = P.proceed(session)
 
       # Don't drain the :running / :exited messages -- wait/1 should
       # block on its own and return when the workload finishes.
@@ -127,7 +127,7 @@ defmodule Linx.ProcessTest do
     test "wait/2 returns {:error, :timeout} while the workload is alive" do
       {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
       assert_receive {:linx_process, :ready, _}, 2_000
-      :ok = P.release(session)
+      :ok = P.proceed(session)
       assert_receive {:linx_process, :running}, 2_000
 
       # 100 ms is far short of /bin/sleep 60 -- we should time out cleanly.
@@ -141,7 +141,7 @@ defmodule Linx.ProcessTest do
     test "signal/2 after the workload has ended returns {:error, :ended}" do
       {:ok, session} = P.spawn(argv: ["/bin/true"])
       assert_receive {:linx_process, :ready, _}, 2_000
-      :ok = P.release(session)
+      :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
       # The workload no longer exists.
@@ -171,7 +171,7 @@ defmodule Linx.ProcessTest do
 
       :ok = Linx.Netlink.Socket.close(sock)
 
-      :ok = P.release(session)
+      :ok = P.proceed(session)
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 0}, 2_000

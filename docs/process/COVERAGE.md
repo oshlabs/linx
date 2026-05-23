@@ -17,10 +17,10 @@ A living doc — update as primitives ship. Status legend:
 | Feature | Status | Notes |
 |---|---|---|
 | `spawn/1` — `clone(2)` with namespace flags | ✅ | P1 |
-| Checkpoint protocol (`:ready` → `release/1` → `:running`) | ✅ | P1 |
+| Checkpoint protocol (`:ready` → `proceed/1` → `:running`) | ✅ | P1 |
 | Lifecycle events (`:exited` / `:signaled` / `:error`) | ✅ | P1 |
 | Input validation on opts | ✅ | P1 |
-| `release/1` | ✅ | P1 |
+| `proceed/1` | ✅ | P1 |
 | `signal/2` (queued before `:running`) | ✅ | P2 — buffered pre-running, forwarded post |
 | `wait/1` (synchronous wait for terminal event) | ✅ | P2 — with timeout in `wait/2` |
 | Exit status via `waitpid(2)` | ✅ | P1 (drives `:exited` / `:signaled`) |

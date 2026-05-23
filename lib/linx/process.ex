@@ -15,7 +15,7 @@ defmodule Linx.Process do
   fd 0/1/2 stay free for the workload's stdio.
 
   This module IS the GenServer. The pid returned by `spawn/1` (and later
-  `enter/2`) is the session handle: pass it to `release/1`, `signal/2`,
+  `enter/2`) is the session handle: pass it to `proceed/1`, `signal/2`,
   `wait/1`, `info/1`, and `pty_master/1`.
 
   ## Owner events
@@ -40,10 +40,9 @@ defmodule Linx.Process do
 
   ## Status
 
-  P0 (scaffolding) and P1 (`spawn/1` with the checkpoint protocol) are
-  shipped; `release/1` is wired. `signal/2`, `wait/1`, `info/1`,
-  `enter/2`, `pty_master/1` are still stubs — see
-  `docs/process/PLAN.md`.
+  P0 (scaffolding), P1 (`spawn/1` with the checkpoint protocol), and P2
+  (`signal/2`, `wait/1`) are shipped; `proceed/1` is wired. `enter/2`,
+  `info/1`, `pty_master/1` are still stubs — see `docs/process/PLAN.md`.
   """
 
   use GenServer
@@ -93,22 +92,26 @@ defmodule Linx.Process do
   def enter(_target_pid, _opts), do: {:error, :not_yet_implemented}
 
   @doc """
-  Releases the checkpoint: the child may `execve` the workload now.
+  Advances the child past the checkpoint: the agent forwards `:proceed`
+  to the cloned child, which then `execve`s the workload.
 
-  Blocks until the agent has acknowledged the proceed (which is fast —
-  just one byte over an internal pipe). Returns `:ok`, or `{:error,
-  reason}` if the session is no longer alive.
+  The wire-level command this sends is `:proceed`, which is also the
+  Elixir verb name — one word for the same action on both sides of
+  the Port boundary.
+
+  Returns `:ok`, or `{:error, :not_ready}` if the agent has not yet
+  reported `:ready` (i.e. there is no checkpoint to advance past).
   """
-  @spec release(t()) :: :ok | {:error, term}
-  def release(session) when is_pid(session) do
-    GenServer.call(session, :release)
+  @spec proceed(t()) :: :ok | {:error, term}
+  def proceed(session) when is_pid(session) do
+    GenServer.call(session, :proceed)
   end
 
   @doc """
   Sends OS signal `signum` to the workload.
 
   Signals delivered before the workload has `execve`'d (between
-  `spawn/1` and `release/1`, or before the agent emits `:running`) are
+  `spawn/1` and `proceed/1`, or before the agent emits `:running`) are
   buffered and flushed in order at the moment of `:running`. Signals
   delivered after the workload has exited return `{:error, :ended}`.
 
@@ -254,13 +257,13 @@ defmodule Linx.Process do
   end
 
   @impl true
-  def handle_call(:release, _from, %{port: port, child_pid: child_pid} = state)
+  def handle_call(:proceed, _from, %{port: port, child_pid: child_pid} = state)
       when child_pid != nil do
     Port.command(port, :erlang.term_to_binary(:proceed))
     {:reply, :ok, state}
   end
 
-  def handle_call(:release, _from, state) do
+  def handle_call(:proceed, _from, state) do
     {:reply, {:error, :not_ready}, state}
   end
 

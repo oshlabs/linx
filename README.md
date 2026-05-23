@@ -72,7 +72,7 @@ The next subsystem. Provides process-lifecycle primitives, starting with `clone(
 
 Architecturally, `clone()`/`fork()`/`unshare()` inside the multithreaded BEAM corrupts the VM — so the actual syscall runs in a small external C agent (a Port, not a NIF), with a checkpoint protocol over fd 3/4 letting the orchestrator do host-side setup before the child execs.
 
-This composes with `Linx.Netlink` cleanly: clone with `CLONE_NEWNET` → `Linx.Netlink.Socket.open(0, {:pid, child_pid})` to drive netlink inside the new netns → release the checkpoint → child execs.
+This composes with `Linx.Netlink` cleanly: clone with `CLONE_NEWNET` → `Linx.Netlink.Socket.open(0, {:pid, child_pid})` to drive netlink inside the new netns → `proceed/1` past the checkpoint → child execs.
 
 ### Coming later
 
