@@ -71,17 +71,48 @@ defmodule Linx.Capabilities do
 
   ## Status
 
-  Skeleton — K0 ships `supported?/0`, the constants table
-  (`Linx.Capabilities.Constants`), and the read-side value type
-  (`Linx.Capabilities.State`). The read verbs (`read/1`) land in
-  K1; the write verbs (`drop_bounding/2`, `set_thread_sets/2`,
-  `set_ambient/2`) in K2. See `docs/capabilities/PLAN.md` for the
-  full plan, `COVERAGE.md` for the ship/defer split.
+  Two of three foundation milestones shipped. K0 + K1 deliver
+  `supported?/0`, the constants table
+  (`Linx.Capabilities.Constants`), `%Linx.Capabilities.State{}`,
+  `%Linx.Capabilities.Error{}`, and `read/1`. The write verbs
+  (`drop_bounding/2`, `set_thread_sets/2`, `set_ambient/2`) land
+  in K2. See `docs/capabilities/PLAN.md` for the full plan,
+  `COVERAGE.md` for the ship/defer split.
   """
 
+  require Logger
+
+  import Bitwise
+
+  alias Linx.Capabilities.Constants
+  alias Linx.Capabilities.Error
   alias Linx.Capabilities.State
 
-  @self_status "/proc/self/status"
+  @proc "/proc"
+  @self_status Path.join([@proc, "self", "status"])
+
+  # Regex to extract the five Cap*: hex masks from /proc/<pid>/status.
+  # The kernel writes them as one tab-separated key:value line each;
+  # we accept any whitespace for tolerance against future format
+  # tweaks. Ordering in the file is deterministic (Inh/Prm/Eff/Bnd/Amb)
+  # but we don't rely on it — we key by the tag.
+  @cap_line_regex ~r/^Cap(Inh|Prm|Eff|Bnd|Amb):\s+([0-9a-fA-F]+)/m
+
+  @cap_tags %{
+    "Inh" => :inheritable,
+    "Prm" => :permitted,
+    "Eff" => :effective,
+    "Bnd" => :bounding,
+    "Amb" => :ambient
+  }
+
+  @required_fields MapSet.new([
+                     :effective,
+                     :permitted,
+                     :inheritable,
+                     :bounding,
+                     :ambient
+                   ])
 
   @typedoc """
   A capability atom — the lowercase form of a kernel `CAP_*`
@@ -126,13 +157,91 @@ defmodule Linx.Capabilities do
   the BEAM's own status. Returns
   `{:ok, %Linx.Capabilities.State{}}` on success, or
   `{:error, %Linx.Capabilities.Error{}}` if the procfs read failed
-  (target pid gone, no permission, etc.).
+  or the file didn't contain the five `Cap*:` lines we expected.
 
-  Lands with K1 — currently returns `{:error, :not_yet_implemented}`.
+  ## Examples
+
+      iex> {:ok, %Linx.Capabilities.State{} = state} = Linx.Capabilities.read(:self)
+      iex> is_struct(state.effective, MapSet) and is_struct(state.bounding, MapSet)
+      true
+
+      # Bogus pid -> structured error.
+      iex> {:error, %Linx.Capabilities.Error{errno: :enoent}} =
+      ...>   Linx.Capabilities.read(1_234_567_890)
+      iex> true
+      true
+
+  ## Forward compatibility
+
+  If the kernel reports a bit that isn't in Linx's 41-entry table
+  (a newer kernel adding caps Linx hasn't catalogued), the bit is
+  silently dropped from the returned `MapSet`s and a single
+  `Logger.warning/1` is emitted. The returned `%State{}` is still
+  valid for every cap Linx *does* know about.
   """
-  @spec read(pos_integer() | :self) :: {:ok, State.t()} | {:error, term()}
-  def read(:self), do: {:error, :not_yet_implemented}
-  def read(pid) when is_integer(pid) and pid > 0, do: {:error, :not_yet_implemented}
+  @spec read(pos_integer() | :self) ::
+          {:ok, State.t()} | {:error, Error.t()}
+  def read(:self), do: read_status(@self_status)
+
+  def read(pid) when is_integer(pid) and pid > 0 do
+    read_status(Path.join([@proc, Integer.to_string(pid), "status"]))
+  end
+
+  defp read_status(path) do
+    case File.read(path) do
+      {:ok, data} -> parse_status(data, path)
+      {:error, posix} -> {:error, Error.from_posix(posix, path, :read)}
+    end
+  end
+
+  @doc false
+  # Parses the five `Cap*:` lines out of a /proc/<pid>/status blob.
+  # Exposed only for the unit tests' fixture-based assertions —
+  # external consumers call read/1.
+  @spec parse_status(binary(), Path.t()) ::
+          {:ok, State.t()} | {:error, Error.t()}
+  def parse_status(data, path) when is_binary(data) and is_binary(path) do
+    found =
+      @cap_line_regex
+      |> Regex.scan(data, capture: :all_but_first)
+      |> Enum.reduce(%{}, fn [tag, hex], acc ->
+        Map.put(acc, Map.fetch!(@cap_tags, tag), String.to_integer(hex, 16))
+      end)
+
+    if MapSet.equal?(MapSet.new(Map.keys(found)), @required_fields) do
+      maybe_warn_unknown_bits(found, path)
+
+      {:ok,
+       %State{
+         effective: Constants.from_bits(found.effective),
+         permitted: Constants.from_bits(found.permitted),
+         inheritable: Constants.from_bits(found.inheritable),
+         bounding: Constants.from_bits(found.bounding),
+         ambient: Constants.from_bits(found.ambient)
+       }}
+    else
+      {:error, Error.from_posix(:bad_status, path, :read)}
+    end
+  end
+
+  # A kernel reporting bits past CAP_LAST_CAP (e.g. a future cap
+  # Linx hasn't catalogued) is forward-compat noise, not an error.
+  # We log once per read; the returned State is still valid.
+  defp maybe_warn_unknown_bits(found, path) do
+    all_bits =
+      found
+      |> Map.values()
+      |> Enum.reduce(0, &(&1 ||| &2))
+
+    extra = all_bits &&& bnot(Constants.known_mask())
+
+    if extra != 0 do
+      Logger.warning(
+        "Linx.Capabilities: #{path} reports capability bits Linx doesn't know about " <>
+          "(0x#{Integer.to_string(extra, 16)}). Kernel may have caps newer than this Linx build."
+      )
+    end
+  end
 
   @doc """
   Drops capabilities from the calling thread's bounding set on a

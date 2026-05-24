@@ -32,9 +32,12 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `read/1` (`{:pid, n}`) | ⬜ | K1 — parses all five `Cap*:` lines from `/proc/<n>/status` |
-| `read/1` against `:self` | ⬜ | K1 — convenience for `/proc/self/status` |
-| Empty / missing pid handling | ⬜ | K1 — structured `%Error{}` |
+| `read/1` against a pid | ✅ | K1 — parses all five `Cap*:` lines from `/proc/<n>/status` |
+| `read/1` against `:self` | ✅ | K1 — convenience for `/proc/self/status` |
+| Out-of-range / dead pid | ✅ | K1 — structured `%Error{errno: :enoent}` |
+| Malformed status (missing `Cap*:`) | ✅ | K1 — structured `%Error{errno: :bad_status}` |
+| Forward-compat for future caps | ✅ | K1 — unknown bits silently dropped + single `Logger.warning` per read |
+| `parse_status/2` (fixture-testable) | ✅ | K1 — `@doc false` parser exposed for unit tests; consumers use `read/1` |
 
 ## Write side (via Linx.Process agent at the checkpoint)
 
@@ -58,13 +61,13 @@ A living doc — update as primitives ship. Status legend:
 | Module | Status | Notes |
 |---|---|---|
 | `Linx.Capabilities.State` | ✅ | K0 — `%{effective, permitted, inheritable, bounding, ambient}` (MapSet-valued); compact Inspect rendering |
-| `Linx.Capabilities.Error` | ⬜ | K1 — POSIX-atom errno + path + operation |
+| `Linx.Capabilities.Error` | ✅ | K1 — `%{path, operation, errno, code}`; Exception impl; `from_posix/3` builder |
 
 ## Error reporting
 
 | Mechanism | Status | Notes |
 |---|---|---|
-| `%Linx.Capabilities.Error{path, operation, errno, code}` | ⬜ | K1 — read-side failures |
+| `%Linx.Capabilities.Error{path, operation, errno, code}` | ✅ | K1 — read-side failures (`:enoent`, `:eacces`, `:bad_status`, …) |
 | `{:linx_process, :error, errno, stage}` for write-side | ⬜ | K2 — stages `:cap_drop_bounding`, `:cap_set_thread`, `:cap_set_ambient` |
 | `{:bad_capability, atom}` for unknown cap atoms | ⬜ | K2 — input validation, distinct from kernel errors |
 

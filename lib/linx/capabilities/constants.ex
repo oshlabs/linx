@@ -68,6 +68,14 @@ defmodule Linx.Capabilities.Constants do
 
   @last_cap 40
 
+  # OR of every bit Linx knows about — used by the read-side parser
+  # to detect "kernel reports caps newer than our table." Computed
+  # at compile time from the same source as @atoms_to_bits so the
+  # two can't drift.
+  @known_mask Enum.reduce(@atoms_to_bits, 0, fn {_atom, bit}, acc ->
+                acc ||| 1 <<< bit
+              end)
+
   @doc """
   Every known capability atom, as a `MapSet`. Mirrors the kernel's
   `CAP_LAST_CAP + 1` count (41 on every kernel ≥ 5.8, the kernel
@@ -83,6 +91,17 @@ defmodule Linx.Capabilities.Constants do
   """
   @spec last_cap() :: non_neg_integer()
   def last_cap, do: @last_cap
+
+  @doc """
+  The bitmask of every cap bit Linx knows about — `OR` of
+  `1 <<< to_bit(c)` for every `c` in `all/0`.
+
+  Used by the K1 procfs parser: if `kernel_mask &&& bnot(known_mask)`
+  is non-zero, the kernel is reporting bits past Linx's table
+  (likely a newer kernel with caps Linx hasn't catalogued).
+  """
+  @spec known_mask() :: non_neg_integer()
+  def known_mask, do: @known_mask
 
   @doc """
   Capability atom → bit number.

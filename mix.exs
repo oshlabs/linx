@@ -153,6 +153,7 @@ defmodule Linx.MixProject do
         ],
         Capabilities: [
           Linx.Capabilities,
+          Linx.Capabilities.Error,
           Linx.Capabilities.State
         ],
         "Netlink core": [

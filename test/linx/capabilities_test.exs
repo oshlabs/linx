@@ -5,6 +5,7 @@ defmodule Linx.CapabilitiesTest do
 
   alias Linx.Capabilities
   alias Linx.Capabilities.Constants
+  alias Linx.Capabilities.Error
   alias Linx.Capabilities.State
 
   describe "supported?/0" do
@@ -167,17 +168,242 @@ defmodule Linx.CapabilitiesTest do
     end
   end
 
-  describe "K1/K2 stubs return :not_yet_implemented" do
-    # Sanity-check that the public surface compiles and is shaped
-    # right; the stubs go away as K1/K2 land.
-
-    test "read/1 against :self" do
-      assert Capabilities.read(:self) == {:error, :not_yet_implemented}
+  describe "Linx.Capabilities.Constants.known_mask/0" do
+    test "is the 41-bit all-ones mask for the current table" do
+      # Contiguous 0..40, so the mask equals (1 <<< 41) - 1.
+      assert Constants.known_mask() == (1 <<< 41) - 1
     end
 
-    test "read/1 against a pid" do
-      assert Capabilities.read(1) == {:error, :not_yet_implemented}
+    test "covers every entry in all/0" do
+      for cap <- Constants.all() do
+        bit = Constants.to_bit(cap)
+        assert (Constants.known_mask() &&& 1 <<< bit) != 0
+      end
     end
+  end
+
+  describe "Linx.Capabilities.Error" do
+    test "@enforce_keys covers path, operation, errno" do
+      assert_raise ArgumentError, fn -> struct!(Error, %{}) end
+    end
+
+    test "from_posix/3 builds a struct with code from the POSIX table" do
+      err = Error.from_posix(:eperm, "/proc/1234/status", :read)
+
+      assert %Error{
+               path: "/proc/1234/status",
+               operation: :read,
+               errno: :eperm,
+               code: 1
+             } = err
+    end
+
+    test "from_posix/3 leaves :code at nil for unmapped errnos" do
+      err = Error.from_posix(:bad_status, "/proc/x/status", :read)
+      assert %Error{errno: :bad_status, code: nil} = err
+    end
+
+    test "Exception.message/1 renders cleanly" do
+      err = Error.from_posix(:enoent, "/proc/9999/status", :read)
+
+      assert Exception.message(err) ==
+               "capabilities read failed on /proc/9999/status: enoent (errno 2)"
+    end
+
+    test "an error can be raised" do
+      err = Error.from_posix(:eacces, "/proc/1/status", :read)
+
+      assert_raise Error,
+                   "capabilities read failed on /proc/1/status: eacces (errno 13)",
+                   fn -> raise err end
+    end
+  end
+
+  describe "parse_status/2 (fixtures, no I/O)" do
+    # Canonical kernel format -- five Cap*: lines, hex, tab-separated.
+    @full_status """
+    Name:\thead
+    State:\tR (running)
+    CapInh:\t0000000000000000
+    CapPrm:\t000001ffffffffff
+    CapEff:\t000001ffffffffff
+    CapBnd:\t000001ffffffffff
+    CapAmb:\t0000000000000000
+    """
+
+    @empty_status """
+    Name:\tinit
+    CapInh:\t0000000000000000
+    CapPrm:\t0000000000000000
+    CapEff:\t0000000000000000
+    CapBnd:\t0000000000000000
+    CapAmb:\t0000000000000000
+    """
+
+    test "parses a full-caps status into the all/0 set on three sets" do
+      assert {:ok,
+              %State{
+                effective: eff,
+                permitted: prm,
+                inheritable: inh,
+                bounding: bnd,
+                ambient: amb
+              }} = Capabilities.parse_status(@full_status, "/proc/1/status")
+
+      assert eff == Constants.all()
+      assert prm == Constants.all()
+      assert inh == MapSet.new()
+      assert bnd == Constants.all()
+      assert amb == MapSet.new()
+    end
+
+    test "parses an all-zeros status into five empty MapSets" do
+      assert {:ok, %State{} = state} =
+               Capabilities.parse_status(@empty_status, "/proc/1/status")
+
+      for field <- [:effective, :permitted, :inheritable, :bounding, :ambient] do
+        assert Map.fetch!(state, field) == MapSet.new()
+      end
+    end
+
+    test "is tolerant of arbitrary surrounding whitespace" do
+      blob = """
+      CapInh:   0000000000000001
+      CapPrm:\t\t0000000000000001
+      CapEff: 0000000000000001
+      CapBnd:\t0000000000000001
+      CapAmb:    0000000000000001
+      """
+
+      assert {:ok, state} = Capabilities.parse_status(blob, "/proc/x/status")
+      one = MapSet.new([:cap_chown])
+      assert state.effective == one
+      assert state.permitted == one
+      assert state.inheritable == one
+      assert state.bounding == one
+      assert state.ambient == one
+    end
+
+    test "doesn't care about Cap*: line order" do
+      blob = """
+      CapBnd:\t000001ffffffffff
+      CapEff:\t0000000000000001
+      CapAmb:\t0000000000000000
+      CapInh:\t0000000000000000
+      CapPrm:\t0000000000000001
+      """
+
+      assert {:ok, state} = Capabilities.parse_status(blob, "/proc/x/status")
+      assert state.effective == MapSet.new([:cap_chown])
+      assert state.bounding == Constants.all()
+    end
+
+    test "rejects a status missing one of the five Cap*: lines" do
+      missing_amb = """
+      CapInh:\t0
+      CapPrm:\t0
+      CapEff:\t0
+      CapBnd:\t0
+      """
+
+      assert {:error,
+              %Error{
+                errno: :bad_status,
+                operation: :read,
+                path: "/proc/x/status",
+                code: nil
+              }} = Capabilities.parse_status(missing_amb, "/proc/x/status")
+    end
+
+    test "rejects a status with no Cap*: lines at all" do
+      blob = "Name:\tinit\nState:\tR\n"
+
+      assert {:error, %Error{errno: :bad_status}} =
+               Capabilities.parse_status(blob, "/proc/x/status")
+    end
+
+    test "silently drops bits past the known table (no error, no crash)" do
+      # Bit 50 isn't a known cap. The parser logs and drops it.
+      hex = "0004000000000001"
+      # 0x4000000000001 = bit 0 + bit 50
+
+      blob = """
+      CapInh:\t0000000000000000
+      CapPrm:\t0000000000000000
+      CapEff:\t0000000000000000
+      CapBnd:\t#{hex}
+      CapAmb:\t0000000000000000
+      """
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:ok, state} =
+                   Capabilities.parse_status(blob, "/proc/x/status")
+
+          # bit 0 (:cap_chown) survives; bit 50 is dropped.
+          assert state.bounding == MapSet.new([:cap_chown])
+        end)
+
+      assert log =~ "capability bits Linx doesn't know about"
+    end
+
+    test "parses uppercase hex tolerantly" do
+      blob = """
+      CapInh:\t0000000000000000
+      CapPrm:\t0000000000000000
+      CapEff:\t0000000000000000
+      CapBnd:\t000001FFFFFFFFFF
+      CapAmb:\t0000000000000000
+      """
+
+      assert {:ok, state} = Capabilities.parse_status(blob, "/proc/x/status")
+      assert state.bounding == Constants.all()
+    end
+  end
+
+  describe "read/1 against the real procfs" do
+    test ":self returns a valid %State{}" do
+      assert {:ok, %State{} = state} = Capabilities.read(:self)
+
+      for field <- [:effective, :permitted, :inheritable, :bounding, :ambient] do
+        assert is_struct(Map.fetch!(state, field), MapSet)
+      end
+
+      # The BEAM almost certainly has the full bounding set; even
+      # unprivileged users keep CapBnd full unless they've actively
+      # dropped from it. This is a softer assertion -- bounding is
+      # non-empty.
+      assert MapSet.size(state.bounding) > 0
+    end
+
+    test "matches what /proc/self/status actually contains" do
+      {:ok, %State{} = state} = Capabilities.read(:self)
+      {:ok, raw} = File.read("/proc/self/status")
+
+      # Cross-check: the bounding mask in /proc/self/status, when
+      # turned via from_bits, should equal the parsed bounding set.
+      [_, hex] = Regex.run(~r/^CapBnd:\s+([0-9a-fA-F]+)/m, raw)
+      expected = Constants.from_bits(String.to_integer(hex, 16))
+
+      assert state.bounding == expected
+    end
+
+    test "pid 1 (init/systemd) returns a populated state" do
+      # /proc/1/status is world-readable on every Linux distro.
+      assert {:ok, %State{} = state} = Capabilities.read(1)
+
+      # init/systemd will always have something in bounding.
+      assert MapSet.size(state.bounding) > 0
+    end
+
+    test "an out-of-range pid returns a structured ENOENT" do
+      assert {:error, %Error{errno: :enoent, operation: :read, code: 2}} =
+               Capabilities.read(1_234_567_890)
+    end
+  end
+
+  describe "K2 stubs still return :not_yet_implemented" do
+    # K2 verbs (write side) haven't shipped yet.
 
     test "drop_bounding/2" do
       assert Capabilities.drop_bounding(self(), [:cap_chown]) ==
