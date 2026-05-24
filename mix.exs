@@ -136,6 +136,9 @@ defmodule Linx.MixProject do
           Linx.Mount.Error,
           Linx.Mount.Native
         ],
+        User: [
+          Linx.User
+        ],
         "Netlink core": [
           Linx.Netlink,
           Linx.Netlink.Socket,

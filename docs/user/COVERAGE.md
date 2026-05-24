@@ -16,7 +16,7 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `supported?/0` | ⬜ | U0 — true iff `/proc/self/uid_map` exists (kernel ≥ 3.8) |
+| `supported?/0` | ✅ | U0 — true iff `/proc/self/uid_map` exists (kernel ≥ 3.8) |
 
 ## Write side
 
