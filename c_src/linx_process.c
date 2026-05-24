@@ -44,11 +44,15 @@
  * touch the BEAM channel; instead, two internal pipes carry the checkpoint
  * handshake:
  *
- *   `c2p` (child writes, parent reads, O_CLOEXEC on the child end)
- *     - One byte 'R' + 4-byte pidns-internal child pid -> :ready
- *     - One byte 'E' + 4-byte errno + 1-byte stage -> pre-exec error
- *     - EOF (the child execve'd successfully and CLOEXEC closed the pipe)
- *       -> :running
+ *   `c2p` (child writes, parent reads, O_CLOEXEC on the child end): a
+ *   stream of {:packet, 4} ei frames, same encoding as p2c and the BEAM
+ *   channel. Recognised frames:
+ *     - {:ready, pidns_internal_child_pid}
+ *     - {:error, errno, stage_atom}     -- pre-exec failure; stage is
+ *       :execve / :stdio / :cap_drop_bounding / :cap_set_thread /
+ *       :cap_set_ambient (see enum stage / stage_name in this file)
+ *     - EOF (the child execve'd successfully and CLOEXEC closed the
+ *       pipe) -> :running
  *
  *   `p2c` (parent writes, child reads): a stream of {:packet, 4} ei frames,
  *   same encoding as the BEAM channel. Recognised frames:
@@ -64,8 +68,8 @@
  * The CLOEXEC trick on the c2p pipe is how the parent learns the
  * execve succeeded: nothing to write -- the kernel auto-closes the fd at
  * exec time, the parent sees EOF, and emits :running. If execve fails,
- * the child writes 'E' + errno + stage BEFORE the close-on-exec would
- * trigger, so the parent sees the failure with detail.
+ * the child writes the {:error, errno, stage} frame BEFORE the close-
+ * on-exec would trigger, so the parent sees the failure with detail.
  *
  * The parent also polls c2p alongside the BEAM channel during the
  * checkpoint window (see await_proceed) so that a K2 cap-command
@@ -115,9 +119,12 @@
  * ample. clone() needs the *top* of the stack since it grows down. */
 #define CHILD_STACK_SIZE (1024 * 1024)
 
-/* Stage tags carried in 'E' errors from the child over the c2p pipe, mapped
- * by the parent into Erlang atoms for {:error, errno, stage}. Numbers are
- * an internal protocol; the strings are what the BEAM sees. */
+/* Stage tags identifying which step of the pre-exec setup failed.
+ * Encoded as the third element of a {:error, errno, stage_atom} ei
+ * frame the child sends to the parent over c2p; the parent forwards
+ * the atom to the BEAM via emit_error. The integer values are an
+ * internal enum (used by stage_name); the strings are what the BEAM
+ * sees. */
 enum stage {
 	STAGE_EXECVE = 1,
 	STAGE_STDIO = 2, /* per-fd plumbing in child: /dev/null, AF_UNIX connect, PTY ioctl */
@@ -746,21 +753,24 @@ struct child_args {
 	int pty_slave;
 };
 
-/* Report an in-child pre-exec failure on the c2p pipe ('E' tag + 4-byte
- * errno + 1-byte stage code) and exit. Called when something between the
+/* Report an in-child pre-exec failure as a `{:error, errno, stage_atom}`
+ * ei frame on the c2p pipe and exit. Called when something between the
  * checkpoint and execve fails -- e.g. opening /dev/null, connecting to
- * the AF_UNIX path, ioctl on the PTY slave. */
+ * the AF_UNIX path, ioctl on the PTY slave, capset/prctl in the K2 cap
+ * commands. The parent reads the frame in await_exec_outcome (post-
+ * proceed) or in await_proceed's c2p poll branch (checkpoint window),
+ * and forwards the {:error, _, _} to the BEAM. */
 __attribute__((noreturn))
 static void child_fail(int c2p_w, int err, enum stage stage)
 {
-	uint8_t fail[6];
-	fail[0] = 'E';
-	fail[1] = (uint8_t)(err >> 24);
-	fail[2] = (uint8_t)(err >> 16);
-	fail[3] = (uint8_t)(err >> 8);
-	fail[4] = (uint8_t)err;
-	fail[5] = (uint8_t)stage;
-	(void)write_exact(c2p_w, fail, sizeof fail);
+	ei_x_buff x;
+	ei_x_new_with_version(&x);
+	ei_x_encode_tuple_header(&x, 3);
+	ei_x_encode_atom(&x, "error");
+	ei_x_encode_long(&x, err);
+	ei_x_encode_atom(&x, stage_name(stage));
+	(void)write_frame_fd(c2p_w, x.buff, (uint32_t)x.index);
+	ei_x_free(&x);
 	_exit(127);
 }
 
@@ -982,8 +992,8 @@ static int child_read_command(int p2c_r, int c2p_w)
 
 /* Inside the cloned child: announce :ready (with our pidns-internal pid),
  * loop on checkpoint commands until :proceed, plumb stdio, exec. Any
- * pre-exec failure is reported as 'E' on the c2p pipe and the child exits
- * non-zero. */
+ * pre-exec failure is reported as a {:error, errno, stage} ei frame
+ * on the c2p pipe and the child exits non-zero. */
 static int child_fn(void *arg)
 {
 	struct child_args *ca = arg;
@@ -1000,16 +1010,18 @@ static int child_fn(void *arg)
 	if (ca->c2p_r >= 0) close(ca->c2p_r);
 	if (ca->p2c_w >= 0) close(ca->p2c_w);
 
-	/* :ready -- send 'R' + pidns-internal pid (uint32 big-endian). */
-	uint8_t ready[5];
-	ready[0] = 'R';
-	uint32_t pid = (uint32_t)getpid();
-	ready[1] = (uint8_t)(pid >> 24);
-	ready[2] = (uint8_t)(pid >> 16);
-	ready[3] = (uint8_t)(pid >> 8);
-	ready[4] = (uint8_t)pid;
-	if (write_exact(ca->c2p_w, ready, sizeof ready) < 0)
-		_exit(101);
+	/* :ready -- send {:ready, pidns_internal_pid} as an ei frame. */
+	{
+		ei_x_buff x;
+		ei_x_new_with_version(&x);
+		ei_x_encode_tuple_header(&x, 2);
+		ei_x_encode_atom(&x, "ready");
+		ei_x_encode_long(&x, (long)getpid());
+		int rc = write_frame_fd(ca->c2p_w, x.buff, (uint32_t)x.index);
+		ei_x_free(&x);
+		if (rc < 0)
+			_exit(101);
+	}
 
 	/* Loop on checkpoint-window commands. {:cap_*, _} tuples apply
 	 * per-thread cap syscalls (K2); :proceed breaks the loop. A
@@ -1045,30 +1057,37 @@ static int child_fn(void *arg)
 /* --- the relay (parent of clone) ---------------------------------------- */
 
 /* Drain c2p until either: the child reported success (EOF on the pipe
- * because of CLOEXEC after execve), or a pre-exec error ('E' tag).
+ * because of CLOEXEC after execve), or a pre-exec error arrived as a
+ * `{:error, errno, stage_atom}` ei frame.
  *
  * Returns 0 on success (the workload is running). Returns 1 on
  * pre-exec error (already emitted on fd 4). Returns -1 on relay failure. */
 static int await_exec_outcome(int c2p_r)
 {
-	uint8_t tag;
-	ssize_t n = read(c2p_r, &tag, 1);
-	if (n == 0)
-		return 0;                /* EOF -> execve succeeded */
-	if (n < 0)
+	uint8_t buf[256];
+	ssize_t len = read_frame_fd(c2p_r, buf, sizeof buf);
+	if (len < 0) {
+		/* read_exact sets errno=0 on EOF; that's the success
+		 * path (CLOEXEC closed the child's write end at exec). */
+		return errno == 0 ? 0 : -1;
+	}
+
+	int idx = 0, version, arity;
+	if (ei_decode_version((const char *)buf, &idx, &version) < 0 ||
+	    ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0 ||
+	    arity != 3)
 		return -1;
 
-	if (tag != 'E')
+	char tag[MAXATOMLEN];
+	long err;
+	char stage[MAXATOMLEN];
+	if (ei_decode_atom((const char *)buf, &idx, tag) < 0 ||
+	    strcmp(tag, "error") != 0 ||
+	    ei_decode_long((const char *)buf, &idx, &err) < 0 ||
+	    ei_decode_atom((const char *)buf, &idx, stage) < 0)
 		return -1;
 
-	uint8_t payload[5];
-	if (read_exact(c2p_r, payload, sizeof payload) < 0)
-		return -1;
-
-	int err = ((int)payload[0] << 24) | ((int)payload[1] << 16) |
-		  ((int)payload[2] << 8)  | (int)payload[3];
-	enum stage s = (enum stage)payload[4];
-	emit_error(err, stage_name(s));
+	emit_error((int)err, stage);
 	return 1;
 }
 
@@ -1115,7 +1134,8 @@ static int await_proceed(int pty_master, int p2c_w, int c2p_r)
 		 * notifications on c2p_r. The latter is only relevant
 		 * during the K2 cap-command window -- a cap_* command
 		 * that the child can't apply (EPERM on capset, etc.)
-		 * lands here as 'E' + payload, ahead of any :proceed. */
+		 * arrives as a {:error, errno, stage} ei frame, ahead
+		 * of any :proceed. */
 		struct pollfd pfds[2] = {
 			{ .fd = CTL_IN, .events = POLLIN },
 			{ .fd = c2p_r,  .events = POLLIN },
@@ -1129,24 +1149,30 @@ static int await_proceed(int pty_master, int p2c_w, int c2p_r)
 		}
 
 		if (pfds[1].revents & (POLLIN | POLLHUP)) {
-			/* Child wrote 'E' + payload (or unexpectedly
-			 * closed). Drain the error and surface it; main
-			 * cleans up. */
-			uint8_t tag;
-			ssize_t n = read(c2p_r, &tag, 1);
-			if (n <= 0)
+			/* Child wrote a {:error, errno, stage_atom} ei
+			 * frame (or unexpectedly closed). Drain it and
+			 * surface to BEAM; main cleans up. */
+			uint8_t buf[256];
+			ssize_t len = read_frame_fd(c2p_r, buf, sizeof buf);
+			if (len < 0)
 				return -1;
-			if (tag != 'E')
+
+			int idx = 0, version, arity;
+			if (ei_decode_version((const char *)buf, &idx, &version) < 0 ||
+			    ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0 ||
+			    arity != 3)
 				return -1;
-			uint8_t payload[5];
-			if (read_exact(c2p_r, payload, sizeof payload) < 0)
+
+			char tag[MAXATOMLEN];
+			long err;
+			char stage[MAXATOMLEN];
+			if (ei_decode_atom((const char *)buf, &idx, tag) < 0 ||
+			    strcmp(tag, "error") != 0 ||
+			    ei_decode_long((const char *)buf, &idx, &err) < 0 ||
+			    ei_decode_atom((const char *)buf, &idx, stage) < 0)
 				return -1;
-			int err = ((int)payload[0] << 24) |
-				  ((int)payload[1] << 16) |
-				  ((int)payload[2] << 8)  |
-				  (int)payload[3];
-			enum stage s = (enum stage)payload[4];
-			emit_error(err, stage_name(s));
+
+			emit_error((int)err, stage);
 			return -1;
 		}
 
@@ -1205,8 +1231,9 @@ static int await_proceed(int pty_master, int p2c_w, int c2p_r)
 			return -1;
 
 		/* Cap commands -- forward the frame verbatim. The child
-		 * decodes and applies; failures come back on c2p as 'E'
-		 * + payload (handled by await_exec_outcome later). */
+		 * decodes and applies; failures come back on c2p as
+		 * an {:error, errno, stage} ei frame, surfaced by the
+		 * c2p poll branch above. */
 		if ((strcmp(tag, "cap_drop_bounding") == 0 && arity == 2) ||
 		    (strcmp(tag, "cap_set_thread")    == 0 && arity == 4) ||
 		    (strcmp(tag, "cap_set_ambient")   == 0 && arity == 2)) {
@@ -1683,22 +1710,32 @@ int main(void)
 
 	emit_status_int("spawned", (long)pid);
 
-	/* Read the child's first message -- expected: 'R' + 4-byte pidns
-	 * pid -> :ready. */
-	uint8_t ready_tag;
-	if (read_exact(c2p[0], &ready_tag, 1) < 0 || ready_tag != 'R') {
-		fprintf(stderr, "linx_process: child did not send ready\n");
-		free_request(&req);
-		return 4;
+	/* Read the child's first message -- expected: a {:ready, pid}
+	 * ei frame on c2p. */
+	long child_pid;
+	{
+		uint8_t buf[256];
+		ssize_t len = read_frame_fd(c2p[0], buf, sizeof buf);
+		if (len < 0) {
+			fprintf(stderr, "linx_process: read ready frame: %s\n",
+				errno == 0 ? "EOF" : strerror(errno));
+			free_request(&req);
+			return 4;
+		}
+
+		int idx = 0, version, arity;
+		char tag[MAXATOMLEN];
+		if (ei_decode_version((const char *)buf, &idx, &version) < 0 ||
+		    ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0 ||
+		    arity != 2 ||
+		    ei_decode_atom((const char *)buf, &idx, tag) < 0 ||
+		    strcmp(tag, "ready") != 0 ||
+		    ei_decode_long((const char *)buf, &idx, &child_pid) < 0) {
+			fprintf(stderr, "linx_process: malformed ready frame\n");
+			free_request(&req);
+			return 4;
+		}
 	}
-	uint8_t ready_pid[4];
-	if (read_exact(c2p[0], ready_pid, sizeof ready_pid) < 0) {
-		fprintf(stderr, "linx_process: short ready frame\n");
-		free_request(&req);
-		return 4;
-	}
-	long child_pid = ((long)ready_pid[0] << 24) | ((long)ready_pid[1] << 16) |
-			 ((long)ready_pid[2] << 8) | (long)ready_pid[3];
 	emit_status_int("ready", child_pid);
 
 	/* Wait for :proceed (or :abort) from the BEAM. await_proceed
@@ -1747,7 +1784,8 @@ int main(void)
 	close(p2c[1]);
 
 	/* The child either execve's successfully (the c2p pipe closes on
-	 * exec via CLOEXEC, we see EOF) or fails before exec ('E' frame). */
+	 * exec via CLOEXEC, we see EOF) or fails before exec (an
+	 * {:error, errno, stage} frame). */
 	int outcome = await_exec_outcome(c2p[0]);
 	close(c2p[0]);
 
