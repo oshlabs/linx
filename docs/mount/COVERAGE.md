@@ -28,9 +28,9 @@ A living doc — update as primitives ship. Status legend:
 |---|---|---|
 | `mount/4` | ✅ | M1 — `mount(2)` via NIF (BEAM's mount ns only; `:in` lands in M3) |
 | `umount/2` | ✅ | M1 — `umount2(2)` via NIF (BEAM's mount ns only; `:in` lands in M3) |
-| `bind/3` | ⬜ | M2 — `mount(MS_BIND)` |
-| `remount/2` | ⬜ | M2 — `mount(MS_REMOUNT)` |
-| `move/2` | ⬜ | M2 — `mount(MS_MOVE)` |
+| `bind/3` | ✅ | M2 — `mount(MS_BIND)` |
+| `remount/2` | ✅ | M2 — `mount(MS_REMOUNT)`; for propagation changes use `mount/4` with `:private` / `:shared` / `:slave` / `:unbindable` directly (not with `:remount`) |
+| `move/2` | ✅ | M2 — `mount(MS_MOVE)` |
 | `pivot_root/3` | ⬜ | M4 — `pivot_root(2)` with CWD-handling on throwaway thread |
 
 ## Mount flags (the `:flags` opt to `mount/4`)

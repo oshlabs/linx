@@ -9,11 +9,11 @@ the calling thread to have `CAP_SYS_ADMIN` in the target user
 namespace (root in the simple case). Start with `./sudorun.sh iex
 -S mix`.
 
-> 🚧 **Partial.** M0 (the read side: `list/0`, `list/1`, the
-> `Entry` struct) and M1 (`mount/4`, `umount/2`,
-> `%Linx.Mount.Error{}`) ship now. Convenience verbs (M2),
-> cross-namespace `:in` (M3), and `pivot_root/3` (M4) land in
-> follow-ups. See `PLAN.md` for the roadmap.
+> 🚧 **Partial.** M0–M2 (the read side, `mount/4`, `umount/2`,
+> the convenience verbs `bind/3` / `remount/2` / `move/2`, and
+> `%Linx.Mount.Error{}`) ship now. Cross-namespace `:in` (M3) and
+> `pivot_root/3` (M4) land in follow-ups. See `PLAN.md` for the
+> roadmap.
 
 ## Reading the mount table
 
@@ -113,7 +113,122 @@ iex> entry.mount_point
 
 ## (Will land with M1 — basic mount + umount)
 
-## (Will land with M2 — bind / remount / move)
+## Bind, remount, move
+
+Three convenience verbs over `mount/4` for the most common
+mutating patterns.
+
+### `bind/3` — make a directory visible at another path
+
+```elixir
+iex> File.mkdir_p!("/tmp/scratch/src")
+iex> File.mkdir_p!("/tmp/scratch/dst")
+iex> File.write!("/tmp/scratch/src/hello", "")
+
+iex> Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
+:ok
+iex> File.exists?("/tmp/scratch/dst/hello")
+true
+
+iex> Linx.Mount.umount("/tmp/scratch/dst")
+:ok
+```
+
+The bind shows up in mountinfo with the underlying filesystem
+type (whatever `src` lives on) and a `root` field pointing at the
+original directory:
+
+```elixir
+iex> {:ok, mounts} = Linx.Mount.list()
+iex> Enum.find(mounts, & &1.mount_point == "/tmp/scratch/dst")
+#Linx.Mount.Entry<ext4 on /tmp/scratch/dst (rw,relatime)>
+```
+
+`flags: [:rec]` makes the bind recursive — any submounts under
+`source` are also bound under `target`:
+
+```elixir
+iex> Linx.Mount.bind("/proc/self", "/tmp/scratch/proc-self", flags: [:rec])
+:ok
+```
+
+### `remount/2` — change flags on an existing mount
+
+The classic use case is making a bind mount read-only after the
+fact. **The `:bind` flag is required** when remounting a bind —
+without it the kernel tries to remount the underlying filesystem
+instead.
+
+```elixir
+iex> Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
+:ok
+iex> Linx.Mount.remount("/tmp/scratch/dst", flags: [:bind, :ro])
+:ok
+
+iex> File.write("/tmp/scratch/dst/foo", "")
+{:error, :erofs}
+
+# But the underlying source stays writable:
+iex> File.write("/tmp/scratch/src/foo", "")
+:ok
+```
+
+#### Note: `remount/2` is not for propagation changes
+
+Propagation flags (`:private`, `:shared`, `:slave`, `:unbindable`)
+are a *separate* mount(2) call form in the kernel — not combined
+with `MS_REMOUNT`. Use `mount/4` directly with just the
+propagation flag:
+
+```elixir
+# Change a mount's propagation to private (detach it from any
+# shared peer group it's in):
+iex> Linx.Mount.mount("", "/tmp/scratch", "", flags: [:private])
+:ok
+```
+
+A dedicated `make_private/2` / `make_shared/2` / etc. helper API
+may grow in a follow-up; the `mount/4` form is the canonical
+escape hatch today and matches what `mount --make-private` does
+in shell scripts.
+
+### `move/2` — atomically relocate a mount
+
+```elixir
+iex> Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
+:ok
+iex> Linx.Mount.move("/tmp/scratch/dst", "/tmp/scratch/moved")
+:ok
+
+iex> {:ok, mounts} = Linx.Mount.list()
+iex> Enum.find(mounts, & &1.mount_point == "/tmp/scratch/moved")
+#Linx.Mount.Entry<ext4 on /tmp/scratch/moved (rw,relatime)>
+```
+
+**Mind propagation:** `move/2` returns `:einval` if the source
+mount, its parent, or the destination's parent has *shared*
+propagation. Most distros mount `/tmp` as `shared:1`, so a bind
+inside `/tmp` inherits the shared peer group and `move/2` will
+refuse it.
+
+Workaround when you control the parent: mount a tmpfs (or
+self-bind a directory), mark it private, then everything inside
+is in a fresh single-mount peer group:
+
+```elixir
+iex> base = "/tmp/scratch-move"
+iex> File.mkdir_p!(base)
+iex> Linx.Mount.mount("none", base, "tmpfs")
+:ok
+iex> Linx.Mount.mount("", base, "", flags: [:private])
+:ok
+
+iex> # now move/2 between paths inside `base` works freely
+iex> File.mkdir_p!("#{base}/src"); File.mkdir_p!("#{base}/dst")
+iex> Linx.Mount.bind("#{base}/src", "#{base}/dst")
+iex> Linx.Mount.move("#{base}/dst", "#{base}/moved")
+:ok
+```
 
 ## (Will land with M3 — mounting into another namespace via `:in`)
 

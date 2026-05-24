@@ -151,12 +151,18 @@ static ERL_NIF_TERM nif_mount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
 		return enif_make_badarg(env);
 	}
 
-	/* Empty string -> NULL for source / data (kernel-idiomatic).
-	 * target and fstype must always be non-empty. */
-	const char *src_arg  = source[0] ? source : NULL;
-	const char *data_arg = data[0]   ? data   : NULL;
+	/* Empty string -> NULL for source / fstype / data
+	 * (kernel-idiomatic). The kernel ignores source and fstype for
+	 * propagation changes (MS_PRIVATE / MS_SHARED / ...), MS_MOVE,
+	 * and MS_REMOUNT; passing the literal empty string would
+	 * occasionally trip ENODEV from the fstype lookup. NULL is the
+	 * conventional "ignored" sentinel. target must always be
+	 * non-empty. */
+	const char *src_arg    = source[0] ? source : NULL;
+	const char *fstype_arg = fstype[0] ? fstype : NULL;
+	const char *data_arg   = data[0]   ? data   : NULL;
 
-	int rc = mount(src_arg, target, fstype, (unsigned long)flags, data_arg);
+	int rc = mount(src_arg, target, fstype_arg, (unsigned long)flags, data_arg);
 	int saved_errno = errno;
 
 	enif_free(source);

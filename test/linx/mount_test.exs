@@ -180,25 +180,183 @@ defmodule Linx.MountTest do
     end
   end
 
-  describe "M2-M4 stubs" do
-    # Until M2-M4 land, the still-unshipped verbs return
-    # {:error, :not_yet_implemented} so callers get a recognizable
-    # shape now and the function names are visible in ExDoc.
-
-    test "bind/3" do
-      assert {:error, :not_yet_implemented} = Mount.bind("/a", "/b")
-    end
-
-    test "remount/2" do
-      assert {:error, :not_yet_implemented} = Mount.remount("/mnt")
-    end
-
-    test "move/2" do
-      assert {:error, :not_yet_implemented} = Mount.move("/a", "/b")
-    end
-
+  describe "M4 stubs" do
+    # Until M4 lands, pivot_root/3 returns :not_yet_implemented.
     test "pivot_root/3" do
       assert {:error, :not_yet_implemented} = Mount.pivot_root("/new", "/new/old")
+    end
+  end
+
+  describe "M2 convenience verbs -- plain shape" do
+    # Without root we can't do real binds; verify the plumbing
+    # surfaces the structured error from mount/4 through cleanly.
+
+    test "bind/3 against a non-existent source returns a structured error" do
+      assert {:error, %Error{operation: :mount, errno: errno}} =
+               Mount.bind("/nope/source", "/nope/target")
+
+      assert errno in [:enoent, :eperm, :eacces]
+    end
+
+    test "bind/3 with a bad flag is rejected before the NIF call" do
+      assert {:error, {:bad_flag, :nonsense}} =
+               Mount.bind("/a", "/b", flags: [:nonsense])
+    end
+
+    test "remount/2 against an unmounted target returns a structured error" do
+      assert {:error, %Error{operation: :mount, errno: errno}} =
+               Mount.remount("/nope/never-mounted")
+
+      assert errno in [:einval, :enoent, :eperm, :eacces]
+    end
+
+    test "move/2 against a non-existent source returns a structured error" do
+      assert {:error, %Error{operation: :mount, errno: errno}} =
+               Mount.move("/nope/source", "/nope/target")
+
+      assert errno in [:einval, :enoent, :eperm, :eacces]
+    end
+  end
+
+  describe "M2 integration: bind + remount + move" do
+    @describetag :integration
+
+    setup do
+      base = "/tmp/linx-mount-test-#{System.unique_integer([:positive])}"
+      source = Path.join(base, "src")
+      target = Path.join(base, "dst")
+      moved = Path.join(base, "moved")
+
+      File.mkdir_p!(source)
+      File.mkdir_p!(target)
+      File.mkdir_p!(moved)
+
+      on_exit(fn ->
+        # Best-effort cleanup -- a failing test might have left
+        # mounts behind.
+        for p <- [moved, target, source], do: _ = Mount.umount(p, flags: [:detach])
+        _ = File.rm_rf(base)
+      end)
+
+      {:ok, source: source, target: target, moved: moved}
+    end
+
+    test "bind/3 makes source visible at target", %{source: src, target: tgt} do
+      File.write!(Path.join(src, "marker"), "hello")
+
+      assert :ok = Mount.bind(src, tgt)
+
+      # The marker file is now visible at the bind-target.
+      assert File.read!(Path.join(tgt, "marker")) == "hello"
+
+      # And mountinfo shows the bind. The fstype on a bind mount
+      # reports the underlying filesystem -- whatever /tmp lives on.
+      {:ok, mounts} = Mount.list()
+      entry = Enum.find(mounts, &(&1.mount_point == tgt))
+      assert %Entry{root: root, mount_point: ^tgt} = entry
+      # The bind's `root` field points at the original directory.
+      assert String.ends_with?(root, "/src")
+
+      assert :ok = Mount.umount(tgt)
+    end
+
+    test "remount/2 + :ro makes a bind mount read-only", %{source: src, target: tgt} do
+      assert :ok = Mount.bind(src, tgt)
+
+      # Initially writable.
+      assert :ok = File.write(Path.join(tgt, "before-ro"), "")
+
+      # Remount as read-only. Note the :bind flag is required --
+      # without it, the kernel tries to remount the underlying
+      # filesystem instead.
+      assert :ok = Mount.remount(tgt, flags: [:bind, :ro])
+
+      {:ok, mounts} = Mount.list()
+      entry = Enum.find(mounts, &(&1.mount_point == tgt))
+      assert String.contains?(entry.mount_options, "ro")
+
+      # Writes now fail with EROFS.
+      assert {:error, :erofs} = File.write(Path.join(tgt, "after-ro"), "")
+
+      # ... but the underlying source is still writable.
+      assert :ok = File.write(Path.join(src, "still-rw"), "")
+
+      assert :ok = Mount.umount(tgt)
+    end
+
+    test "move/2 atomically relocates a bind mount" do
+      # The kernel rejects MS_MOVE if the source's mount or its
+      # destination's parent has shared propagation. /tmp on most
+      # distros is shared:1, so anything mounted under it inherits
+      # the shared peer group. Isolate this test by mounting a
+      # tmpfs at our own scratch path and marking it private --
+      # everything we do under it is then in a fresh propagation
+      # group of one, and move/2 works as documented.
+      base = "/tmp/linx-mount-test-move-#{System.unique_integer([:positive])}"
+      File.mkdir_p!(base)
+      on_exit(fn -> _ = Mount.umount(base, flags: [:detach]); _ = File.rmdir(base) end)
+
+      assert :ok = Mount.mount("none", base, "tmpfs")
+      # Change propagation to private. Propagation flags are *not*
+      # combined with MS_REMOUNT -- they're their own call form per
+      # the kernel docs. Pass MS_PRIVATE alone.
+      assert :ok = Mount.mount("", base, "", flags: [:private])
+
+      src = Path.join(base, "src")
+      tgt = Path.join(base, "dst")
+      dst = Path.join(base, "moved")
+      File.mkdir_p!(src)
+      File.mkdir_p!(tgt)
+      File.mkdir_p!(dst)
+
+      assert :ok = Mount.bind(src, tgt)
+
+      File.write!(Path.join(src, "marker"), "still here")
+      assert File.read!(Path.join(tgt, "marker")) == "still here"
+
+      assert :ok = Mount.move(tgt, dst)
+
+      # tgt is no longer a mount point; dst is.
+      {:ok, mounts} = Mount.list()
+      refute Enum.any?(mounts, &(&1.mount_point == tgt))
+      assert Enum.any?(mounts, &(&1.mount_point == dst))
+
+      # And the contents follow.
+      assert File.read!(Path.join(dst, "marker")) == "still here"
+
+      # Cleanup: detach the moved bind, then the wrapper tmpfs.
+      assert :ok = Mount.umount(dst)
+      assert :ok = Mount.umount(base)
+    end
+
+    test "bind/3 with :rec performs a recursive bind",
+         %{source: src, target: tgt} do
+      # Mount a tmpfs underneath src so there's something for :rec
+      # to follow.
+      inner = Path.join(src, "inner")
+      File.mkdir_p!(inner)
+      assert :ok = Mount.mount("none", inner, "tmpfs")
+      File.write!(Path.join(inner, "tmpfs-marker"), "")
+
+      # Non-recursive bind: src visible at tgt, but `inner` shows as
+      # an empty directory (the tmpfs didn't follow).
+      assert :ok = Mount.bind(src, tgt)
+      refute File.exists?(Path.join([tgt, "inner", "tmpfs-marker"]))
+
+      assert :ok = Mount.umount(tgt)
+
+      # Recursive bind: the tmpfs follows along.
+      assert :ok = Mount.bind(src, tgt, flags: [:rec])
+      assert File.exists?(Path.join([tgt, "inner", "tmpfs-marker"]))
+
+      # Cleanup: the recursive bind propagates the unmount of `tgt`
+      # to its peer (`src/inner`) via the default shared propagation
+      # on /tmp, so `inner` may already be gone by the time we get
+      # here. Best-effort detach both -- the assertion that matters
+      # is that tgt/inner/tmpfs-marker was visible, which we already
+      # checked.
+      _ = Mount.umount(tgt, flags: [:detach])
+      _ = Mount.umount(inner, flags: [:detach])
     end
   end
 

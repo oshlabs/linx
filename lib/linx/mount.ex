@@ -44,10 +44,10 @@ defmodule Linx.Mount do
 
   ## Status
 
-  M0–M1 shipped: `list/0`, `list/1`, the mountinfo parser,
-  `mount/4`, `umount/2`, plus `%Linx.Mount.Entry{}` and
-  `%Linx.Mount.Error{}`. Convenience verbs (M2), cross-namespace
-  `:in` (M3), and `pivot_root/3` (M4) land in follow-ups. See
+  M0–M2 shipped: `list/0`, `list/1`, the mountinfo parser,
+  `mount/4`, `umount/2`, `bind/3`, `remount/2`, `move/2`, plus
+  `%Linx.Mount.Entry{}` and `%Linx.Mount.Error{}`. Cross-namespace
+  `:in` (M3) and `pivot_root/3` (M4) land in follow-ups. See
   `docs/mount/PLAN.md` for the roadmap.
   """
 
@@ -385,28 +385,86 @@ defmodule Linx.Mount do
   defp pack_flags(_, _), do: {:error, {:bad_flag, :flags_must_be_a_list}}
 
   @doc """
-  Bind-mounts `source` at `target`.
+  Bind-mounts `source` at `target` — makes the contents of `source`
+  visible at `target` as well, like a hardlink for directories.
 
-  Lands in M2.
+  Equivalent to `mount/4` with `flags: [:bind | user_flags]` and an
+  empty `fstype`. The kernel ignores `fstype` for bind mounts; the
+  filesystem is whatever already lives at `source`.
+
+  ## Options
+
+    * `:flags` — extra flag atoms to OR with `:bind`. Useful values:
+      * `:rec` — recursive bind, descending into any submounts
+        underneath `source`.
+      * `:ro` — read-only at the target (effective via a follow-up
+        `remount/2` on Linux ≥ 2.6.26; combining `:bind` and `:ro`
+        on the initial call still creates a rw mount because of
+        a kernel quirk).
+    * `:data` — filesystem-specific options string (rare for
+      bind mounts).
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
   """
-  @spec bind(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
-  def bind(_source, _target, _opts \\ []), do: {:error, :not_yet_implemented}
+  @spec bind(String.t(), String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+  def bind(source, target, opts \\ []) when is_binary(source) and is_binary(target) do
+    flags = [:bind | List.wrap(opts[:flags] || [])]
+    mount(source, target, "", flags: flags, data: opts[:data] || "")
+  end
 
   @doc """
   Remounts the filesystem at `target` with new flags.
 
-  Lands in M2.
+  Equivalent to `mount/4` with `flags: [:remount | user_flags]` and
+  empty `source` + `fstype`. The kernel knows what's mounted there
+  and applies the new flags in place.
+
+  Typical use: making a bind mount read-only after the fact:
+
+      :ok = Linx.Mount.bind(source, target)
+      :ok = Linx.Mount.remount(target, flags: [:ro, :bind])
+
+  The `:bind` flag is required when remounting a bind mount with
+  new flags — without it, the kernel tries to remount the underlying
+  filesystem instead.
+
+  ## Options
+
+    * `:flags` — flag atoms (`:ro`, `:nosuid`, `:nodev`, etc.) to
+      apply. Reuses the catalog from `mount/4`.
+    * `:data` — filesystem-specific options string.
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
   """
-  @spec remount(String.t(), keyword()) :: :ok | {:error, term()}
-  def remount(_target, _opts \\ []), do: {:error, :not_yet_implemented}
+  @spec remount(String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+  def remount(target, opts \\ []) when is_binary(target) do
+    flags = [:remount | List.wrap(opts[:flags] || [])]
+    mount("", target, "", flags: flags, data: opts[:data] || "")
+  end
 
   @doc """
-  Moves the mount at `source` to `target`.
+  Atomically relocates an existing mount from `source` to `target`.
 
-  Lands in M2.
+  Equivalent to `mount/4` with `flags: [:move]`. The mount table
+  entry stays the same — same filesystem, same inode count — only
+  the mount point changes. Subprocesses with the old path open
+  continue to work via the still-valid fd; new lookups go through
+  the new path.
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
+
+  Common errors: `:einval` (source isn't a mount point, or
+  source/target share a propagation peer group — `move` requires
+  unshared propagation on both ends), `:enoent` (target's parent
+  doesn't exist).
   """
-  @spec move(String.t(), String.t()) :: :ok | {:error, term()}
-  def move(_source, _target), do: {:error, :not_yet_implemented}
+  @spec move(String.t(), String.t()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+  def move(source, target) when is_binary(source) and is_binary(target) do
+    mount(source, target, "", flags: [:move])
+  end
 
   @doc """
   Changes the calling thread's root to `new_root`, stashing the old
