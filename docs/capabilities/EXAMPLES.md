@@ -10,12 +10,12 @@ Read-only operations (`read/1`, `supported?/0`) work in a plain
 typically root (or capabilities in the right user namespace) to
 actually apply.
 
-> 🚧 **K0 + K1 shipped, K2 still in flight.** Detection, the
-> constants table, and the read side (`read/1`) are real; the
-> write verbs (`drop_bounding/2`, `set_thread_sets/2`,
-> `set_ambient/2`) are stubs that return
-> `{:error, :not_yet_implemented}`. See `PLAN.md` for the roadmap
-> and `COVERAGE.md` for what's in / out.
+> All three foundation milestones (K0 + K1 + K2) are shipped.
+> Detection, the constants table, the read side (`read/1`), and
+> the agent-side write verbs (`drop_bounding/2`,
+> `set_thread_sets/2`, `set_ambient/2`) are real. See `PLAN.md`
+> for the design notes and `COVERAGE.md` for the ship/defer
+> split.
 
 ## Detecting capability support
 
@@ -151,4 +151,122 @@ IO.inspect(state, label: "child's caps at checkpoint")
 :ok = Linx.Process.proceed(c)
 ```
 
-## (Will land with K2 — write via agent)
+## Dropping caps before `execve`
+
+The motivating composition — strip everything the workload doesn't
+need from the kernel's perspective before it ever starts. Three
+checkpoint-window verbs do the work; all act on the child thread
+in `Linx.Process` while it's parked at `:ready`.
+
+> #### Root needed {: .warning}
+> `prctl(PR_CAPBSET_DROP)` and `capset(2)` need `CAP_SETPCAP` in
+> the caller's effective set. In practice that means the BEAM must
+> run as root for these verbs to work — uniquely among Linx
+> subsystems, "rootless" doesn't help here. See `capabilities(7)`
+> "Privileged file capabilities" for the rationale.
+
+### `drop_bounding/2` — one-way constraint on the bounding set
+
+```elixir
+{:ok, c} = Linx.Process.spawn(argv: ["/usr/sbin/nginx"])
+{:ok, host_pid} = Linx.Process.host_pid(c)
+
+receive do {:linx_process, :ready, _} -> :ok end
+
+# Drop everything except cap_net_bind_service from bounding.
+all = Linx.Capabilities.Constants.all()
+keep = MapSet.new([:cap_net_bind_service])
+drop = MapSet.difference(all, keep)
+
+:ok = Linx.Capabilities.drop_bounding(c, drop)
+:ok = Linx.Process.proceed(c)
+
+receive do {:linx_process, :running} -> :ok end
+
+# Confirm: bounding is exactly `keep`.
+{:ok, state} = Linx.Capabilities.read(host_pid)
+state.bounding
+# => #MapSet<[:cap_net_bind_service]>
+```
+
+Bounding drops are one-way per the kernel (`PR_CAPBSET_DROP`).
+A subsequent `set_thread_sets/2` can't restore a cap that's no
+longer in bounding because root-execve-lift is bounded by it too.
+
+### `set_thread_sets/2` — explicit effective/permitted/inheritable
+
+All three keys are required (no "leave unchanged" semantics — yet).
+The kernel enforces the invariants documented in `capabilities(7)`:
+
+```elixir
+keep = [:cap_net_bind_service]
+
+:ok =
+  Linx.Capabilities.set_thread_sets(c,
+    effective: keep,
+    permitted: keep,
+    inheritable: []
+  )
+```
+
+Violations come back asynchronously:
+
+```elixir
+{:linx_process, :error, 1, :cap_set_thread}
+# errno 1 = EPERM -- typically "tried to add a cap that wasn't in
+# the old :permitted" (capset can only drop, not add)
+```
+
+### `set_ambient/2` — caps that survive `execve` without file caps
+
+Ambient is the modern (Linux 4.3+) way to give an unprivileged
+binary specific capabilities without putting file caps on the
+binary itself.
+
+Each ambient cap must already be in **both** `:permitted` and
+`:inheritable`, so the order matters:
+
+```elixir
+keep = [:cap_net_bind_service]
+
+:ok =
+  Linx.Capabilities.set_thread_sets(c,
+    effective: keep,
+    permitted: keep,
+    inheritable: keep   # ambient requires this
+  )
+
+:ok = Linx.Capabilities.set_ambient(c, keep)
+:ok = Linx.Process.proceed(c)
+```
+
+After `execve`, `:cap_net_bind_service` survives in `:ambient` (and
+gets lifted into `:effective` per the standard ambient rules) —
+even though the binary has no file caps.
+
+## State-machine errors
+
+All three write verbs are only valid in the `:ready` (parked)
+state. Calls in other states fail synchronously without touching
+the agent:
+
+| State | Return |
+|---|---|
+| Pre-`:ready` (`:spawned` not yet processed) | `{:error, :not_ready}` |
+| Post-`proceed/1` (workload running) | `{:error, :running}` |
+| Post-terminal (`:exited`, `:signaled`, or `:aborted`) | `{:error, :already_terminated}` |
+| Unknown atom in `caps` | `{:error, {:bad_capability, atom}}` |
+| Missing key in `set_thread_sets/2` opts | `{:error, {:bad_thread_sets, {:missing, key}}}` |
+
+Kernel-side failures (the workload didn't have the privilege to
+drop a particular cap, etc.) arrive asynchronously on the owner's
+mailbox:
+
+```elixir
+{:linx_process, :error, errno_int, :cap_drop_bounding}
+{:linx_process, :error, errno_int, :cap_set_thread}
+{:linx_process, :error, errno_int, :cap_set_ambient}
+```
+
+The session ends after a cap failure — the child never reaches
+`execve`. No `{:linx_process, :running}` will follow.

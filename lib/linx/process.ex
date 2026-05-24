@@ -614,6 +614,77 @@ defmodule Linx.Process do
     {:reply, :ok, %{state | pending_abort?: true}}
   end
 
+  # K2 -- Linx.Capabilities write verbs. Three commands, all only
+  # valid at the :ready checkpoint (between `:ready` and `proceed/1` /
+  # `abort/1`). State-machine guards mirror what's documented on the
+  # Linx.Capabilities verbs: :already_terminated > :running >
+  # :not_ready > forward.
+  for cmd_arity <- [{:cap_drop_bounding, 2}, {:cap_set_ambient, 2}, {:cap_set_thread, 4}] do
+    {cmd, arity} = cmd_arity
+
+    # Terminal first.
+    def handle_call({unquote(cmd), _} = _call, _from, %{result: result} = state)
+        when result != nil and unquote(arity) == 2 do
+      {:reply, {:error, :already_terminated}, state}
+    end
+
+    def handle_call({unquote(cmd), _, _, _} = _call, _from, %{result: result} = state)
+        when result != nil and unquote(arity) == 4 do
+      {:reply, {:error, :already_terminated}, state}
+    end
+
+    # Past the checkpoint -- the agent is no longer in await_proceed.
+    def handle_call({unquote(cmd), _} = _call, _from, %{running?: true} = state)
+        when unquote(arity) == 2 do
+      {:reply, {:error, :running}, state}
+    end
+
+    def handle_call({unquote(cmd), _, _, _} = _call, _from, %{running?: true} = state)
+        when unquote(arity) == 4 do
+      {:reply, {:error, :running}, state}
+    end
+
+    # Pre-checkpoint -- the agent hasn't gotten to the await_proceed
+    # loop yet, so the command would be dropped or misordered.
+    def handle_call({unquote(cmd), _} = _call, _from, %{child_pid: nil} = state)
+        when unquote(arity) == 2 do
+      {:reply, {:error, :not_ready}, state}
+    end
+
+    def handle_call({unquote(cmd), _, _, _} = _call, _from, %{child_pid: nil} = state)
+        when unquote(arity) == 4 do
+      {:reply, {:error, :not_ready}, state}
+    end
+  end
+
+  # Parked at :ready -- forward each cap command to the agent. The
+  # agent (await_proceed) forwards the same ei frame to the child
+  # over the p2c pipe; the child applies via capset/prctl. Failures
+  # come back asynchronously as {:linx_process, :error, errno,
+  # :cap_*} via the existing pre-exec error path.
+  def handle_call({:cap_drop_bounding, mask} = call, _from, %{port: port} = state)
+      when is_integer(mask) and mask >= 0 do
+    Port.command(port, :erlang.term_to_binary(call))
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:cap_set_ambient, mask} = call, _from, %{port: port} = state)
+      when is_integer(mask) and mask >= 0 do
+    Port.command(port, :erlang.term_to_binary(call))
+    {:reply, :ok, state}
+  end
+
+  def handle_call(
+        {:cap_set_thread, e, p, i} = call,
+        _from,
+        %{port: port} = state
+      )
+      when is_integer(e) and e >= 0 and is_integer(p) and p >= 0 and
+             is_integer(i) and i >= 0 do
+    Port.command(port, :erlang.term_to_binary(call))
+    {:reply, :ok, state}
+  end
+
   # host_pid/1 -- the value is set by handle_info on :spawned, which
   # arrives before :ready. If the caller asks before :spawned has
   # been processed (race-y but possible), they get :not_ready.

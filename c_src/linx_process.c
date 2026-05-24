@@ -74,6 +74,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/capability.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
@@ -83,9 +84,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -104,13 +107,19 @@
 enum stage {
 	STAGE_EXECVE = 1,
 	STAGE_STDIO = 2, /* per-fd plumbing in child: /dev/null, AF_UNIX connect, PTY ioctl */
+	STAGE_CAP_DROP_BOUNDING = 3, /* prctl(PR_CAPBSET_DROP) failed in the child */
+	STAGE_CAP_SET_THREAD = 4,    /* capset(2) failed in the child */
+	STAGE_CAP_SET_AMBIENT = 5,   /* prctl(PR_CAP_AMBIENT_*) failed in the child */
 };
 
 static const char *stage_name(enum stage s)
 {
 	switch (s) {
-	case STAGE_EXECVE: return "execve";
-	case STAGE_STDIO:  return "stdio";
+	case STAGE_EXECVE:           return "execve";
+	case STAGE_STDIO:            return "stdio";
+	case STAGE_CAP_DROP_BOUNDING: return "cap_drop_bounding";
+	case STAGE_CAP_SET_THREAD:   return "cap_set_thread";
+	case STAGE_CAP_SET_AMBIENT:  return "cap_set_ambient";
 	}
 	return "unknown";
 }
@@ -181,23 +190,32 @@ static int write_exact(int fd, const void *buf, size_t count)
 	return 0;
 }
 
-static int write_frame(const void *buf, uint32_t len)
+/* Write one {:packet, 4} frame (4-byte big-endian length + body) to `fd`.
+ * Used both for talking to BEAM on CTL_OUT and for the parent-to-child
+ * checkpoint command stream on p2c (K2 capability commands). */
+static int write_frame_fd(int fd, const void *buf, uint32_t len)
 {
 	uint8_t hdr[4] = {
 		(uint8_t)(len >> 24), (uint8_t)(len >> 16),
 		(uint8_t)(len >> 8),  (uint8_t)len,
 	};
-	if (write_exact(CTL_OUT, hdr, sizeof hdr) < 0)
+	if (write_exact(fd, hdr, sizeof hdr) < 0)
 		return -1;
-	return write_exact(CTL_OUT, buf, len);
+	return write_exact(fd, buf, len);
 }
 
-/* Read one {:packet, 4} frame into `buf`. Returns the message length, or
- * -1 on error/EOF. */
-static ssize_t read_frame(uint8_t *buf, size_t cap)
+static int write_frame(const void *buf, uint32_t len)
+{
+	return write_frame_fd(CTL_OUT, buf, len);
+}
+
+/* Read one {:packet, 4} frame from `fd` into `buf`. Returns the message
+ * length, or -1 on error/EOF. Used both for reading BEAM commands on
+ * CTL_IN and for the child-side read of checkpoint commands on p2c. */
+static ssize_t read_frame_fd(int fd, uint8_t *buf, size_t cap)
 {
 	uint8_t hdr[4];
-	if (read_exact(CTL_IN, hdr, sizeof hdr) < 0)
+	if (read_exact(fd, hdr, sizeof hdr) < 0)
 		return -1;
 	uint32_t len = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
 		       ((uint32_t)hdr[2] << 8)  | (uint32_t)hdr[3];
@@ -205,9 +223,14 @@ static ssize_t read_frame(uint8_t *buf, size_t cap)
 		errno = EMSGSIZE;
 		return -1;
 	}
-	if (read_exact(CTL_IN, buf, len) < 0)
+	if (read_exact(fd, buf, len) < 0)
 		return -1;
 	return (ssize_t)len;
+}
+
+static ssize_t read_frame(uint8_t *buf, size_t cap)
+{
+	return read_frame_fd(CTL_IN, buf, cap);
 }
 
 /* --- emitting outbound events on fd 4 ----------------------------------- */
@@ -801,9 +824,152 @@ static int apply_stdio(struct child_args *ca)
 	return 0;
 }
 
+/* --- K2 capability syscalls (per-thread, called from the child) -------- */
+
+/* Drop every bit set in `mask` from the calling thread's bounding set via
+ * prctl(PR_CAPBSET_DROP). One-way; returns -1 with errno on first failure
+ * (we don't try to continue past a denied drop -- the caller treats this
+ * as a pre-exec failure and exits). */
+static int apply_cap_drop_bounding(uint64_t mask)
+{
+	for (int bit = 0; bit < 64; bit++) {
+		if (mask & ((uint64_t)1 << bit)) {
+			if (prctl(PR_CAPBSET_DROP, (unsigned long)bit, 0UL, 0UL, 0UL) < 0)
+				return -1;
+		}
+	}
+	return 0;
+}
+
+/* Set the calling thread's effective/permitted/inheritable sets via
+ * capset(2). We use the kernel's v3 64-bit layout (two cap_data_struct
+ * entries, low 32 bits in [0], high 32 bits in [1]). syscall(SYS_capset)
+ * is used directly rather than linking libcap. */
+static int apply_cap_set_thread(uint64_t e, uint64_t p, uint64_t i)
+{
+	struct __user_cap_header_struct hdr = {
+		.version = _LINUX_CAPABILITY_VERSION_3,
+		.pid = 0, /* current thread */
+	};
+	struct __user_cap_data_struct data[2];
+	data[0].effective   = (uint32_t)(e & 0xFFFFFFFFu);
+	data[0].permitted   = (uint32_t)(p & 0xFFFFFFFFu);
+	data[0].inheritable = (uint32_t)(i & 0xFFFFFFFFu);
+	data[1].effective   = (uint32_t)(e >> 32);
+	data[1].permitted   = (uint32_t)(p >> 32);
+	data[1].inheritable = (uint32_t)(i >> 32);
+	return (int)syscall(SYS_capset, &hdr, data);
+}
+
+/* Replace the calling thread's ambient set with exactly the caps in
+ * `mask`. The kernel only exposes per-cap RAISE/LOWER plus a global
+ * CLEAR_ALL, so the natural shape is "clear, then raise the desired
+ * caps." Requires Linux 4.3+. */
+static int apply_cap_set_ambient(uint64_t mask)
+{
+	if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0UL, 0UL, 0UL) < 0)
+		return -1;
+	for (int bit = 0; bit < 64; bit++) {
+		if (mask & ((uint64_t)1 << bit)) {
+			if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE,
+				  (unsigned long)bit, 0UL, 0UL) < 0)
+				return -1;
+		}
+	}
+	return 0;
+}
+
+/* Read + dispatch one checkpoint-window command frame from `p2c_r`.
+ * Returns:
+ *    0 -- a cap_* command was applied successfully; caller should loop
+ *         and read the next frame.
+ *    1 -- :proceed received; caller should fall through to apply_stdio
+ *         + execve.
+ *   -1 -- read error or EOF (abort path); caller should _exit(102).
+ *   -2 -- protocol error (unknown command or malformed frame); caller
+ *         should _exit(103).
+ *
+ * On a cap-apply syscall failure, this function child_fail's directly
+ * with the appropriate stage; it does not return. */
+static int child_read_command(int p2c_r, int c2p_w)
+{
+	uint8_t buf[256];
+	ssize_t len = read_frame_fd(p2c_r, buf, sizeof buf);
+	if (len < 0) {
+		/* EOF (errno == 0) means the parent closed p2c without
+		 * sending :proceed -- the abort path. Real read errors
+		 * land here too; both should _exit(102). */
+		return -1;
+	}
+
+	int idx = 0, version;
+	if (ei_decode_version((const char *)buf, &idx, &version) < 0)
+		return -2;
+
+	int type, size;
+	if (ei_get_type((const char *)buf, &idx, &type, &size) < 0)
+		return -2;
+
+	/* Bare :proceed atom -- the sentinel that ends the loop. */
+	if (type == ERL_SMALL_ATOM_UTF8_EXT || type == ERL_ATOM_UTF8_EXT ||
+	    type == ERL_ATOM_EXT || type == ERL_SMALL_ATOM_EXT) {
+		char atom[MAXATOMLEN];
+		if (ei_decode_atom((const char *)buf, &idx, atom) < 0)
+			return -2;
+		if (strcmp(atom, "proceed") == 0)
+			return 1;
+		return -2;
+	}
+
+	/* Tuple commands: {:cap_drop_bounding, mask},
+	 * {:cap_set_thread, e, p, i}, {:cap_set_ambient, mask}. */
+	if (type != ERL_SMALL_TUPLE_EXT && type != ERL_LARGE_TUPLE_EXT)
+		return -2;
+
+	int arity;
+	if (ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0)
+		return -2;
+
+	char tag[MAXATOMLEN];
+	if (ei_decode_atom((const char *)buf, &idx, tag) < 0)
+		return -2;
+
+	if (strcmp(tag, "cap_drop_bounding") == 0 && arity == 2) {
+		unsigned long long mask;
+		if (ei_decode_ulonglong((const char *)buf, &idx, &mask) < 0)
+			return -2;
+		if (apply_cap_drop_bounding((uint64_t)mask) < 0)
+			child_fail(c2p_w, errno, STAGE_CAP_DROP_BOUNDING);
+		return 0;
+	}
+
+	if (strcmp(tag, "cap_set_thread") == 0 && arity == 4) {
+		unsigned long long e, p, i;
+		if (ei_decode_ulonglong((const char *)buf, &idx, &e) < 0 ||
+		    ei_decode_ulonglong((const char *)buf, &idx, &p) < 0 ||
+		    ei_decode_ulonglong((const char *)buf, &idx, &i) < 0)
+			return -2;
+		if (apply_cap_set_thread((uint64_t)e, (uint64_t)p, (uint64_t)i) < 0)
+			child_fail(c2p_w, errno, STAGE_CAP_SET_THREAD);
+		return 0;
+	}
+
+	if (strcmp(tag, "cap_set_ambient") == 0 && arity == 2) {
+		unsigned long long mask;
+		if (ei_decode_ulonglong((const char *)buf, &idx, &mask) < 0)
+			return -2;
+		if (apply_cap_set_ambient((uint64_t)mask) < 0)
+			child_fail(c2p_w, errno, STAGE_CAP_SET_AMBIENT);
+		return 0;
+	}
+
+	return -2;
+}
+
 /* Inside the cloned child: announce :ready (with our pidns-internal pid),
- * wait for :proceed, plumb stdio, exec. Any pre-exec failure is reported
- * as 'E' on the c2p pipe and the child exits non-zero. */
+ * loop on checkpoint commands until :proceed, plumb stdio, exec. Any
+ * pre-exec failure is reported as 'E' on the c2p pipe and the child exits
+ * non-zero. */
 static int child_fn(void *arg)
 {
 	struct child_args *ca = arg;
@@ -813,7 +979,7 @@ static int child_fn(void *arg)
 	 * c2p[0] (read end) and p2c[1] (write end) -- and unless we close
 	 * them here, closing them in the parent leaves the kernel still
 	 * counting one writer (us) on p2c, so the child's read on p2c_r
-	 * would never see EOF if the parent abandons sending 'P'. That
+	 * would never see EOF if the parent abandons the session. That
 	 * matters for the :abort path. (The fork() branch in main does
 	 * these closes explicitly before calling child_fn; here we
 	 * centralise them so both paths converge on the same shape.) */
@@ -831,12 +997,16 @@ static int child_fn(void *arg)
 	if (write_exact(ca->c2p_w, ready, sizeof ready) < 0)
 		_exit(101);
 
-	/* Wait for :proceed -- a single 'P' byte from the parent. */
-	uint8_t cmd;
-	if (read_exact(ca->p2c_r, &cmd, 1) < 0)
-		_exit(102);
-	if (cmd != 'P')
-		_exit(103);
+	/* Loop on checkpoint-window commands. {:cap_*, _} tuples apply
+	 * per-thread cap syscalls (K2); :proceed breaks the loop. A
+	 * closed p2c (EOF) is the :abort path -- exit 102. */
+	for (;;) {
+		int r = child_read_command(ca->p2c_r, ca->c2p_w);
+		if (r == 1) break;        /* :proceed */
+		if (r == 0) continue;     /* cap_* applied, next command */
+		if (r == -1) _exit(102);  /* EOF / abort */
+		_exit(103);               /* protocol error */
+	}
 
 	/* Stdio plumbing (P4): dup2 /dev/null or an AF_UNIX socket onto
 	 * 0/1/2, or set up the PTY slave as a controlling tty. */
@@ -889,25 +1059,91 @@ static int await_exec_outcome(int c2p_r)
 }
 
 /* Block on the BEAM control channel until :proceed (or :abort) arrives,
- * handling any pre-proceed commands that are valid during the checkpoint
- * window (currently just {:pty_winsize, _} for callers wanting to seed
- * the workload's PTY size before exec). {:signal, _} and {:pty_in, _}
- * are post-running-only and treated as protocol errors if they show up
- * here.
+ * handling pre-proceed commands valid during the checkpoint window:
  *
- * `pty_master` is the agent's master fd in PTY mode (or -1 otherwise);
- * passed in so the winsize handler can apply the ioctl in place.
+ *   * {:pty_winsize, _} -- applied in-agent on `pty_master` via TIOCSWINSZ.
+ *     The child doesn't need to know.
+ *
+ *   * {:cap_drop_bounding, _}, {:cap_set_thread, _, _, _},
+ *     {:cap_set_ambient, _} -- K2 capability commands. The agent can't
+ *     apply these on the child's behalf (capset/prctl are per-thread),
+ *     so we forward the frame verbatim to `p2c_w` and the child applies
+ *     it before execve.
+ *
+ *   * :proceed -- forwarded as a frame to `p2c_w` (the sentinel that
+ *     ends the child's checkpoint-command loop). Returns 0.
+ *
+ *   * :abort -- caller closes `p2c_w` so the child sees EOF and _exits.
+ *     Returns 1.
+ *
+ * `pty_master` is the agent's master fd in PTY mode (or -1 otherwise).
+ * `p2c_w` is the write end of the agent->child unblock pipe.
+ * `c2p_r` is the read end of the child->agent status pipe; we poll it
+ * here so a cap-command failure in the child surfaces as a
+ * {:linx_process, :error, errno, stage} on the BEAM even though the
+ * checkpoint hasn't proceeded yet. (Pre-K2, c2p was only consumed by
+ * await_exec_outcome after :proceed.)
+ *
+ * {:signal, _} and {:pty_in, _} are post-running-only and treated as
+ * protocol errors if they show up here.
  *
  * Returns:
- *   0   -- :proceed received; caller releases the child past the
- *          checkpoint by writing 'P' to the unblock pipe.
- *   1   -- :abort received; caller closes the unblock pipe so the child
- *          sees EOF and _exits without execve'ing; agent then reaps and
- *          emits {:status, :aborted, child_pid}.
- *  -1   -- read/parse error or unknown command. */
-static int await_proceed(int pty_master)
+ *   0   -- :proceed forwarded to child; caller closes p2c_w and waits
+ *          for execve outcome on c2p.
+ *   1   -- :abort received; caller closes p2c_w to deliver EOF to the
+ *          child, reaps, and emits {:status, :aborted, child_pid}.
+ *  -1   -- read/parse error, unknown command, or child failure during
+ *          a cap command (emit_error already called for that case). */
+static int await_proceed(int pty_master, int p2c_w, int c2p_r)
 {
 	for (;;) {
+		/* Multiplex BEAM commands on CTL_IN with child failure
+		 * notifications on c2p_r. The latter is only relevant
+		 * during the K2 cap-command window -- a cap_* command
+		 * that the child can't apply (EPERM on capset, etc.)
+		 * lands here as 'E' + payload, ahead of any :proceed. */
+		struct pollfd pfds[2] = {
+			{ .fd = CTL_IN, .events = POLLIN },
+			{ .fd = c2p_r,  .events = POLLIN },
+		};
+
+		int rc = poll(pfds, 2, -1);
+		if (rc < 0) {
+			if (errno == EINTR)
+				continue;
+			return -1;
+		}
+
+		if (pfds[1].revents & (POLLIN | POLLHUP)) {
+			/* Child wrote 'E' + payload (or unexpectedly
+			 * closed). Drain the error and surface it; main
+			 * cleans up. */
+			uint8_t tag;
+			ssize_t n = read(c2p_r, &tag, 1);
+			if (n <= 0)
+				return -1;
+			if (tag != 'E')
+				return -1;
+			uint8_t payload[5];
+			if (read_exact(c2p_r, payload, sizeof payload) < 0)
+				return -1;
+			int err = ((int)payload[0] << 24) |
+				  ((int)payload[1] << 16) |
+				  ((int)payload[2] << 8)  |
+				  (int)payload[3];
+			enum stage s = (enum stage)payload[4];
+			emit_error(err, stage_name(s));
+			return -1;
+		}
+
+		if (!(pfds[0].revents & POLLIN)) {
+			/* CTL_IN closed or errored -- the BEAM port is
+			 * gone; treat as -1 (main cleans up). */
+			if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL))
+				return -1;
+			continue;
+		}
+
 		uint8_t buf[256];
 		ssize_t len = read_frame(buf, sizeof buf);
 		if (len < 0)
@@ -926,26 +1162,46 @@ static int await_proceed(int pty_master)
 			char atom[MAXATOMLEN];
 			if (ei_decode_atom((const char *)buf, &idx, atom) < 0)
 				return -1;
-			if (strcmp(atom, "proceed") == 0)
+			if (strcmp(atom, "proceed") == 0) {
+				/* Forward the :proceed frame to the child as
+				 * the sentinel that ends its command loop. */
+				if (write_frame_fd(p2c_w, buf, (uint32_t)len) < 0)
+					return -1;
 				return 0;
+			}
 			if (strcmp(atom, "abort") == 0)
 				return 1;
 			return -1;
 		}
 
-		/* Tuple commands. Only {:pty_winsize, _} is valid here. */
+		/* Tuple commands valid at the checkpoint:
+		 *   {:pty_winsize, _}             -- applied in-agent
+		 *   {:cap_drop_bounding, _}       -- forwarded to child
+		 *   {:cap_set_thread, _, _, _}    -- forwarded to child
+		 *   {:cap_set_ambient, _}         -- forwarded to child */
 		if (type != ERL_SMALL_TUPLE_EXT && type != ERL_LARGE_TUPLE_EXT)
 			return -1;
 
 		int arity;
-		if (ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0 ||
-		    arity != 2)
+		if (ei_decode_tuple_header((const char *)buf, &idx, &arity) < 0)
 			return -1;
 
 		char tag[MAXATOMLEN];
 		if (ei_decode_atom((const char *)buf, &idx, tag) < 0)
 			return -1;
-		if (strcmp(tag, "pty_winsize") != 0)
+
+		/* Cap commands -- forward the frame verbatim. The child
+		 * decodes and applies; failures come back on c2p as 'E'
+		 * + payload (handled by await_exec_outcome later). */
+		if ((strcmp(tag, "cap_drop_bounding") == 0 && arity == 2) ||
+		    (strcmp(tag, "cap_set_thread")    == 0 && arity == 4) ||
+		    (strcmp(tag, "cap_set_ambient")   == 0 && arity == 2)) {
+			if (write_frame_fd(p2c_w, buf, (uint32_t)len) < 0)
+				return -1;
+			continue;
+		}
+
+		if (strcmp(tag, "pty_winsize") != 0 || arity != 2)
 			return -1;
 
 		int tarity;
@@ -1431,24 +1687,25 @@ int main(void)
 			 ((long)ready_pid[2] << 8) | (long)ready_pid[3];
 	emit_status_int("ready", child_pid);
 
-	/* Wait for :proceed (or :abort) from the BEAM. On :proceed we write
-	 * 'P' to the unblock pipe and the child execve's; on :abort we
-	 * close the unblock pipe so the child sees EOF and _exits without
-	 * execve'ing, then we reap and emit {:status, :aborted, ...}.
+	/* Wait for :proceed (or :abort) from the BEAM. await_proceed
+	 * forwards both :proceed and any K2 cap_* commands to the child
+	 * via p2c[1] as ei frames. On :abort we close p2c[1] so the
+	 * child sees EOF and _exits without execve'ing, then we reap and
+	 * emit {:status, :aborted, ...}.
 	 *
 	 * A negative return here is most commonly EOF on fd 3 -- the BEAM
 	 * port closing because its owning GenServer died, which is a routine
 	 * cleanup path (not an error worth a stderr line). */
-	int decision = await_proceed(pty_master);
+	int decision = await_proceed(pty_master, p2c[1], c2p[0]);
 	if (decision < 0) {
 		free_request(&req);
 		return 1;
 	}
 
 	if (decision == 1) {
-		/* :abort -- the child is parked reading p2c_r. Closing our
-		 * write end without sending 'P' gives it EOF; child _exits
-		 * 102 (see child_fn: the read_exact branch). */
+		/* :abort -- the child is parked reading p2c[0]. Closing our
+		 * write end without sending a :proceed frame gives it EOF;
+		 * child _exits 102 (see child_fn / child_read_command). */
 		close(p2c[1]);
 		close(c2p[0]);
 
@@ -1470,13 +1727,9 @@ int main(void)
 		return 0;
 	}
 
-	uint8_t go = 'P';
-	if (write_exact(p2c[1], &go, 1) < 0) {
-		fprintf(stderr, "linx_process: write proceed to child: %s\n",
-			strerror(errno));
-		free_request(&req);
-		return 4;
-	}
+	/* :proceed was forwarded inside await_proceed. Close our write end
+	 * so the child won't block on a subsequent read if anything else
+	 * shows up on fd 3 -- it will execve from where it is. */
 	close(p2c[1]);
 
 	/* The child either execve's successfully (the c2p pipe closes on

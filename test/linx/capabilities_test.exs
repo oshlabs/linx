@@ -402,22 +402,393 @@ defmodule Linx.CapabilitiesTest do
     end
   end
 
-  describe "K2 stubs still return :not_yet_implemented" do
-    # K2 verbs (write side) haven't shipped yet.
+  describe "K2 write verbs — input validation" do
+    # These exercise the caller-side validation paths -- no
+    # GenServer.call is made (the {:bad_capability, _} /
+    # {:bad_thread_sets, _} short-circuit comes back from the
+    # public verb before any session interaction), so we can use
+    # an arbitrary pid as the session arg.
 
-    test "drop_bounding/2" do
-      assert Capabilities.drop_bounding(self(), [:cap_chown]) ==
-               {:error, :not_yet_implemented}
+    test "drop_bounding/2 rejects unknown cap atoms" do
+      assert {:error, {:bad_capability, :cap_made_up}} =
+               Capabilities.drop_bounding(self(), [:cap_chown, :cap_made_up])
     end
 
-    test "set_thread_sets/2" do
-      assert Capabilities.set_thread_sets(self(), effective: [:cap_chown]) ==
-               {:error, :not_yet_implemented}
+    test "drop_bounding/2 rejects a non-atom in the caps list" do
+      assert {:error, {:bad_capability, 12}} =
+               Capabilities.drop_bounding(self(), [12])
     end
 
-    test "set_ambient/2" do
-      assert Capabilities.set_ambient(self(), [:cap_chown]) ==
-               {:error, :not_yet_implemented}
+    test "set_ambient/2 rejects unknown cap atoms" do
+      assert {:error, {:bad_capability, :cap_nonsense}} =
+               Capabilities.set_ambient(self(), [:cap_nonsense])
+    end
+
+    test "set_thread_sets/2 rejects a missing :effective key" do
+      assert {:error, {:bad_thread_sets, {:missing, :effective}}} =
+               Capabilities.set_thread_sets(self(),
+                 permitted: [],
+                 inheritable: []
+               )
+    end
+
+    test "set_thread_sets/2 rejects a missing :permitted key" do
+      assert {:error, {:bad_thread_sets, {:missing, :permitted}}} =
+               Capabilities.set_thread_sets(self(),
+                 effective: [],
+                 inheritable: []
+               )
+    end
+
+    test "set_thread_sets/2 rejects a missing :inheritable key" do
+      assert {:error, {:bad_thread_sets, {:missing, :inheritable}}} =
+               Capabilities.set_thread_sets(self(),
+                 effective: [],
+                 permitted: []
+               )
+    end
+
+    test "set_thread_sets/2 rejects an unknown cap in :effective" do
+      assert {:error, {:bad_capability, :cap_zzz}} =
+               Capabilities.set_thread_sets(self(),
+                 effective: [:cap_zzz],
+                 permitted: [],
+                 inheritable: []
+               )
+    end
+
+    test "set_thread_sets/2 rejects an unknown cap in :inheritable" do
+      assert {:error, {:bad_capability, :cap_zzz}} =
+               Capabilities.set_thread_sets(self(),
+                 effective: [],
+                 permitted: [],
+                 inheritable: [:cap_zzz]
+               )
+    end
+  end
+
+  describe "K2 write verbs — state-machine guards (real sessions)" do
+    # These exercise the actual handle_call clauses in Linx.Process
+    # by inducing each state with /bin/sleep and /bin/true. No root
+    # needed -- the workloads don't use any namespaces.
+
+    alias Linx.Process, as: P
+
+    test "post-execve: drop_bounding returns :running" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      assert {:error, :running} =
+               Capabilities.drop_bounding(session, [:cap_chown])
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "post-execve: set_thread_sets returns :running" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      assert {:error, :running} =
+               Capabilities.set_thread_sets(session,
+                 effective: [],
+                 permitted: [],
+                 inheritable: []
+               )
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "post-execve: set_ambient returns :running" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      assert {:error, :running} = Capabilities.set_ambient(session, [:cap_chown])
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "post-terminal: drop_bounding returns :already_terminated" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert {:error, :already_terminated} =
+               Capabilities.drop_bounding(session, [:cap_chown])
+    end
+
+    test "post-terminal: set_thread_sets returns :already_terminated" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert {:error, :already_terminated} =
+               Capabilities.set_thread_sets(session,
+                 effective: [],
+                 permitted: [],
+                 inheritable: []
+               )
+    end
+
+    test "post-terminal: set_ambient returns :already_terminated" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert {:error, :already_terminated} =
+               Capabilities.set_ambient(session, [:cap_chown])
+    end
+  end
+
+  describe "K2 — actually applying caps on a real workload" do
+    @describetag :integration
+    # @describetag (not @moduletag) so the integration tag stays
+    # scoped to this block. PR_CAPBSET_DROP / capset need
+    # CAP_SETPCAP in :effective of the calling thread, which means
+    # these tests need root (./sudotest.sh).
+
+    alias Linx.Process, as: P
+
+    test "drop_bounding/2 removes the cap from CapBnd before execve" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      {:ok, host_pid} = P.host_pid(session)
+
+      # Confirm starting state has the cap (root + no drops -> full).
+      {:ok, before} = Capabilities.read(host_pid)
+      assert MapSet.member?(before.bounding, :cap_sys_admin)
+
+      :ok = Capabilities.drop_bounding(session, [:cap_sys_admin])
+
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      {:ok, after_state} = Capabilities.read(host_pid)
+      refute MapSet.member?(after_state.bounding, :cap_sys_admin)
+
+      # Untouched sets are still full.
+      assert MapSet.member?(after_state.bounding, :cap_chown)
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "drop_bounding/2 with multiple caps drops all of them at once" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      {:ok, host_pid} = P.host_pid(session)
+
+      drop = [:cap_sys_admin, :cap_sys_module, :cap_dac_override]
+      :ok = Capabilities.drop_bounding(session, drop)
+
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      {:ok, after_state} = Capabilities.read(host_pid)
+
+      for cap <- drop do
+        refute MapSet.member?(after_state.bounding, cap),
+               "expected #{inspect(cap)} to be dropped from bounding"
+      end
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "set_thread_sets/2 reduces effective/permitted/inheritable" do
+      # Wrinkle: root (euid 0) running an unprivileged binary like
+      # /bin/sleep triggers the "root execve lift" -- effective and
+      # permitted get raised back to whatever's in the bounding
+      # set (capabilities(7), "Capabilities and execution of
+      # programs by root"). So set_thread_sets's effect on those
+      # two sets is invisible post-execve unless we also bound
+      # them via drop_bounding. We do both here -- this test
+      # covers the composition of set_thread_sets + drop_bounding
+      # against root-lift.
+
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      {:ok, host_pid} = P.host_pid(session)
+
+      keep = [:cap_chown, :cap_net_bind_service]
+      drop = MapSet.difference(Constants.all(), MapSet.new(keep))
+
+      :ok = Capabilities.drop_bounding(session, MapSet.to_list(drop))
+
+      :ok =
+        Capabilities.set_thread_sets(session,
+          effective: keep,
+          permitted: keep,
+          inheritable: []
+        )
+
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      {:ok, state} = Capabilities.read(host_pid)
+
+      # bounding shrank to exactly `keep`.
+      assert state.bounding == MapSet.new(keep)
+      # effective/permitted got root-lifted up to bounding (=keep).
+      assert state.effective == MapSet.new(keep)
+      assert state.permitted == MapSet.new(keep)
+      # inheritable stays where we set it (root-lift doesn't touch it).
+      assert state.inheritable == MapSet.new()
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "set_ambient/2 raises a cap into the ambient set" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      {:ok, host_pid} = P.host_pid(session)
+
+      keep = [:cap_net_bind_service]
+
+      # Ambient requires the cap to be in both :permitted and
+      # :inheritable, so we have to set those first via thread sets.
+      :ok =
+        Capabilities.set_thread_sets(session,
+          effective: keep,
+          permitted: keep,
+          inheritable: keep
+        )
+
+      :ok = Capabilities.set_ambient(session, keep)
+
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      {:ok, state} = Capabilities.read(host_pid)
+
+      assert state.ambient == MapSet.new(keep)
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "drop_bounding/2 is irreversible across execve (root-lift respects bounding)" do
+      # drop_bounding doesn't immediately strip caps from
+      # :permitted -- bounding is a *future* ceiling, not a live
+      # mask on the running thread. What it *does* prevent is
+      # the root-lift on execve from restoring the dropped cap.
+      # That's what we verify here: drop bounding, drop the cap
+      # from permitted too (so the live thread doesn't carry it),
+      # proceed -- and the post-execve thread *still* can't have
+      # the cap, even though the binary runs as root.
+
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      {:ok, host_pid} = P.host_pid(session)
+
+      :ok = Capabilities.drop_bounding(session, [:cap_sys_admin])
+
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      {:ok, state} = Capabilities.read(host_pid)
+
+      # Bounding stays dropped (as in the basic drop test).
+      refute MapSet.member?(state.bounding, :cap_sys_admin)
+
+      # Even with root-lift on execve, the lift is masked by
+      # bounding -- so cap_sys_admin can never be in :effective
+      # or :permitted again on this thread (or any descendant).
+      refute MapSet.member?(state.effective, :cap_sys_admin)
+      refute MapSet.member?(state.permitted, :cap_sys_admin)
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "capset can't add a cap that's not in current permitted" do
+      # The kernel's capset rule: the new :permitted must be a
+      # subset of the old :permitted. Verifies the agent surfaces
+      # an EPERM-style failure cleanly when the BEAM tries to
+      # re-add a previously dropped cap.
+
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      # Drop everything from permitted.
+      :ok =
+        Capabilities.set_thread_sets(session,
+          effective: [],
+          permitted: [],
+          inheritable: []
+        )
+
+      # Now try to add cap_chown back. Old permitted is empty;
+      # new permitted ⊆ old permitted means new permitted must
+      # also be empty. capset returns EPERM.
+      :ok =
+        Capabilities.set_thread_sets(session,
+          effective: [:cap_chown],
+          permitted: [:cap_chown],
+          inheritable: []
+        )
+
+      assert_receive {:linx_process, :error, _errno, :cap_set_thread}, 2_000
+    end
+
+    test "set_ambient/2 fails cleanly when the cap isn't in permitted+inheritable" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      # Strip permitted/inheritable to nothing, then try to raise
+      # an ambient cap. Per capabilities(7), the kernel requires
+      # the cap to be in both :permitted and :inheritable before
+      # raising into :ambient; this should EPERM.
+      :ok =
+        Capabilities.set_thread_sets(session,
+          effective: [],
+          permitted: [],
+          inheritable: []
+        )
+
+      :ok = Capabilities.set_ambient(session, [:cap_chown])
+
+      assert_receive {:linx_process, :error, _errno, :cap_set_ambient}, 2_000
+    end
+
+    test "session terminates cleanly after a cap_* failure path" do
+      # When the child fails during a cap command, the agent
+      # surfaces the error and the session winds down. The BEAM
+      # owner gets the :error message and (eventually, when the
+      # port closes) any other terminal it needs.
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok =
+        Capabilities.set_thread_sets(session,
+          effective: [],
+          permitted: [],
+          inheritable: []
+        )
+
+      :ok =
+        Capabilities.set_thread_sets(session,
+          effective: [:cap_chown],
+          permitted: [:cap_chown],
+          inheritable: []
+        )
+
+      assert_receive {:linx_process, :error, _errno, :cap_set_thread}, 2_000
+
+      # No :running follows -- the child died before execve.
+      refute_receive {:linx_process, :running}, 200
     end
   end
 end

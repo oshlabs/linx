@@ -71,13 +71,15 @@ defmodule Linx.Capabilities do
 
   ## Status
 
-  Two of three foundation milestones shipped. K0 + K1 deliver
-  `supported?/0`, the constants table
+  All three foundation milestones (K0 + K1 + K2) shipped. The
+  module exposes `supported?/0`, the constants table
   (`Linx.Capabilities.Constants`), `%Linx.Capabilities.State{}`,
-  `%Linx.Capabilities.Error{}`, and `read/1`. The write verbs
-  (`drop_bounding/2`, `set_thread_sets/2`, `set_ambient/2`) land
-  in K2. See `docs/capabilities/PLAN.md` for the full plan,
-  `COVERAGE.md` for the ship/defer split.
+  `%Linx.Capabilities.Error{}`, the read verb `read/1`, and the
+  three checkpoint-window write verbs `drop_bounding/2`,
+  `set_thread_sets/2`, `set_ambient/2`. See
+  `docs/capabilities/PLAN.md` for the design notes,
+  `COVERAGE.md` for the ship/defer split, and `EXAMPLES.md`
+  for end-to-end recipes.
   """
 
   require Logger
@@ -244,59 +246,162 @@ defmodule Linx.Capabilities do
   end
 
   @doc """
-  Drops capabilities from the calling thread's bounding set on a
+  Drops capabilities from the child thread's bounding set on a
   parked `Linx.Process` session.
 
   `caps` is a `MapSet` or list of `:cap_*` atoms. The operation is
-  one-way (`prctl(PR_CAPBSET_DROP)`); the kernel will refuse to
-  re-add a dropped cap via any subsequent verb on the same thread.
+  one-way (`prctl(PR_CAPBSET_DROP)`) — the kernel will refuse to
+  re-add a dropped cap via any subsequent verb on the same thread,
+  even via `set_thread_sets/2`.
 
-  Only valid in the `:ready` state — same rules as
-  `Linx.Process.proceed/1`. Returns `{:error, :running}` post-execve,
-  `{:error, :not_ready}` pre-checkpoint,
-  `{:error, :already_terminated}` post.
+  ## Errors
 
-  Lands with K2 — currently returns `{:error, :not_yet_implemented}`.
+    * `{:error, :not_ready}` — session not yet at the checkpoint.
+    * `{:error, :running}` — past `proceed/1`, the child is in
+      `execve`'d land.
+    * `{:error, :already_terminated}` — session has ended.
+    * `{:error, {:bad_capability, atom}}` — `caps` contains an
+      atom Linx doesn't recognise. Validation happens before
+      anything is shipped to the agent.
+
+  Kernel-level failures (the workload didn't have the required
+  privilege to drop a particular cap, etc.) arrive asynchronously
+  as `{:linx_process, :error, errno, :cap_drop_bounding}` on the
+  session's owner mailbox, the same shape as other pre-`execve`
+  failures.
+
+  ## Example
+
+      :ok = Linx.Capabilities.drop_bounding(session,
+        [:cap_sys_admin, :cap_sys_module, :cap_dac_override])
   """
   @spec drop_bounding(Linx.Process.t(), Enumerable.t()) ::
-          :ok | {:error, term()}
-  def drop_bounding(session, _caps) when is_pid(session) do
-    {:error, :not_yet_implemented}
+          :ok
+          | {:error,
+             :not_ready
+             | :running
+             | :already_terminated
+             | {:bad_capability, term()}}
+  def drop_bounding(session, caps) when is_pid(session) do
+    with {:ok, mask} <- caps_to_mask(caps) do
+      GenServer.call(session, {:cap_drop_bounding, mask})
+    end
   end
 
   @doc """
-  Sets the calling thread's effective, permitted, and inheritable
+  Sets the child thread's effective, permitted, and inheritable
   capability sets on a parked `Linx.Process` session.
 
-  `opts` is a keyword list; any subset of `:effective`,
-  `:permitted`, `:inheritable` may be supplied (omitted sets are
-  left unchanged). Each value is a `MapSet` or list of `:cap_*`
-  atoms.
+  `opts` is a keyword list with **all three** required keys:
+  `:effective`, `:permitted`, `:inheritable`. Each value is a
+  `MapSet` or list of `:cap_*` atoms (use `[]` or `MapSet.new()`
+  to clear a set).
 
   Implemented via `capset(2)` in the agent. The kernel enforces the
   invariants documented in `capabilities(7)` — notably that
   `:effective ⊆ :permitted` and `:inheritable ⊆ :permitted ∪ I_old`.
+  Violations arrive as `{:linx_process, :error, :einval,
+  :cap_set_thread}` on the owner mailbox.
 
-  Lands with K2 — currently returns `{:error, :not_yet_implemented}`.
+  > #### "Leave unchanged" not yet supported {: .info}
+  > A future revision will accept missing keys as "leave this set
+  > as-is" (the agent would read its own `/proc/self/status` to
+  > fill in). For now, callers that want one set unchanged must
+  > read it first via `Linx.Capabilities.read(host_pid)` and pass
+  > it back through here.
+
+  ## Errors
+
+  Same shape as `drop_bounding/2`. Additional caller-side errors:
+
+    * `{:error, {:bad_thread_sets, {:missing, key}}}` — one of
+      `:effective`, `:permitted`, `:inheritable` was omitted.
+    * `{:error, {:bad_capability, atom}}` — any of the three
+      values contained an unknown cap atom.
   """
-  @spec set_thread_sets(Linx.Process.t(), keyword()) :: :ok | {:error, term()}
+  @spec set_thread_sets(Linx.Process.t(), keyword()) ::
+          :ok
+          | {:error,
+             :not_ready
+             | :running
+             | :already_terminated
+             | {:bad_capability, term()}
+             | {:bad_thread_sets, {:missing, atom()}}}
   def set_thread_sets(session, opts) when is_pid(session) and is_list(opts) do
-    {:error, :not_yet_implemented}
+    with {:ok, e} <- fetch_set(opts, :effective),
+         {:ok, p} <- fetch_set(opts, :permitted),
+         {:ok, i} <- fetch_set(opts, :inheritable),
+         {:ok, e_mask} <- caps_to_mask(e),
+         {:ok, p_mask} <- caps_to_mask(p),
+         {:ok, i_mask} <- caps_to_mask(i) do
+      GenServer.call(session, {:cap_set_thread, e_mask, p_mask, i_mask})
+    end
   end
 
   @doc """
-  Sets the calling thread's ambient capability set on a parked
+  Sets the child thread's ambient capability set on a parked
   `Linx.Process` session.
 
   `caps` is a `MapSet` or list of `:cap_*` atoms. The ambient set
-  is *replaced* (the kernel only exposes per-cap RAISE and a global
-  CLEAR_ALL, so this is the natural shape — internally we
-  `PR_CAP_AMBIENT_CLEAR_ALL` then `PR_CAP_AMBIENT_RAISE` each cap).
+  is *replaced* (the kernel only exposes per-cap RAISE/LOWER plus
+  a global CLEAR_ALL, so the natural shape is "clear then raise
+  each requested cap").
 
-  Lands with K2 — currently returns `{:error, :not_yet_implemented}`.
+  Ambient caps are the mechanism that lets a non-root, no-file-cap
+  binary still inherit capabilities across `execve` — useful when
+  you want a workload to start with e.g. `:cap_net_bind_service`
+  but don't want to put file caps on the binary or run it as root.
+  See `capabilities(7)` "Ambient capabilities" for the full rules
+  (notably: every ambient cap must also be in the permitted and
+  inheritable sets, or the raise fails).
+
+  ## Errors
+
+  Same shape as `drop_bounding/2`. Kernel failures (a raise that
+  fails because the cap isn't in permitted+inheritable, etc.)
+  arrive as `{:linx_process, :error, errno, :cap_set_ambient}`.
   """
-  @spec set_ambient(Linx.Process.t(), Enumerable.t()) :: :ok | {:error, term()}
-  def set_ambient(session, _caps) when is_pid(session) do
-    {:error, :not_yet_implemented}
+  @spec set_ambient(Linx.Process.t(), Enumerable.t()) ::
+          :ok
+          | {:error,
+             :not_ready
+             | :running
+             | :already_terminated
+             | {:bad_capability, term()}}
+  def set_ambient(session, caps) when is_pid(session) do
+    with {:ok, mask} <- caps_to_mask(caps) do
+      GenServer.call(session, {:cap_set_ambient, mask})
+    end
+  end
+
+  # Validate an Enumerable of cap atoms and convert it to a u64 mask
+  # for the wire. Any unknown atom (or non-atom) short-circuits with
+  # a structured error -- Constants.to_bits/1 itself raises on
+  # unknown atoms, but we want a clean tagged tuple at this layer
+  # rather than letting a typo blow up a GenServer.call.
+  defp caps_to_mask(caps) do
+    Enum.reduce_while(caps, 0, fn cap, acc ->
+      cond do
+        not is_atom(cap) ->
+          {:halt, {:error, {:bad_capability, cap}}}
+
+        is_nil(Constants.to_bit(cap)) ->
+          {:halt, {:error, {:bad_capability, cap}}}
+
+        true ->
+          {:cont, acc ||| 1 <<< Constants.to_bit(cap)}
+      end
+    end)
+    |> case do
+      mask when is_integer(mask) -> {:ok, mask}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp fetch_set(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, {:bad_thread_sets, {:missing, key}}}
+    end
   end
 end
