@@ -64,7 +64,11 @@ defmodule Linx.MixProject do
         "docs/mount/EXAMPLES.md",
         "docs/mount/PLAN.md",
         "docs/mount/COVERAGE.md",
-        "docs/mount/REFERENCES.md"
+        "docs/mount/REFERENCES.md",
+        "docs/user/EXAMPLES.md",
+        "docs/user/PLAN.md",
+        "docs/user/COVERAGE.md",
+        "docs/user/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -98,6 +102,12 @@ defmodule Linx.MixProject do
           "docs/mount/COVERAGE.md",
           "docs/mount/REFERENCES.md"
         ],
+        "User — guides": ["docs/user/EXAMPLES.md"],
+        "User — design": [
+          "docs/user/PLAN.md",
+          "docs/user/COVERAGE.md",
+          "docs/user/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -125,6 +135,11 @@ defmodule Linx.MixProject do
           Linx.Mount.Entry,
           Linx.Mount.Error,
           Linx.Mount.Native
+        ],
+        User: [
+          Linx.User,
+          Linx.User.Error,
+          Linx.User.Map
         ],
         "Netlink core": [
           Linx.Netlink,

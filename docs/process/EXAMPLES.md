@@ -170,6 +170,37 @@ iex> P.wait(child)
 {:ok, {:signaled, 9}}
 ```
 
+## Getting the workload's host pid
+
+`Linx.Process` delivers two different pid views via lifecycle events.
+
+The `:ready` event carries the **child's own** view of its pid —
+which is `1` when `:pid` is in the namespaces list (the child is
+PID 1 inside its fresh PID namespace). When `:pid` is absent, the
+child's view equals the host pid, so the value is unambiguous.
+
+For the cross-namespace primitives in `Linx.Mount`
+(`in: {:pid, _}`) and `Linx.User` (`set_uid_map(host_pid, ...)`),
+you need the **host's** view — that's `host_pid/1`:
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: [...], namespaces: [:user, :pid])
+iex> receive do {:linx_process, :ready, _child_view} -> :ok end
+
+iex> {:ok, host_pid} = P.host_pid(c)
+iex> :ok = Linx.User.setup_maps(host_pid, uid: [...], gid: [...])
+```
+
+`host_pid/1` works any time after `:ready` (technically after the
+agent's `:spawned` event, which arrives before `:ready`). If you
+call it earlier you get `{:error, :not_ready}`, but in practice
+the `:ready` await in the example above is what every consumer
+does anyway.
+
+Without `:pid` in the namespaces list, `host_pid/1` and the
+`:ready` event's value are identical — using `host_pid/1` works
+in both cases and makes the intent explicit at the call site.
+
 ## Aborting a parked session
 
 `abort/1` is the alternative to `proceed/1` from the `:ready` state.
