@@ -2,7 +2,7 @@ defmodule Linx.CgroupTest do
   use ExUnit.Case, async: true
 
   alias Linx.Cgroup
-  alias Linx.Cgroup.Error
+  alias Linx.Cgroup.{Error, Stats}
 
   describe "supported?/0" do
     test "returns a boolean" do
@@ -132,6 +132,111 @@ defmodule Linx.CgroupTest do
                Cgroup.set_cpu_max(@nope, {50_000, 100_000})
 
       assert String.ends_with?(path, "cpu.max")
+    end
+
+    test "stats/1 against a missing cgroup returns a structured error" do
+      assert {:error, %Error{operation: :stats, errno: errno, path: path}} =
+               Cgroup.stats(@nope)
+
+      assert errno in [:enoent, :eacces]
+      assert path == @nope
+    end
+  end
+
+  describe "parse_keyed/1 (cpu.stat parsing)" do
+    # Plain unit test of the cpu.stat parser, independent of any
+    # filesystem state. The format is space-separated "key int" lines.
+
+    test "parses a representative cpu.stat blob" do
+      blob = """
+      usage_usec 285978284524
+      user_usec 215396840656
+      system_usec 70581443867
+      nr_periods 0
+      nr_throttled 7
+      throttled_usec 123456
+      """
+
+      assert %{
+               "usage_usec" => 285_978_284_524,
+               "user_usec" => 215_396_840_656,
+               "system_usec" => 70_581_443_867,
+               "nr_periods" => 0,
+               "nr_throttled" => 7,
+               "throttled_usec" => 123_456
+             } = Cgroup.parse_keyed(blob)
+    end
+
+    test "silently drops non-integer / malformed lines" do
+      # core_sched.force_idle_usec exists on some kernels; lines we
+      # don't understand should be ignored rather than crashing.
+      blob = """
+      usage_usec 100
+      something_weird not_an_int
+      another_thing
+      """
+
+      assert Cgroup.parse_keyed(blob) == %{"usage_usec" => 100}
+    end
+
+    test "nil input returns an empty map" do
+      # stats/1 passes nil when cpu.stat is missing entirely.
+      assert Cgroup.parse_keyed(nil) == %{}
+    end
+
+    test "empty string returns an empty map" do
+      assert Cgroup.parse_keyed("") == %{}
+    end
+  end
+
+  describe "Linx.Cgroup.Stats" do
+    test "default struct has every field nil" do
+      assert %Stats{} == %Stats{
+               cpu_usec: nil,
+               cpu_user_usec: nil,
+               cpu_system_usec: nil,
+               cpu_nr_throttled: nil,
+               cpu_throttled_usec: nil,
+               memory_current: nil,
+               memory_peak: nil,
+               pids_current: nil
+             }
+    end
+
+    test "Inspect omits nil fields" do
+      assert inspect(%Stats{}) == "#Linx.Cgroup.Stats<>"
+    end
+
+    test "Inspect renders cpu in seconds, memory humanized, pids as int" do
+      s = %Stats{
+        cpu_usec: 12_345_678,
+        memory_current: 256 * 1024 * 1024,
+        pids_current: 3
+      }
+
+      # 12.345678s → "12.3s" (one decimal); 256 * 1024 * 1024 → "256MiB"
+      assert inspect(s) == "#Linx.Cgroup.Stats<cpu=12.3s mem=256MiB pids=3>"
+    end
+
+    test "Inspect uses ms / µs / m+s for small / sub-second / multi-minute CPU" do
+      assert inspect(%Stats{cpu_usec: 500}) == "#Linx.Cgroup.Stats<cpu=500µs>"
+      assert inspect(%Stats{cpu_usec: 150_000}) == "#Linx.Cgroup.Stats<cpu=150ms>"
+
+      # 8 minutes + 12.5 seconds (rendered as 8m12s; sub-second drops
+      # when expressed as m+s, intentionally — the m+s form is for
+      # readability of long-running workloads).
+      assert inspect(%Stats{cpu_usec: 8 * 60_000_000 + 12_500_000}) ==
+               "#Linx.Cgroup.Stats<cpu=8m12s>"
+    end
+
+    test "Inspect humanizes memory across KiB / MiB / GiB" do
+      assert inspect(%Stats{memory_current: 256}) == "#Linx.Cgroup.Stats<mem=256B>"
+      assert inspect(%Stats{memory_current: 4096}) == "#Linx.Cgroup.Stats<mem=4KiB>"
+      assert inspect(%Stats{memory_current: 4 * 1024 * 1024}) == "#Linx.Cgroup.Stats<mem=4MiB>"
+
+      # 1.5 GiB rounds down to one decimal.
+      assert inspect(%Stats{memory_current: div(3 * 1024 * 1024 * 1024, 2)}) ==
+               "#Linx.Cgroup.Stats<mem=1.5GiB>"
     end
   end
 
@@ -291,6 +396,52 @@ defmodule Linx.CgroupTest do
       {:ok, after_max} = Cgroup.read(path, "cpu.max")
       assert String.starts_with?(after_max, "max ")
 
+      assert :ok = Cgroup.destroy(path)
+    end
+  end
+
+  describe "C3 stats integration" do
+    @moduletag :integration
+
+    setup do
+      path = "/sys/fs/cgroup/linx-test-#{System.unique_integer([:positive])}"
+      on_exit(fn -> _ = File.rmdir(path) end)
+
+      {:ok, ^path} = Cgroup.create(path)
+      {:ok, path: path}
+    end
+
+    test "stats/1 returns a Stats struct on a real cgroup", %{path: path} do
+      assert {:ok, %Stats{} = s} = Cgroup.stats(path)
+
+      # Every field present on this host (root has the standard
+      # controllers delegated) should be a non-negative integer.
+      assert is_nil(s.cpu_usec) or (is_integer(s.cpu_usec) and s.cpu_usec >= 0)
+      assert is_nil(s.memory_current) or
+               (is_integer(s.memory_current) and s.memory_current >= 0)
+
+      assert is_nil(s.pids_current) or
+               (is_integer(s.pids_current) and s.pids_current >= 0)
+
+      assert :ok = Cgroup.destroy(path)
+    end
+
+    test "stats/1 reflects a populated cgroup", %{path: path} do
+      # Move the BEAM in briefly so pids_current is at least 1, then
+      # move out again before destroy.
+      beam_pid = System.pid() |> String.to_integer()
+      :ok = Cgroup.add_process(path, beam_pid)
+
+      assert {:ok, %Stats{pids_current: n}} = Cgroup.stats(path)
+      assert is_integer(n) and n >= 1
+
+      # If memory accounting is on, memory.current is > 0 once a
+      # real pid lives here.
+      {:ok, %Stats{memory_current: mem}} = Cgroup.stats(path)
+      assert is_nil(mem) or mem >= 0
+
+      # Restore -- move BEAM back to root cgroup before destroying.
+      :ok = File.write("/sys/fs/cgroup/cgroup.procs", Integer.to_string(beam_pid))
       assert :ok = Cgroup.destroy(path)
     end
   end

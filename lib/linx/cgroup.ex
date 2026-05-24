@@ -55,14 +55,15 @@ defmodule Linx.Cgroup do
 
   ## Status
 
-  C0–C2 shipped: `supported?/0`, `create/1`, `destroy/1`,
+  C0–C3 shipped: `supported?/0`, `create/1`, `destroy/1`,
   `add_process/2`, `read/2`, `write/3`, `freeze/1`, `thaw/1`,
-  `set_memory_max/2`, `set_pids_max/2`, `set_cpu_max/2`, plus the
-  `Linx.Cgroup.Error` shape. Stats and delegation land in C3–C4.
-  See `docs/cgroup/PLAN.md` for the roadmap.
+  `set_memory_max/2`, `set_pids_max/2`, `set_cpu_max/2`, `stats/1`,
+  plus the `Linx.Cgroup.Error` and `Linx.Cgroup.Stats` shapes.
+  Controller delegation lands in C4. See `docs/cgroup/PLAN.md` for
+  the roadmap.
   """
 
-  alias Linx.Cgroup.Error
+  alias Linx.Cgroup.{Error, Stats}
 
   @cgroupfs "/sys/fs/cgroup"
   @controllers_file Path.join(@cgroupfs, "cgroup.controllers")
@@ -275,8 +276,74 @@ defmodule Linx.Cgroup do
   Reads a curated snapshot of `cg`'s resource counters as a
   `Linx.Cgroup.Stats` struct.
 
-  Lands in C3.
+  Returns `{:ok, %Linx.Cgroup.Stats{}}` if the cgroup exists. Each
+  field is `nil` if its source isn't available — either because
+  the controller isn't delegated to the parent (interface file
+  missing) or the kernel is too old to expose it.
+
+  Returns `{:error, %Linx.Cgroup.Error{operation: :stats}}` if the
+  cgroup directory itself doesn't exist or isn't readable.
   """
-  @spec stats(cgroup()) :: {:ok, term()} | {:error, term()}
-  def stats(_cg), do: {:error, :not_yet_implemented}
+  @spec stats(cgroup()) :: {:ok, Stats.t()} | {:error, Error.t()}
+  def stats(cg) when is_binary(cg) do
+    case File.stat(cg) do
+      {:ok, _} ->
+        cpu = parse_keyed(read_raw(cg, "cpu.stat"))
+
+        {:ok,
+         %Stats{
+           cpu_usec: cpu["usage_usec"],
+           cpu_user_usec: cpu["user_usec"],
+           cpu_system_usec: cpu["system_usec"],
+           cpu_nr_throttled: cpu["nr_throttled"],
+           cpu_throttled_usec: cpu["throttled_usec"],
+           memory_current: read_int(cg, "memory.current"),
+           memory_peak: read_int(cg, "memory.peak"),
+           pids_current: read_int(cg, "pids.current")
+         }}
+
+      {:error, posix} ->
+        {:error, Error.from_posix(posix, cg, :stats)}
+    end
+  end
+
+  # `cpu.stat` is space-separated key/value lines:
+  #
+  #     usage_usec 285978284524
+  #     user_usec  215396840656
+  #     ...
+  #
+  # Build a %{key => integer} map; lines that don't parse as
+  # `key int` are silently dropped (forward-compatible with any new
+  # keys the kernel adds).
+  @doc false
+  def parse_keyed(nil), do: %{}
+
+  def parse_keyed(text) when is_binary(text) do
+    for line <- String.split(text, "\n", trim: true),
+        [key, value] <- [String.split(line, " ", parts: 2)],
+        {n, ""} <- [Integer.parse(value)],
+        into: %{} do
+      {key, n}
+    end
+  end
+
+  # Best-effort raw read: `nil` on any failure. Used by stats/1 to
+  # nil-fill fields whose interface files aren't present.
+  defp read_raw(cg, file) do
+    case File.read(Path.join(cg, file)) do
+      {:ok, data} -> data
+      {:error, _} -> nil
+    end
+  end
+
+  # Best-effort integer read: `nil` if missing/unreadable/unparsable.
+  defp read_int(cg, file) do
+    with data when is_binary(data) <- read_raw(cg, file),
+         {n, _rest} <- Integer.parse(String.trim(data)) do
+      n
+    else
+      _ -> nil
+    end
+  end
 end

@@ -106,7 +106,8 @@ defmodule Linx.MixProject do
         ],
         Cgroup: [
           Linx.Cgroup,
-          Linx.Cgroup.Error
+          Linx.Cgroup.Error,
+          Linx.Cgroup.Stats
         ],
         "Netlink core": [
           Linx.Netlink,

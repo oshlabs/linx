@@ -34,7 +34,7 @@ defmodule Linx.Cgroup.Error do
   defexception [:path, :operation, :errno, :code]
 
   @type operation ::
-          :create | :destroy | :read | :write | :add_process
+          :create | :destroy | :read | :write | :add_process | :stats
 
   @type t :: %__MODULE__{
           path: Path.t(),

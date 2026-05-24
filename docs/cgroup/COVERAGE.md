@@ -43,10 +43,10 @@ A living doc — update as primitives ship. Status legend:
 
 | Field | Status | Source |
 |---|---|---|
-| `cpu_usec` / `cpu_user_usec` / `cpu_system_usec` | ⬜ | C3 — `cpu.stat` |
-| `cpu_nr_throttled` / `cpu_throttled_usec` | ⬜ | C3 — `cpu.stat` (populated when `cpu.max` is set) |
-| `memory_current` / `memory_peak` | ⬜ | C3 — `memory.current` / `memory.peak` |
-| `pids_current` | ⬜ | C3 — `pids.current` |
+| `cpu_usec` / `cpu_user_usec` / `cpu_system_usec` | ✅ | C3 — `cpu.stat` |
+| `cpu_nr_throttled` / `cpu_throttled_usec` | ✅ | C3 — `cpu.stat` (populated when `cpu.max` is set) |
+| `memory_current` / `memory_peak` | ✅ | C3 — `memory.current` / `memory.peak` |
+| `pids_current` | ✅ | C3 — `pids.current` |
 
 ## Delegation
 
@@ -72,7 +72,7 @@ A living doc — update as primitives ship. Status legend:
 | Module | Status | Notes |
 |---|---|---|
 | `Linx.Cgroup.Error` | ✅ | C1 — POSIX-atom errno + path + operation |
-| `Linx.Cgroup.Stats` | ⬜ | C3 — curated counters; `nil` for unavailable fields |
+| `Linx.Cgroup.Stats` | ✅ | C3 — curated counters; `nil` for unavailable fields |
 
 ## Deferred — not in `Linx.Cgroup` itself
 

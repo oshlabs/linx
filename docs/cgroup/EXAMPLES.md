@@ -7,9 +7,9 @@ that *changes* the cgroup hierarchy — `create/1`, `add_process/2`,
 `write/3`, `destroy/1` — needs root. Start with `./sudorun.sh iex
 -S mix`.
 
-> 🚧 **Partial.** C1 (lifecycle, raw I/O, errors) and C2 (freeze /
-> thaw + typed limits) ship now. Stats (C3) and controller
-> delegation (C4) land in follow-ups. See `PLAN.md` for the
+> 🚧 **Partial.** C1 (lifecycle, raw I/O, errors), C2 (freeze /
+> thaw + typed limits), and C3 (stats) ship now. Controller
+> delegation (C4) lands in a follow-up. See `PLAN.md` for the
 > roadmap.
 
 ## Detecting cgroup v2
@@ -248,4 +248,77 @@ If the workload tries to allocate past `memory.max`, the kernel
 OOM-kills it inside the cgroup; `Linx.Process` then delivers the
 `{:linx_process, :signaled, 9}` you'd expect.
 
-## (more examples will land with C3–C4)
+## Reading counters
+
+`stats/1` returns a snapshot of a cgroup's resource counters as a
+`Linx.Cgroup.Stats` struct:
+
+```elixir
+iex> {:ok, s} = Linx.Cgroup.stats(cg)
+{:ok, #Linx.Cgroup.Stats<cpu=12.3s mem=42MiB pids=3>}
+
+iex> s.cpu_usec
+12_345_678
+iex> s.memory_current
+44_040_192
+iex> s.pids_current
+3
+```
+
+The struct's `Inspect` impl renders compactly, omitting any field
+that's `nil`. Pattern-match on individual fields for programmatic
+access:
+
+```elixir
+iex> case Linx.Cgroup.stats(cg) do
+...>   {:ok, %Stats{memory_current: m}} when is_integer(m) and m > 256 * 1024 * 1024 ->
+...>     :over_quarter_gig
+...>   _ ->
+...>     :under
+...> end
+```
+
+### What's populated
+
+Each field is `nil` if its source isn't available — either
+because the controller isn't delegated to the parent (interface
+file missing) or the kernel is too old to expose it.
+
+| Field | Source | Notes |
+|---|---|---|
+| `cpu_usec` / `cpu_user_usec` / `cpu_system_usec` | `cpu.stat` | always present on v2 |
+| `cpu_nr_throttled` / `cpu_throttled_usec` | `cpu.stat` | 0 unless `cpu.max` is set |
+| `memory_current` | `memory.current` | needs memory controller |
+| `memory_peak` | `memory.peak` | Linux ≥ 5.19 + memory controller |
+| `pids_current` | `pids.current` | needs pids controller |
+
+```elixir
+# A cgroup without the pids controller delegated:
+iex> {:ok, s} = Linx.Cgroup.stats(cg)
+iex> s.pids_current
+nil
+```
+
+The `Inspect` rendering reflects what's actually populated:
+
+```elixir
+iex> %Linx.Cgroup.Stats{cpu_usec: 100, pids_current: 3}
+#Linx.Cgroup.Stats<cpu=100µs pids=3>
+```
+
+`stats/1` only errors when the cgroup directory itself doesn't
+exist or isn't readable — otherwise it returns `{:ok, %Stats{}}`
+with every field best-effort filled:
+
+```elixir
+iex> Linx.Cgroup.stats("/sys/fs/cgroup/nope")
+{:error,
+ %Linx.Cgroup.Error{
+   path: "/sys/fs/cgroup/nope",
+   operation: :stats,
+   errno: :enoent,
+   code: 2
+ }}
+```
+
+## (more examples will land with C4)
