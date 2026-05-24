@@ -222,12 +222,59 @@ defmodule Linx.Process do
   end
 
   @doc """
+  Releases a parked session **without** running the workload. The
+  alternative to `proceed/1` from the `:ready` state.
+
+  When the agent is parked at the checkpoint (post-`:ready`,
+  pre-`:running`), `abort/1` tells it to discard the cloned child
+  rather than letting it `execve`. The agent closes the child's
+  unblock pipe so the child sees EOF and `_exit`s, reaps it, and
+  emits `{:status, :aborted, child_pid}` over the control channel.
+  The owner then receives `{:linx_process, :aborted}` and the
+  session moves to its terminal state.
+
+  ## Use cases
+
+    * **Setup-time rollback.** A container engine starts spawning,
+      discovers setup can't complete (cgroup creation fails, a
+      bind mount errors, …), and wants to cancel the workload
+      cleanly without it running for even one instruction.
+    * **Checkpoint-only verification.** A test or health check
+      that wants to confirm namespace setup *worked* without
+      actually running the workload — e.g. an integration test
+      that pivots `/proc` inside a fresh mount namespace and just
+      wants to verify via mountinfo.
+    * **Race-with-decision.** The owner's "should I proceed?"
+      logic returns false; `abort/1` is the clean discard.
+
+  ## State semantics
+
+    * **Pre-`:ready`** — buffered; fires the moment `:ready`
+      arrives. Same shape as `signal/2`'s pre-`:running`
+      buffering.
+    * **`:ready` (parked)** — primary case; immediate abort.
+    * **`:running`** — `{:error, :running}`. The workload is
+      past the checkpoint; use `signal/2` to terminate it.
+    * **Already terminal** — `{:error, :already_terminated}`.
+
+  Fire-and-forget — `abort/1` returns as soon as the agent has
+  the request. Use `wait/1` to block on the `:aborted` terminal
+  event.
+  """
+  @spec abort(t()) :: :ok | {:error, :running | :already_terminated}
+  def abort(session) when is_pid(session) do
+    GenServer.call(session, :abort)
+  end
+
+  @doc """
   Synchronously waits for the workload's terminal event.
 
   Returns one of:
 
     * `{:ok, {:exited, code}}` — workload exited with `code`.
     * `{:ok, {:signaled, signum}}` — workload was killed by `signum`.
+    * `{:ok, :aborted}` — `abort/1` was called from the checkpoint;
+      the workload never ran.
     * `{:error, %{errno: errno, stage: stage}}` — a pre-exec failure;
       the workload never ran.
     * `{:error, :timeout}` — `timeout` elapsed before any terminal
@@ -239,7 +286,7 @@ defmodule Linx.Process do
   receive the same answer when it arrives.
   """
   @spec wait(t(), timeout()) ::
-          {:ok, {:exited, non_neg_integer} | {:signaled, pos_integer}}
+          {:ok, {:exited, non_neg_integer} | {:signaled, pos_integer} | :aborted}
           | {:error, term}
   def wait(session, timeout \\ :infinity)
 
@@ -473,6 +520,7 @@ defmodule Linx.Process do
         child_pid: nil,
         running?: false,
         pending_signals: [],
+        pending_abort?: false,
         waiters: [],
         result: nil,
         pty?: pty?(command)
@@ -497,6 +545,30 @@ defmodule Linx.Process do
 
   def handle_call(:proceed, _from, state) do
     {:reply, {:error, :not_ready}, state}
+  end
+
+  # Terminal event already arrived -- nothing to abort.
+  def handle_call(:abort, _from, %{result: result} = state) when result != nil do
+    {:reply, {:error, :already_terminated}, state}
+  end
+
+  # Already past the checkpoint -- abort is only valid pre-execve.
+  def handle_call(:abort, _from, %{running?: true} = state) do
+    {:reply, {:error, :running}, state}
+  end
+
+  # Parked at :ready -- forward :abort to the agent immediately.
+  def handle_call(:abort, _from, %{port: port, child_pid: child_pid} = state)
+      when child_pid != nil do
+    Port.command(port, :erlang.term_to_binary(:abort))
+    {:reply, :ok, state}
+  end
+
+  # Pre-:ready -- buffer the abort. The :ready handler in handle_info
+  # fires it the moment the checkpoint is reached. Matches signal/2's
+  # pre-:running buffering shape.
+  def handle_call(:abort, _from, %{child_pid: nil} = state) do
+    {:reply, :ok, %{state | pending_abort?: true}}
   end
 
   # The workload has already terminated; sending a signal would have no
@@ -567,6 +639,7 @@ defmodule Linx.Process do
   # Map the internal result tuple onto the shape `wait/1` documents.
   defp normalise_result({:exited, _} = r), do: {:ok, r}
   defp normalise_result({:signaled, _} = r), do: {:ok, r}
+  defp normalise_result(:aborted), do: {:ok, :aborted}
   defp normalise_result({:error, _} = error), do: error
 
   @impl true
@@ -577,7 +650,19 @@ defmodule Linx.Process do
 
       {:status, :ready, child_pid} ->
         send(state.owner, {:linx_process, :ready, child_pid})
-        {:noreply, %{state | child_pid: child_pid}}
+        state = %{state | child_pid: child_pid}
+
+        # Fire a buffered abort: an `abort/1` that landed before the
+        # checkpoint is forwarded the moment the agent is parked there.
+        state =
+          if state.pending_abort? do
+            Port.command(state.port, :erlang.term_to_binary(:abort))
+            %{state | pending_abort?: false}
+          else
+            state
+          end
+
+        {:noreply, state}
 
       {:status, :running} ->
         send(state.owner, {:linx_process, :running})
@@ -591,6 +676,10 @@ defmodule Linx.Process do
       {:status, :signaled, signum} ->
         send(state.owner, {:linx_process, :signaled, signum})
         {:noreply, finalise(state, {:signaled, signum})}
+
+      {:status, :aborted, _child_pid} ->
+        send(state.owner, {:linx_process, :aborted})
+        {:noreply, finalise(state, :aborted)}
 
       {:error, errno, stage} ->
         send(state.owner, {:linx_process, :error, errno, stage})
