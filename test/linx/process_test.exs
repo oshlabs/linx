@@ -530,6 +530,194 @@ defmodule Linx.ProcessTest do
     end
   end
 
+  describe "info/1" do
+    alias Linx.Process.Info
+
+    test "returns a %Linx.Process.Info{} with mode: :spawn for spawn sessions" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      assert {:ok, %Info{mode: :spawn} = info} = P.info(session)
+      assert info.host_pid > 0
+      assert info.child_pid > 0
+      assert info.pty? == false
+      assert info.result == nil
+
+      :ok = P.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+    end
+
+    test "stage progresses :ready -> :running -> :exited" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "0.05"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      {:ok, at_ready} = P.info(session)
+      assert at_ready.stage == :ready
+      assert at_ready.result == nil
+
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # Catch the running stage before the workload exits.
+      case P.info(session) do
+        {:ok, %Info{stage: :running, result: nil}} -> :ok
+        # Workload may have already exited if we lost the race; that's
+        # also a valid lifecycle observation.
+        {:ok, %Info{stage: :exited, result: {:exited, 0}}} -> :ok
+      end
+
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      {:ok, at_exit} = P.info(session)
+      assert at_exit.stage == :exited
+      assert at_exit.result == {:exited, 0}
+    end
+
+    test "stage is :aborted after abort/1" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = P.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+
+      assert {:ok, %Info{stage: :aborted, result: :aborted}} = P.info(session)
+    end
+
+    test "stage is :signaled with the signal number" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+
+      assert {:ok, %Info{stage: :signaled, result: {:signaled, 9}}} =
+               P.info(session)
+    end
+
+    test "stage is :errored with the error map for pre-exec failures" do
+      {:ok, session} = P.spawn(argv: ["/this/does/not/exist"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :error, 2, :execve}, 2_000
+
+      assert {:ok, %Info{stage: :errored} = info} = P.info(session)
+      assert info.result == {:error, %{errno: 2, stage: :execve}}
+    end
+
+    test "pty? is true when stdio: :pty" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      assert {:ok, %Info{pty?: true}} = P.info(session)
+
+      :ok = P.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+    end
+
+    test "session_ended for a dead session" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      # spawn/1 uses start_link; unlink before kill so the test
+      # process isn't taken down by the EXIT signal.
+      Process.unlink(session)
+      ref = Process.monitor(session)
+      Process.exit(session, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^session, _}, 1_000
+
+      assert {:error, :session_ended} = P.info(session)
+    end
+  end
+
+  describe "%Linx.Process.Info{} Inspect" do
+    alias Linx.Process.Info
+
+    test "renders mode + stage + host_pid" do
+      info = %Info{
+        mode: :spawn,
+        stage: :ready,
+        host_pid: 12345,
+        child_pid: 12345,
+        pty?: false,
+        result: nil
+      }
+
+      assert inspect(info) == "#Linx.Process.Info<spawn :ready host=12345>"
+    end
+
+    test "renders pty marker when pty? is true" do
+      info = %Info{
+        mode: :spawn,
+        stage: :running,
+        host_pid: 12345,
+        child_pid: 12345,
+        pty?: true,
+        result: nil
+      }
+
+      assert inspect(info) == "#Linx.Process.Info<spawn :running host=12345 pty>"
+    end
+
+    test "renders :exited with the exit code inline" do
+      info = %Info{
+        mode: :spawn,
+        stage: :exited,
+        host_pid: 12345,
+        child_pid: 12345,
+        pty?: false,
+        result: {:exited, 0}
+      }
+
+      assert inspect(info) ==
+               "#Linx.Process.Info<spawn :exited(0) host=12345>"
+    end
+
+    test "renders :signaled with the signal number inline" do
+      info = %Info{
+        mode: :enter,
+        stage: :signaled,
+        host_pid: 7,
+        child_pid: 1,
+        pty?: false,
+        result: {:signaled, 9}
+      }
+
+      assert inspect(info) ==
+               "#Linx.Process.Info<enter :signaled(9) host=7>"
+    end
+
+    test "renders :errored with stage/errno inline" do
+      info = %Info{
+        mode: :spawn,
+        stage: :errored,
+        host_pid: 12345,
+        child_pid: nil,
+        pty?: false,
+        result: {:error, %{errno: 2, stage: :execve}}
+      }
+
+      assert inspect(info) ==
+               "#Linx.Process.Info<spawn :errored(execve/2) host=12345>"
+    end
+
+    test "renders compactly with no host_pid yet" do
+      info = %Info{
+        mode: :spawn,
+        stage: :starting,
+        host_pid: nil,
+        child_pid: nil,
+        pty?: false,
+        result: nil
+      }
+
+      assert inspect(info) == "#Linx.Process.Info<spawn :starting>"
+    end
+  end
+
   describe "robustness -- defensive handling of unexpected messages" do
     # These exercise the catch-all clauses in handle_info: stray
     # messages, malformed payloads, unrecognised frame shapes, and

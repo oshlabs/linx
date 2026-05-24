@@ -415,14 +415,30 @@ defmodule Linx.Process do
   end
 
   @doc """
-  Returns a snapshot of the session's state — mode, host pid, current
-  lifecycle stage.
+  Returns a snapshot of the session's state as a `%Linx.Process.Info{}`.
 
-  Lands incrementally as state accumulates (P1+); today returns
-  `{:error, :not_yet_implemented}`.
+  Cheap — a single `GenServer.call` returning the relevant fields
+  from the GenServer's internal state. Safe to call at any point
+  in the lifecycle, including post-terminal.
+
+  ## Examples
+
+      iex> {:ok, c} = Linx.Process.spawn(argv: ["/bin/sleep", "10"])
+      iex> {:ok, info} = Linx.Process.info(c)
+      iex> info.mode
+      :spawn
+      iex> info.stage in [:starting, :spawned, :ready]
+      true
+
+  See `Linx.Process.Info` for the full field list and the eight
+  possible `:stage` atoms.
   """
-  @spec info(t()) :: {:ok, map()} | {:error, term}
-  def info(_session), do: {:error, :not_yet_implemented}
+  @spec info(t()) :: {:ok, Linx.Process.Info.t()} | {:error, term}
+  def info(session) when is_pid(session) do
+    GenServer.call(session, :info)
+  catch
+    :exit, _ -> {:error, :session_ended}
+  end
 
   @doc """
   Writes bytes to the workload's PTY master, which the workload sees as
@@ -630,9 +646,12 @@ defmodule Linx.Process do
 
       Port.command(port, :erlang.term_to_binary(command))
 
+      {tag, _} = command
+
       state = %{
         port: port,
         owner: owner,
+        mode: tag,
         host_pid: nil,
         child_pid: nil,
         running?: false,
@@ -770,6 +789,22 @@ defmodule Linx.Process do
     {:reply, {:ok, host_pid}, state}
   end
 
+  # Snapshot of the session's lifecycle-relevant state, projected
+  # through %Linx.Process.Info{}. Internal fields (port, owner,
+  # pending queues, waiters) are deliberately omitted.
+  def handle_call(:info, _from, state) do
+    info = %Linx.Process.Info{
+      mode: state.mode,
+      stage: compute_stage(state),
+      host_pid: state.host_pid,
+      child_pid: state.child_pid,
+      pty?: state.pty?,
+      result: state.result
+    }
+
+    {:reply, {:ok, info}, state}
+  end
+
   # The workload has already terminated; sending a signal would have no
   # target.
   def handle_call({:signal, _signum}, _from, %{result: result} = state)
@@ -840,6 +875,19 @@ defmodule Linx.Process do
   defp normalise_result({:signaled, _} = r), do: {:ok, r}
   defp normalise_result(:aborted), do: {:ok, :aborted}
   defp normalise_result({:error, _} = error), do: error
+
+  # Collapse the four lifecycle bits (host_pid / child_pid / running? /
+  # result) into one stage atom for %Linx.Process.Info{}. Terminal
+  # stages win over pre-terminal -- once `result` is set, that's the
+  # answer regardless of the other fields.
+  defp compute_stage(%{result: {:exited, _}}),  do: :exited
+  defp compute_stage(%{result: {:signaled, _}}), do: :signaled
+  defp compute_stage(%{result: :aborted}), do: :aborted
+  defp compute_stage(%{result: {:error, _}}), do: :errored
+  defp compute_stage(%{running?: true}), do: :running
+  defp compute_stage(%{child_pid: pid}) when pid != nil, do: :ready
+  defp compute_stage(%{host_pid: pid}) when pid != nil, do: :spawned
+  defp compute_stage(_), do: :starting
 
   @impl true
   def handle_info({port, {:data, payload}}, %{port: port} = state) do
