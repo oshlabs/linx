@@ -79,10 +79,23 @@
  * EXIT CODES (of this agent, not the workload)
  * --------------------------------------------
  *   0   success (workload was reported on, agent terminating normally)
- *   1   I/O failure on the BEAM channel
- *   2   malformed request from the BEAM
- *   3   clone() failed
- *   4   internal pipe failure
+ *   1   I/O failure on the BEAM channel (no emit possible)
+ *   2   malformed request -- emits {:error, EINVAL, :malformed_request}
+ *   3   clone()/fork() failed -- emits {:error, errno, :clone | :fork}
+ *   4   internal infrastructure failure -- emits {:error, errno, stage}
+ *       where stage is :sigprocmask | :pipe2 | :signalfd | :posix_openpt
+ *       | :ptsetup | :ptsname | :pts_open | :ready_frame |
+ *       :malformed_ready | :exec_outcome
+ *
+ * Every non-zero exit except code 1 emits a structured error on fd 4
+ * before bailing -- so the BEAM-side GenServer always sees a clean
+ * terminal even when the agent dies before sending a :status frame.
+ * Code 1 paths are silent because the BEAM channel is the failure
+ * cause; a write would just EPIPE.
+ *
+ * The BEAM falls back to a synthesised {:linx_process, :error, exit_code,
+ * :agent_died} owner message if the agent exits without having emitted
+ * anything (truly catastrophic -- segfault, OOM-kill, …).
  *
  * The workload's own exit code is reported as {:status, :exited, code}.
  *
@@ -1588,8 +1601,7 @@ int main(void)
 	sigemptyset(&chld_mask);
 	sigaddset(&chld_mask, SIGCHLD);
 	if (sigprocmask(SIG_BLOCK, &chld_mask, NULL) < 0) {
-		fprintf(stderr, "linx_process: sigprocmask: %s\n",
-			strerror(errno));
+		emit_error(errno, "sigprocmask");
 		return 4;
 	}
 
@@ -1614,7 +1626,11 @@ int main(void)
 
 	struct request req = { 0 };
 	if (decode_request(req_buf, (int)req_len, &req) < 0) {
-		fprintf(stderr, "linx_process: malformed request\n");
+		/* The BEAM sent a {:spawn, _} / {:enter, _} we couldn't
+		 * parse -- shape mismatch, missing required keys, invalid
+		 * field types. Emit a structured error so the GenServer
+		 * doesn't hang on the bare port close. */
+		emit_error(EINVAL, "malformed_request");
 		free_request(&req);
 		return 2;
 	}
@@ -1631,7 +1647,7 @@ int main(void)
 	 * parent sees EOF and emits :running). */
 	int c2p[2], p2c[2];
 	if (pipe2(c2p, O_CLOEXEC) < 0 || pipe2(p2c, 0) < 0) {
-		fprintf(stderr, "linx_process: pipe2: %s\n", strerror(errno));
+		emit_error(errno, "pipe2");
 		free_request(&req);
 		return 4;
 	}
@@ -1770,8 +1786,9 @@ int main(void)
 		uint8_t buf[256];
 		ssize_t len = read_frame_fd(c2p[0], buf, sizeof buf);
 		if (len < 0) {
-			fprintf(stderr, "linx_process: read ready frame: %s\n",
-				errno == 0 ? "EOF" : strerror(errno));
+			/* Child died before sending :ready, or the c2p
+			 * pipe broke. Surface errno (or EIO on EOF). */
+			emit_error(errno ? errno : EIO, "ready_frame");
 			free_request(&req);
 			return 4;
 		}
@@ -1784,7 +1801,7 @@ int main(void)
 		    ei_decode_atom((const char *)buf, &idx, tag) < 0 ||
 		    strcmp(tag, "ready") != 0 ||
 		    ei_decode_long((const char *)buf, &idx, &child_pid) < 0) {
-			fprintf(stderr, "linx_process: malformed ready frame\n");
+			emit_error(EPROTO, "malformed_ready");
 			free_request(&req);
 			return 4;
 		}
@@ -1852,7 +1869,10 @@ int main(void)
 	}
 
 	if (outcome < 0) {
-		fprintf(stderr, "linx_process: relay error before exec\n");
+		/* await_exec_outcome failed to read either an :error
+		 * frame or a clean EOF from c2p. Rare -- usually means
+		 * the child died in a way that left the pipe broken. */
+		emit_error(EIO, "exec_outcome");
 		free_request(&req);
 		return 4;
 	}
@@ -1865,8 +1885,7 @@ int main(void)
 	 * rather than hanging on a quiet signalfd. */
 	int sigfd = signalfd(-1, &chld_mask, SFD_CLOEXEC | SFD_NONBLOCK);
 	if (sigfd < 0) {
-		fprintf(stderr, "linx_process: signalfd: %s\n",
-			strerror(errno));
+		emit_error(errno, "signalfd");
 		free_request(&req);
 		return 4;
 	}

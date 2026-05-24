@@ -529,4 +529,162 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :signaled, 9}, 5_000
     end
   end
+
+  describe "robustness -- defensive handling of unexpected messages" do
+    # These exercise the catch-all clauses in handle_info: stray
+    # messages, malformed payloads, unrecognised frame shapes, and
+    # the synthesised :agent_died terminal on port-exit-without-
+    # prior-status. Each starts a real session with /bin/sleep so
+    # the GenServer is in a normal state, then injects messages
+    # directly into the GenServer's mailbox to simulate the
+    # edge case without contriving an actual broken agent.
+
+    import ExUnit.CaptureLog
+
+    test "stray non-port message is logged and ignored" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      log =
+        capture_log(fn ->
+          send(session, :totally_unexpected)
+          # Round-trip a GenServer call to confirm the session is
+          # still responsive after the stray message.
+          assert {:ok, _} = P.host_pid(session)
+        end)
+
+      assert log =~ "ignoring unexpected message"
+      assert log =~ ":totally_unexpected"
+
+      :ok = P.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+    end
+
+    test "malformed ETF in port-data is logged and dropped" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      port = :sys.get_state(session).port
+
+      log =
+        capture_log(fn ->
+          send(session, {port, {:data, <<0, 1, 2, 3, 4, 5>>}})
+          # GenServer still alive.
+          assert {:ok, _} = P.host_pid(session)
+        end)
+
+      assert log =~ "malformed agent frame"
+
+      :ok = P.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+    end
+
+    test "well-formed but unrecognised frame shape is logged and dropped" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      port = :sys.get_state(session).port
+      surprise = :erlang.term_to_binary({:status, :something_new, 42})
+
+      log =
+        capture_log(fn ->
+          send(session, {port, {:data, surprise}})
+          assert {:ok, _} = P.host_pid(session)
+        end)
+
+      assert log =~ "unrecognised agent frame"
+
+      :ok = P.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+    end
+
+    test "port exit before any terminal synthesises :agent_died" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      # Simulate the agent process dying before sending a :status
+      # frame -- inject the port {:exit_status, _} directly.
+      port = :sys.get_state(session).port
+      send(session, {port, {:exit_status, 4}})
+
+      # Owner gets the synthesised error.
+      assert_receive {:linx_process, :error, 4, :agent_died}, 2_000
+
+      # wait/1 also sees the synthesised terminal.
+      assert {:error, %{errno: 4, stage: :agent_died}} =
+               P.wait(session, 500)
+
+      # The real workload is still actually running because we faked
+      # the port exit; clean up by killing it via the OS so the
+      # async test doesn't leak. Use :os.getpid via host_pid? No --
+      # host_pid is stored in state but the real port is still
+      # alive. Just call P.signal/2 -- if the session GenServer
+      # forwards a {:signal, _} to its dead-from-its-pov port, it's
+      # a no-op write attempt; if the real port is still alive it
+      # delivers SIGKILL to the workload.
+      _ = P.signal(session, 9)
+    end
+
+    test "port exit AFTER a terminal does not double-fire :agent_died" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      # The agent process exits naturally after :exited; the
+      # {:exit_status, 0} arrives at the GenServer. It must NOT
+      # synthesise :agent_died -- the terminal is already recorded.
+      refute_receive {:linx_process, :error, _, :agent_died}, 200
+
+      # wait/1 still returns the natural exit.
+      assert {:ok, {:exited, 0}} = P.wait(session, 500)
+    end
+
+    test "real SIGKILL of the agent surfaces :agent_died to the owner" do
+      # Exercises the synthesised terminal end-to-end: a real spawned
+      # agent gets SIGKILLed from the OS, the BEAM port observes the
+      # exit_status, and the owner sees {:linx_process, :error, _,
+      # :agent_died} without having received any prior terminal.
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      port = :sys.get_state(session).port
+      {:os_pid, agent_pid} = Port.info(port, :os_pid)
+
+      # Use the standard `kill` so the test stays portable.
+      {_, 0} = System.cmd("kill", ["-9", Integer.to_string(agent_pid)])
+
+      assert_receive {:linx_process, :error, _exit_code, :agent_died}, 2_000
+
+      assert {:error, %{stage: :agent_died}} = P.wait(session, 500)
+    end
+
+    test "malformed request: agent emits :malformed_request on its own" do
+      # Talk to the linx_process binary directly so we can inject
+      # garbage as the first frame (P.spawn would always send a
+      # well-formed request, so we bypass it here). Confirms R3's
+      # C-side emit_error before `return 2`.
+      binary = Path.join(:code.priv_dir(:linx), "linx_process")
+      assert File.exists?(binary)
+
+      port =
+        Port.open(
+          {:spawn_executable, binary},
+          [:binary, :nouse_stdio, {:packet, 4}, :exit_status]
+        )
+
+      # Not valid Erlang External Term Format -- the agent's
+      # ei_decode_version will reject it as a malformed request.
+      Port.command(port, <<0, 1, 2, 3, 4>>)
+
+      assert_receive {^port, {:data, payload}}, 2_000
+      {:error, errno, stage} = :erlang.binary_to_term(payload)
+
+      # EINVAL = 22 per linux/asm-generic/errno-base.h.
+      assert errno == 22
+      assert stage == :malformed_request
+
+      assert_receive {^port, {:exit_status, 2}}, 2_000
+    end
+  end
 end
