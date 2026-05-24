@@ -55,7 +55,11 @@ defmodule Linx.MixProject do
         "docs/tty/EXAMPLES.md",
         "docs/tty/PLAN.md",
         "docs/tty/COVERAGE.md",
-        "docs/tty/REFERENCES.md"
+        "docs/tty/REFERENCES.md",
+        "docs/cgroup/EXAMPLES.md",
+        "docs/cgroup/PLAN.md",
+        "docs/cgroup/COVERAGE.md",
+        "docs/cgroup/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -77,6 +81,12 @@ defmodule Linx.MixProject do
           "docs/tty/COVERAGE.md",
           "docs/tty/REFERENCES.md"
         ],
+        "Cgroup — guides": ["docs/cgroup/EXAMPLES.md"],
+        "Cgroup — design": [
+          "docs/cgroup/PLAN.md",
+          "docs/cgroup/COVERAGE.md",
+          "docs/cgroup/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -93,6 +103,11 @@ defmodule Linx.MixProject do
           Linx.Tty.Saved,
           Linx.Tty.WindowSize,
           Linx.Tty.Native
+        ],
+        Cgroup: [
+          Linx.Cgroup,
+          Linx.Cgroup.Error,
+          Linx.Cgroup.Stats
         ],
         "Netlink core": [
           Linx.Netlink,
