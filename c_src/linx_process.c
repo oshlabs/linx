@@ -31,9 +31,10 @@
  * Both modes share the rest of the protocol: the parent reports the host
  * pid as {:status, :spawned, _}, the child reaches the checkpoint and
  * the parent reports {:status, :ready, child_pid_inside_ns}, the BEAM
- * does any host-side setup and replies :proceed, the parent forwards
- * that to the child over an internal pipe, the child execve()s and the
- * parent reports {:status, :running, _}. On waitpid,
+ * does any host-side setup (optionally including K2 cap_* commands that
+ * the parent forwards to the child) and replies :proceed, the parent
+ * forwards that to the child over an internal pipe, the child execve()s
+ * and the parent reports {:status, :running, _}. On waitpid,
  * {:status, :exited, code} or {:status, :signaled, signum} terminates
  * the session. Pre-exec failures arrive as {:error, errno, stage}.
  *
@@ -49,14 +50,27 @@
  *     - EOF (the child execve'd successfully and CLOEXEC closed the pipe)
  *       -> :running
  *
- *   `p2c` (parent writes, child reads)
- *     - One byte 'P' -> proceed (release the checkpoint)
+ *   `p2c` (parent writes, child reads): a stream of {:packet, 4} ei frames,
+ *   same encoding as the BEAM channel. Recognised frames:
+ *     - :proceed -- sentinel that ends the child's checkpoint loop;
+ *       child falls through to apply_stdio + execve
+ *     - {:cap_drop_bounding, mask},
+ *       {:cap_set_thread, eff, prm, inh},
+ *       {:cap_set_ambient, mask}    -- K2 capability commands; child
+ *       applies the corresponding prctl/capset syscall per-thread
+ *     - EOF (parent closed without writing :proceed) -> :abort path;
+ *       child _exits 102
  *
  * The CLOEXEC trick on the c2p pipe is how the parent learns the
  * execve succeeded: nothing to write -- the kernel auto-closes the fd at
  * exec time, the parent sees EOF, and emits :running. If execve fails,
  * the child writes 'E' + errno + stage BEFORE the close-on-exec would
  * trigger, so the parent sees the failure with detail.
+ *
+ * The parent also polls c2p alongside the BEAM channel during the
+ * checkpoint window (see await_proceed) so that a K2 cap-command
+ * failure in the child surfaces as {:error, errno, stage} immediately,
+ * rather than getting stranded until :proceed is sent.
  *
  * EXIT CODES (of this agent, not the workload)
  * --------------------------------------------
