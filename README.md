@@ -2,7 +2,7 @@
 
 **Linux kernel interfaces for Elixir.**
 
-A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits, filesystem mounts, user-namespace identity mappings — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
+A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits, filesystem mounts, user-namespace identity mappings, per-process capability sets — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
 
 Linx is a library of **primitives**, not a runtime. A container engine, a network orchestrator, or an observability tool is a *consumer* of Linx; the runtime concepts (images, supervision policies, request routing) live in those projects.
 
@@ -196,7 +196,36 @@ iex> Cgroup.stats(cg)
 
 `Linx.Process` itself has no awareness of cgroups; the checkpoint is the only coupling, exactly the way `Linx.Netlink` integration works. Limits are in force from the moment of `execve`.
 
-The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`, drop processes into cgroups whether or not they're Linx-spawned. They compose because they share clean primitives, not because there's a framework holding them together.
+### Going further: strip capabilities before the workload runs
+
+The same checkpoint slot also accepts `Linx.Capabilities` write verbs. Drop everything the workload doesn't need from the kernel's perspective — bounding (one-way ceiling), the three thread sets, or the ambient set — before it ever starts:
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Capabilities
+
+iex> {:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> {:ok, host_pid} = P.host_pid(c)
+
+# Strip everything except cap_net_bind_service from bounding.
+iex> all = Linx.Capabilities.Constants.all()
+iex> keep = MapSet.new([:cap_net_bind_service])
+iex> :ok = Capabilities.drop_bounding(c, MapSet.difference(all, keep))
+
+iex> P.proceed(c)
+iex> receive do {:linx_process, :running} -> :ok end
+
+iex> {:ok, state} = Capabilities.read(host_pid)
+iex> state.bounding
+#MapSet<[:cap_net_bind_service]>
+```
+
+After `proceed/1`, nginx runs with exactly the one capability it needs to bind a privileged port — even if its binary has file caps that would otherwise grant more, because bounding masks them too. `set_thread_sets/2` (`capset(2)` for effective/permitted/inheritable) and `set_ambient/2` (caps that survive `execve` without file caps) are the other two verbs.
+
+> **Root only.** `PR_CAPBSET_DROP` and `capset(2)` require `CAP_SETPCAP` in the calling thread's effective set, which in practice means root. Uniquely among Linx subsystems, "rootless" doesn't help here.
+
+The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`, drop processes into cgroups whether or not they're Linx-spawned, configure caps on any session that's at the checkpoint. They compose because they share clean primitives, not because there's a framework holding them together.
 
 ## Subsystems
 
@@ -459,6 +488,66 @@ iex> User.read_uid_map(other_pid)  # multi-range identity (runc-style)
 
 More in [`docs/user/EXAMPLES.md`](docs/user/EXAMPLES.md).
 
+### `Linx.Capabilities` — per-process Linux capabilities
+
+The kernel's five per-thread capability sets (effective, permitted, inheritable, bounding, ambient) and the syscalls that read and manipulate them. Pure-Elixir read side from `/proc/<pid>/status`; agent-side write side through new checkpoint-window commands in the `Linx.Process` C agent.
+
+```elixir
+iex> alias Linx.Capabilities
+
+iex> Capabilities.supported?()
+true
+
+iex> {:ok, state} = Capabilities.read(:self)
+{:ok, #Linx.Capabilities.State<eff=0 prm=0 inh=0 bnd=41 amb=0>}
+
+iex> MapSet.member?(state.bounding, :cap_net_admin)
+true
+```
+
+**MapSets of `:cap_*` atoms.** Cap sets are 64-bit kernel bitmasks; in Elixir they're `MapSet`s of `:cap_*` atoms (`:cap_net_admin`, `:cap_sys_admin`, …). Set operations (`MapSet.union/2`, `MapSet.difference/2`) come for free; the bitmask conversion is isolated to `Linx.Capabilities.Constants`.
+
+**Read side** — `read/1` parses `/proc/<pid>/status` into a `%Linx.Capabilities.State{}`:
+
+```elixir
+iex> {:ok, state} = Capabilities.read(host_pid)
+iex> state.effective
+#MapSet<[]>
+iex> state.bounding
+#MapSet<[:cap_chown, :cap_dac_override, ...]>
+```
+
+Errors are structured: `%Linx.Capabilities.Error{path, operation, errno, code}` for procfs failures (`:enoent` if the pid is gone, `:eacces` for the rare permission case, `:bad_status` for a malformed file).
+
+**Forward compatibility** — if the kernel reports cap bits past Linx's table (a newer kernel with caps Linx hasn't catalogued yet), they're silently dropped from the returned MapSets and a single `Logger.warning/1` is emitted per read. The returned `%State{}` is still valid for every cap Linx *does* know about.
+
+**Write side — three checkpoint-window verbs**, all only valid in the `:ready` (parked) state, same shape as `Linx.Process.proceed/1`:
+
+```elixir
+# One-way drops from the bounding set (prctl(PR_CAPBSET_DROP)).
+:ok = Capabilities.drop_bounding(session, [:cap_sys_admin, :cap_sys_module])
+
+# Set all three thread sets at once (capset(2)). All three keys required.
+:ok = Capabilities.set_thread_sets(session,
+  effective: [:cap_net_bind_service],
+  permitted: [:cap_net_bind_service],
+  inheritable: []
+)
+
+# Replace the ambient set (prctl(PR_CAP_AMBIENT_CLEAR_ALL) + RAISE per cap).
+:ok = Capabilities.set_ambient(session, [:cap_net_bind_service])
+```
+
+The verbs are agent-side (the child applies them just before `execve`) — they can't be implemented as a NIF because `capset(2)` and `prctl(PR_CAP*)` are per-thread syscalls and the kernel rejects cross-thread calls. See "Going further: strip capabilities before the workload runs" above for the end-to-end recipe.
+
+**State-machine errors** mirror `Linx.Process.abort/1`: `{:error, :not_ready}` / `{:error, :running}` / `{:error, :already_terminated}`. Caller-side input errors: `{:error, {:bad_capability, atom}}` for unknown cap atoms, `{:error, {:bad_thread_sets, {:missing, key}}}` for `set_thread_sets/2` opts missing one of the three required keys. Kernel-level failures (the workload couldn't drop the cap, capset's subset rule was violated, etc.) arrive asynchronously as `{:linx_process, :error, errno, :cap_drop_bounding | :cap_set_thread | :cap_set_ambient}` on the owner's mailbox.
+
+**Root only for writes.** `PR_CAPBSET_DROP` and `capset(2)` require `CAP_SETPCAP` in the calling thread's effective set, which in practice means the BEAM runs as root.
+
+**File capabilities** (xattrs on binaries, the `setcap(8)` / `getcap(8)` surface) are out of scope for now — a future `Linx.Capabilities.File` is the natural home.
+
+More in [`docs/capabilities/EXAMPLES.md`](docs/capabilities/EXAMPLES.md).
+
 ### `Linx.Netlink` — netlink sockets, rtnetlink
 
 An `AF_NETLINK` client with the rtnetlink family fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
@@ -533,7 +622,8 @@ Each subsystem owns its docs under `docs/<subsystem>/` — `EXAMPLES.md` (iex-st
 - **Within `Linx.Cgroup`** — typed setters for less-common controllers (`io.max`, `cpuset.cpus`, `memory.swap.max`), event monitoring (`memory.events`, OOM notifications), `cgroup.kill` for atomic teardown.
 - **Within `Linx.Mount`** — the new mount API (`fsopen` / `fsmount` / `open_tree` / `move_mount` / `mount_setattr`); typed parsing of `mount_options` / `super_options`; `cgroup.kill`-style atomic-unmount-by-mount-id.
 - **Within `Linx.User`** — `newuidmap(1)` / `newgidmap(1)` integration for unprivileged multi-range maps via `/etc/subuid` / `/etc/subgid` (required for true `runc rootless`-parity).
-- **New subsystems on the horizon** — `Linx.Seccomp` (syscall filtering), `Linx.Capabilities` (`capset(2)` / file caps), a first hex release pulling the existing six subsystems together.
+- **Within `Linx.Capabilities`** — file capabilities (`security.capability` xattrs on binaries; the `setcap(8)` / `getcap(8)` surface), `PR_SET_NO_NEW_PRIVS` (probably under `Linx.Process` rather than here), `SECBIT_*` securebits, per-thread cap reads via `/proc/<pid>/task/<tid>/status`.
+- **New subsystems on the horizon** — `Linx.Seccomp` (syscall filtering, the last leg of the security-isolation tripod alongside `Linx.User` and `Linx.Capabilities`); a first hex release pulling the existing seven subsystems together.
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.
 

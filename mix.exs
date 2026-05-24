@@ -68,7 +68,11 @@ defmodule Linx.MixProject do
         "docs/user/EXAMPLES.md",
         "docs/user/PLAN.md",
         "docs/user/COVERAGE.md",
-        "docs/user/REFERENCES.md"
+        "docs/user/REFERENCES.md",
+        "docs/capabilities/EXAMPLES.md",
+        "docs/capabilities/PLAN.md",
+        "docs/capabilities/COVERAGE.md",
+        "docs/capabilities/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -108,6 +112,12 @@ defmodule Linx.MixProject do
           "docs/user/COVERAGE.md",
           "docs/user/REFERENCES.md"
         ],
+        "Capabilities — guides": ["docs/capabilities/EXAMPLES.md"],
+        "Capabilities — design": [
+          "docs/capabilities/PLAN.md",
+          "docs/capabilities/COVERAGE.md",
+          "docs/capabilities/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -140,6 +150,11 @@ defmodule Linx.MixProject do
           Linx.User,
           Linx.User.Error,
           Linx.User.Map
+        ],
+        Capabilities: [
+          Linx.Capabilities,
+          Linx.Capabilities.Error,
+          Linx.Capabilities.State
         ],
         "Netlink core": [
           Linx.Netlink,
