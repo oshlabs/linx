@@ -50,7 +50,8 @@
  *     - {:ready, pidns_internal_child_pid}
  *     - {:error, errno, stage_atom}     -- pre-exec failure; stage is
  *       :execve / :stdio / :cap_drop_bounding / :cap_set_thread /
- *       :cap_set_ambient (see enum stage / stage_name in this file)
+ *       :cap_set_ambient / :seccomp_install / :seccomp_no_new_privs
+ *       (see enum stage / stage_name in this file)
  *     - EOF (the child execve'd successfully and CLOEXEC closed the
  *       pipe) -> :running
  *
@@ -62,6 +63,9 @@
  *       {:cap_set_thread, eff, prm, inh},
  *       {:cap_set_ambient, mask}    -- K2 capability commands; child
  *       applies the corresponding prctl/capset syscall per-thread
+ *     - {:seccomp_install, <<bpf>>} -- S2 seccomp install; child sets
+ *       PR_SET_NO_NEW_PRIVS if not already on, then calls
+ *       seccomp(SECCOMP_SET_MODE_FILTER) with the cBPF blob
  *     - EOF (parent closed without writing :proceed) -> :abort path;
  *       child _exits 102
  *
@@ -107,8 +111,10 @@
  *     (4.6+), CLONE_NEWTIME (5.6+), and the older NEW* flags.
  *   - prctl(PR_CAPBSET_DROP)              -- 2.6.25+
  *   - prctl(PR_CAP_AMBIENT_*)             -- 4.3+
+ *   - prctl(PR_SET_NO_NEW_PRIVS)          -- 3.5+
  *   - capset(2) v3 layout                 -- 2.6.26+
  *   - CAP_LAST_CAP = 40 (cap_checkpoint_restore) -- 5.8+
+ *   - seccomp(2) SECCOMP_SET_MODE_FILTER  -- 3.17+
  *   - signalfd(2)                         -- 2.6.22+
  *   - pipe2(2)                            -- 2.6.27+
  *
@@ -124,10 +130,13 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/capability.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,6 +171,8 @@ enum stage {
 	STAGE_CAP_DROP_BOUNDING = 3, /* prctl(PR_CAPBSET_DROP) failed in the child */
 	STAGE_CAP_SET_THREAD = 4,    /* capset(2) failed in the child */
 	STAGE_CAP_SET_AMBIENT = 5,   /* prctl(PR_CAP_AMBIENT_*) failed in the child */
+	STAGE_SECCOMP_NO_NEW_PRIVS = 6, /* prctl(PR_SET_NO_NEW_PRIVS) failed in the child */
+	STAGE_SECCOMP_INSTALL = 7,   /* seccomp(SECCOMP_SET_MODE_FILTER) failed in the child */
 };
 
 static const char *stage_name(enum stage s)
@@ -172,6 +183,8 @@ static const char *stage_name(enum stage s)
 	case STAGE_CAP_DROP_BOUNDING: return "cap_drop_bounding";
 	case STAGE_CAP_SET_THREAD:   return "cap_set_thread";
 	case STAGE_CAP_SET_AMBIENT:  return "cap_set_ambient";
+	case STAGE_SECCOMP_NO_NEW_PRIVS: return "seccomp_no_new_privs";
+	case STAGE_SECCOMP_INSTALL:  return "seccomp_install";
 	}
 	return "unknown";
 }
@@ -382,6 +395,7 @@ struct request {
 	int all_ns;
 	struct stdio_dir stdio[3];
 	int pty;
+	int no_new_privs; /* set PR_SET_NO_NEW_PRIVS in child before checkpoint */
 };
 
 static void free_str_array(char **arr)
@@ -675,6 +689,12 @@ static int decode_request(const uint8_t *buf, int len, struct request *req)
 		} else if (strcmp(key, "stdio") == 0) {
 			if (decode_stdio((const char *)buf, &idx, req) < 0)
 				return -1;
+		} else if (strcmp(key, "no_new_privs") == 0) {
+			/* Boolean. ei_decode_boolean wants `int *`. */
+			int b;
+			if (ei_decode_boolean((const char *)buf, &idx, &b) < 0)
+				return -1;
+			req->no_new_privs = b ? 1 : 0;
 		} else {
 			/* Skip unknown keys -- the BEAM may carry extras we
 			 * don't yet understand; future-compatibility. */
@@ -787,6 +807,7 @@ struct child_args {
 	struct stdio_dir stdio[3];
 	int pty_master;
 	int pty_slave;
+	int no_new_privs; /* call apply_no_new_privs() early in child_fn */
 };
 
 /* Report an in-child pre-exec failure as a `{:error, errno, stage_atom}`
@@ -939,6 +960,65 @@ static int apply_cap_set_ambient(uint64_t mask)
 	return 0;
 }
 
+/* --- S2 seccomp syscalls (per-thread, called from the child) ----------- */
+
+/* prctl(PR_SET_NO_NEW_PRIVS, 1) -- forbid this thread and its descendants
+ * from ever gaining new privileges via setuid/file-caps on execve. This
+ * is the precondition the kernel demands before an unprivileged caller
+ * can install a seccomp filter (without CAP_SYS_ADMIN); we also expose
+ * it as an option on `Linx.Process.spawn/1` for callers who want the
+ * security posture without seccomp itself.
+ *
+ * One-way: once set, NNP stays on across execve and clone. Linux 3.5+.
+ * Returns -1 on failure (errno preserved). */
+static int apply_no_new_privs(void)
+{
+	return prctl(PR_SET_NO_NEW_PRIVS, 1UL, 0UL, 0UL, 0UL);
+}
+
+/* PR_GET_NO_NEW_PRIVS returns 0 if NNP is off, 1 if on. Negative on
+ * the (unlikely) failure case -- we treat that as "off" and let the
+ * subsequent set attempt surface the real error. */
+static int get_no_new_privs(void)
+{
+	int r = prctl(PR_GET_NO_NEW_PRIVS, 0UL, 0UL, 0UL, 0UL);
+	return r < 0 ? 0 : r;
+}
+
+/* Install the cBPF program `bpf` (len bytes, must be a multiple of 8 --
+ * struct sock_filter is 8 bytes) as a seccomp filter on the calling
+ * thread.
+ *
+ * Direct `syscall(SYS_seccomp, ...)` so we don't depend on the libc
+ * wrapper (added in glibc 2.27); the linx-process binary should run
+ * on older systems too. Linux 3.17+ for the seccomp(2) entry point.
+ *
+ * Returns 0 on success, -1 with errno on failure. EINVAL is the usual
+ * "malformed BPF" code. */
+static int apply_seccomp(const void *bpf, size_t len)
+{
+	if (len == 0 || (len % sizeof(struct sock_filter)) != 0) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	size_t n = len / sizeof(struct sock_filter);
+	if (n > 0xFFFF) {
+		/* struct sock_fprog.len is a u16; > 65535 instructions
+		 * can't be represented. (Real filters are 5..a few
+		 * hundred; this is defensive.) */
+		errno = E2BIG;
+		return -1;
+	}
+
+	struct sock_fprog prog = {
+		.len = (unsigned short)n,
+		.filter = (struct sock_filter *)bpf,
+	};
+
+	return (int)syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0UL, &prog);
+}
+
 /* Read + dispatch one checkpoint-window command frame from `p2c_r`.
  * Returns:
  *    0 -- a cap_* command was applied successfully; caller should loop
@@ -953,7 +1033,14 @@ static int apply_cap_set_ambient(uint64_t mask)
  * with the appropriate stage; it does not return. */
 static int child_read_command(int p2c_r, int c2p_w)
 {
-	uint8_t buf[256];
+	/* Buffer needs to accommodate the largest checkpoint command. K2 cap
+	 * commands are tiny (a few u64s); seccomp_install carries a binary
+	 * cBPF blob -- 8 bytes per instruction, hundreds of instructions for
+	 * realistic filters. 8 KiB fits ~1000 instructions including ei
+	 * encoding overhead, well over any practical filter (the hand-
+	 * curated syscall tables have < 250 entries). The matching forward-
+	 * side buffer in await_proceed is the same size. */
+	uint8_t buf[8192];
 	ssize_t len = read_frame_fd(p2c_r, buf, sizeof buf);
 	if (len < 0) {
 		/* EOF (errno == 0) means the parent closed p2c without
@@ -1023,6 +1110,45 @@ static int child_read_command(int p2c_r, int c2p_w)
 		return 0;
 	}
 
+	/* {:seccomp_install, <<bpf>>} -- the S2 seccomp install command.
+	 * seccomp(SECCOMP_SET_MODE_FILTER) requires either CAP_SYS_ADMIN
+	 * or PR_SET_NO_NEW_PRIVS to be on. If NNP isn't on we set it now
+	 * ("be helpful" per PLAN.md D2 -- callers who forgot the spawn
+	 * opt shouldn't get a confusing EPERM from the install). NNP is
+	 * a one-way bit and harmless when set redundantly. */
+	if (strcmp(tag, "seccomp_install") == 0 && arity == 2) {
+		int btype, bsize;
+		if (ei_get_type((const char *)buf, &idx, &btype, &bsize) < 0)
+			return -2;
+		if (btype != ERL_BINARY_EXT)
+			return -2;
+		/* The BPF binary lives inline in `buf` after our 4-byte
+		 * binary header. ei_decode_binary copies it out; we then
+		 * hand the copy to apply_seccomp and free after. */
+		void *bpf = malloc((size_t)bsize);
+		if (!bpf)
+			child_fail(c2p_w, ENOMEM, STAGE_SECCOMP_INSTALL);
+		long got;
+		if (ei_decode_binary((const char *)buf, &idx, bpf, &got) < 0) {
+			free(bpf);
+			return -2;
+		}
+		if (!get_no_new_privs()) {
+			if (apply_no_new_privs() < 0) {
+				int err = errno;
+				free(bpf);
+				child_fail(c2p_w, err, STAGE_SECCOMP_NO_NEW_PRIVS);
+			}
+		}
+		if (apply_seccomp(bpf, (size_t)got) < 0) {
+			int err = errno;
+			free(bpf);
+			child_fail(c2p_w, err, STAGE_SECCOMP_INSTALL);
+		}
+		free(bpf);
+		return 0;
+	}
+
 	return -2;
 }
 
@@ -1045,6 +1171,18 @@ static int child_fn(void *arg)
 	if (ca->c2p_r >= 0) close(ca->c2p_r);
 	if (ca->p2c_w >= 0) close(ca->p2c_w);
 
+	/* If the caller asked for PR_SET_NO_NEW_PRIVS at spawn time (the D2
+	 * spawn-time NNP path -- both the principled home for NNP as a
+	 * security posture *and* the precondition for unprivileged seccomp
+	 * installs at the checkpoint), set it now. The cap-command and
+	 * seccomp_install branches below also auto-set NNP if needed (the
+	 * "be helpful" path), but doing it here keeps the workload's
+	 * pre-checkpoint state predictable for callers who explicitly asked. */
+	if (ca->no_new_privs) {
+		if (apply_no_new_privs() < 0)
+			child_fail(ca->c2p_w, errno, STAGE_SECCOMP_NO_NEW_PRIVS);
+	}
+
 	/* :ready -- send {:ready, pidns_internal_pid} as an ei frame. */
 	{
 		ei_x_buff x;
@@ -1059,8 +1197,9 @@ static int child_fn(void *arg)
 	}
 
 	/* Loop on checkpoint-window commands. {:cap_*, _} tuples apply
-	 * per-thread cap syscalls (K2); :proceed breaks the loop. A
-	 * closed p2c (EOF) is the :abort path -- exit 102. */
+	 * per-thread cap syscalls (K2); {:seccomp_install, _} installs
+	 * a cBPF filter (S2); :proceed breaks the loop. A closed p2c
+	 * (EOF) is the :abort path -- exit 102. */
 	for (;;) {
 		int r = child_read_command(ca->p2c_r, ca->c2p_w);
 		if (r == 1) break;        /* :proceed */
@@ -1137,6 +1276,10 @@ static int await_exec_outcome(int c2p_r)
  *     apply these on the child's behalf (capset/prctl are per-thread),
  *     so we forward the frame verbatim to `p2c_w` and the child applies
  *     it before execve.
+ *
+ *   * {:seccomp_install, <<bpf>>} -- S2 seccomp install. Same per-thread
+ *     constraint as the cap commands -- the agent forwards verbatim and
+ *     the child does the seccomp(2) syscall before execve.
  *
  *   * :proceed -- forwarded as a frame to `p2c_w` (the sentinel that
  *     ends the child's checkpoint-command loop). Returns 0.
@@ -1219,7 +1362,10 @@ static int await_proceed(int pty_master, int p2c_w, int c2p_r)
 			continue;
 		}
 
-		uint8_t buf[256];
+		/* Same 8 KiB ceiling as child_read_command -- this buffer
+		 * has to accommodate {:seccomp_install, <<bpf>>} before
+		 * we forward it verbatim to p2c. */
+		uint8_t buf[8192];
 		ssize_t len = read_frame(buf, sizeof buf);
 		if (len < 0)
 			return -1;
@@ -1253,7 +1399,8 @@ static int await_proceed(int pty_master, int p2c_w, int c2p_r)
 		 *   {:pty_winsize, _}             -- applied in-agent
 		 *   {:cap_drop_bounding, _}       -- forwarded to child
 		 *   {:cap_set_thread, _, _, _}    -- forwarded to child
-		 *   {:cap_set_ambient, _}         -- forwarded to child */
+		 *   {:cap_set_ambient, _}         -- forwarded to child
+		 *   {:seccomp_install, <<bpf>>}   -- forwarded to child */
 		if (type != ERL_SMALL_TUPLE_EXT && type != ERL_LARGE_TUPLE_EXT)
 			return -1;
 
@@ -1272,6 +1419,17 @@ static int await_proceed(int pty_master, int p2c_w, int c2p_r)
 		if ((strcmp(tag, "cap_drop_bounding") == 0 && arity == 2) ||
 		    (strcmp(tag, "cap_set_thread")    == 0 && arity == 4) ||
 		    (strcmp(tag, "cap_set_ambient")   == 0 && arity == 2)) {
+			if (write_frame_fd(p2c_w, buf, (uint32_t)len) < 0)
+				return -1;
+			continue;
+		}
+
+		/* {:seccomp_install, <<bpf>>} -- S2 seccomp install. Same
+		 * shape as the cap commands: forward verbatim and let the
+		 * child do the per-thread `seccomp(SECCOMP_SET_MODE_FILTER)`
+		 * call. Failures surface via the c2p poll branch with
+		 * stage :seccomp_install or :seccomp_no_new_privs. */
+		if (strcmp(tag, "seccomp_install") == 0 && arity == 2) {
 			if (write_frame_fd(p2c_w, buf, (uint32_t)len) < 0)
 				return -1;
 			continue;
@@ -1661,6 +1819,7 @@ int main(void)
 		.env = child_env,
 		.pty_master = -1,
 		.pty_slave = -1,
+		.no_new_privs = req.no_new_privs,
 	};
 	for (int i = 0; i < 3; i++)
 		ca.stdio[i] = req.stdio[i];

@@ -72,7 +72,11 @@ defmodule Linx.MixProject do
         "docs/capabilities/EXAMPLES.md",
         "docs/capabilities/PLAN.md",
         "docs/capabilities/COVERAGE.md",
-        "docs/capabilities/REFERENCES.md"
+        "docs/capabilities/REFERENCES.md",
+        "docs/seccomp/EXAMPLES.md",
+        "docs/seccomp/PLAN.md",
+        "docs/seccomp/COVERAGE.md",
+        "docs/seccomp/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -118,6 +122,12 @@ defmodule Linx.MixProject do
           "docs/capabilities/COVERAGE.md",
           "docs/capabilities/REFERENCES.md"
         ],
+        "Seccomp — guides": ["docs/seccomp/EXAMPLES.md"],
+        "Seccomp — design": [
+          "docs/seccomp/PLAN.md",
+          "docs/seccomp/COVERAGE.md",
+          "docs/seccomp/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -156,6 +166,12 @@ defmodule Linx.MixProject do
           Linx.Capabilities,
           Linx.Capabilities.Error,
           Linx.Capabilities.State
+        ],
+        Seccomp: [
+          Linx.Seccomp,
+          Linx.Seccomp.Builder,
+          Linx.Seccomp.Error,
+          Linx.Seccomp.Filter
         ],
         "Netlink core": [
           Linx.Netlink,

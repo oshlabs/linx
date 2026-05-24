@@ -77,6 +77,14 @@ defmodule Linx.Process do
     * `:cap_drop_bounding`, `:cap_set_thread`, `:cap_set_ambient` —
       one of the K2 capability syscalls failed in the child
       (`Linx.Capabilities`).
+    * `:seccomp_install` — `seccomp(SECCOMP_SET_MODE_FILTER, …)` failed
+      in the child (`Linx.Seccomp.install/2`). Common errno is `EINVAL`
+      (22) for a malformed cBPF blob; `EPERM` (1) when the caller is
+      unprivileged and `PR_SET_NO_NEW_PRIVS` isn't on (and the
+      "be helpful" auto-set also failed).
+    * `:seccomp_no_new_privs` — `prctl(PR_SET_NO_NEW_PRIVS, 1)` failed
+      in the child. Rare; the only documented failure mode is `EINVAL`
+      under an exotic LSM policy.
 
   ### Transport (BEAM ↔ agent wire)
 
@@ -161,7 +169,9 @@ defmodule Linx.Process do
     :open_ns_cgroup,
     :open_ns_net,
     :open_ns_time,
-    :open_ns_pid
+    :open_ns_pid,
+    :seccomp_install,
+    :seccomp_no_new_privs
   ]
 
   @doc false
@@ -511,10 +521,12 @@ defmodule Linx.Process do
     with {:ok, argv} <- fetch_argv(opts),
          {:ok, namespaces} <- fetch_namespaces(opts),
          {:ok, env} <- fetch_env(opts),
-         {:ok, stdio} <- fetch_stdio(opts) do
+         {:ok, stdio} <- fetch_stdio(opts),
+         {:ok, nnp} <- fetch_no_new_privs(opts) do
       request = %{argv: argv, namespaces: namespaces}
       request = if env, do: Map.put(request, :env, env), else: request
       request = if stdio, do: Map.put(request, :stdio, stdio), else: request
+      request = if nnp, do: Map.put(request, :no_new_privs, true), else: request
       {:ok, request}
     end
   end
@@ -526,12 +538,26 @@ defmodule Linx.Process do
     with {:ok, argv} <- fetch_argv(opts),
          {:ok, namespaces} <- fetch_optional_namespaces(opts),
          {:ok, env} <- fetch_env(opts),
-         {:ok, stdio} <- fetch_stdio(opts) do
+         {:ok, stdio} <- fetch_stdio(opts),
+         {:ok, nnp} <- fetch_no_new_privs(opts) do
       request = %{target: target_pid, argv: argv}
       request = if namespaces, do: Map.put(request, :namespaces, namespaces), else: request
       request = if env, do: Map.put(request, :env, env), else: request
       request = if stdio, do: Map.put(request, :stdio, stdio), else: request
+      request = if nnp, do: Map.put(request, :no_new_privs, true), else: request
       {:ok, request}
+    end
+  end
+
+  # Boolean opt; absent or false → omit from the wire request entirely.
+  # The agent's default is "NNP off" and we want the wire shape to match
+  # callers that don't think about this opt at all.
+  defp fetch_no_new_privs(opts) do
+    case Keyword.fetch(opts, :no_new_privs) do
+      :error -> {:ok, false}
+      {:ok, true} -> {:ok, true}
+      {:ok, false} -> {:ok, false}
+      {:ok, _other} -> {:error, :bad_no_new_privs}
     end
   end
 
@@ -774,6 +800,33 @@ defmodule Linx.Process do
       )
       when is_integer(e) and e >= 0 and is_integer(p) and p >= 0 and
              is_integer(i) and i >= 0 do
+    Port.command(port, :erlang.term_to_binary(call))
+    {:reply, :ok, state}
+  end
+
+  # S2 -- Linx.Seccomp.install/2. Same state-machine guards as the
+  # K2 cap commands (:already_terminated > :running > :not_ready >
+  # forward). The wire frame is {:seccomp_install, <<bpf>>}; the
+  # agent forwards it verbatim to the child, which sets NNP (if not
+  # on) and calls seccomp(SECCOMP_SET_MODE_FILTER) before execve.
+  # Failures surface asynchronously as
+  # {:linx_process, :error, errno, :seccomp_install | :seccomp_no_new_privs}.
+
+  def handle_call({:seccomp_install, _bpf}, _from, %{result: result} = state)
+      when result != nil do
+    {:reply, {:error, :already_terminated}, state}
+  end
+
+  def handle_call({:seccomp_install, _bpf}, _from, %{running?: true} = state) do
+    {:reply, {:error, :running}, state}
+  end
+
+  def handle_call({:seccomp_install, _bpf}, _from, %{child_pid: nil} = state) do
+    {:reply, {:error, :not_ready}, state}
+  end
+
+  def handle_call({:seccomp_install, bpf} = call, _from, %{port: port} = state)
+      when is_binary(bpf) do
     Port.command(port, :erlang.term_to_binary(call))
     {:reply, :ok, state}
   end
