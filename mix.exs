@@ -59,7 +59,11 @@ defmodule Linx.MixProject do
         "docs/cgroup/EXAMPLES.md",
         "docs/cgroup/PLAN.md",
         "docs/cgroup/COVERAGE.md",
-        "docs/cgroup/REFERENCES.md"
+        "docs/cgroup/REFERENCES.md",
+        "docs/mount/EXAMPLES.md",
+        "docs/mount/PLAN.md",
+        "docs/mount/COVERAGE.md",
+        "docs/mount/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -86,6 +90,12 @@ defmodule Linx.MixProject do
           "docs/cgroup/PLAN.md",
           "docs/cgroup/COVERAGE.md",
           "docs/cgroup/REFERENCES.md"
+        ],
+        "Mount — guides": ["docs/mount/EXAMPLES.md"],
+        "Mount — design": [
+          "docs/mount/PLAN.md",
+          "docs/mount/COVERAGE.md",
+          "docs/mount/REFERENCES.md"
         ],
         "Repo-wide": ["AGENTS.md"]
       ],
