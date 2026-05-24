@@ -85,6 +85,24 @@
  *   4   internal pipe failure
  *
  * The workload's own exit code is reported as {:status, :exited, code}.
+ *
+ * KERNEL FLOOR
+ * ------------
+ * This file uses syscalls and constants that need Linux >= 5.8:
+ *
+ *   - clone(2) namespace flags: CLONE_NEWUSER (3.8+), CLONE_NEWCGROUP
+ *     (4.6+), CLONE_NEWTIME (5.6+), and the older NEW* flags.
+ *   - prctl(PR_CAPBSET_DROP)              -- 2.6.25+
+ *   - prctl(PR_CAP_AMBIENT_*)             -- 4.3+
+ *   - capset(2) v3 layout                 -- 2.6.26+
+ *   - CAP_LAST_CAP = 40 (cap_checkpoint_restore) -- 5.8+
+ *   - signalfd(2)                         -- 2.6.22+
+ *   - pipe2(2)                            -- 2.6.27+
+ *
+ * 5.8 is the effective floor (driven by the cap table in
+ * Linx.Capabilities.Constants). Older kernels may compile, but the
+ * cap-table forward-compat path will treat any post-2.6.25 missing
+ * caps as :unknown rather than refusing to run.
  */
 
 #define _GNU_SOURCE
@@ -1003,15 +1021,14 @@ static int child_fn(void *arg)
 {
 	struct child_args *ca = arg;
 
-	/* Close the parent's ends of our internal pipes. clone(2) gives
-	 * the child the full inherited fd table -- including the parent's
-	 * c2p[0] (read end) and p2c[1] (write end) -- and unless we close
-	 * them here, closing them in the parent leaves the kernel still
-	 * counting one writer (us) on p2c, so the child's read on p2c_r
-	 * would never see EOF if the parent abandons the session. That
-	 * matters for the :abort path. (The fork() branch in main does
-	 * these closes explicitly before calling child_fn; here we
-	 * centralise them so both paths converge on the same shape.) */
+	/* Close the parent's ends of our internal pipes. clone(2) and
+	 * fork(2) both give the child the full inherited fd table --
+	 * including the parent's c2p[0] (read end) and p2c[1] (write
+	 * end) -- and unless we close them here, closing them in the
+	 * parent leaves the kernel still counting one writer (us) on
+	 * p2c, so the child's read on p2c_r would never see EOF if
+	 * the parent abandons the session. That matters for the
+	 * :abort path. */
 	if (ca->c2p_r >= 0) close(ca->c2p_r);
 	if (ca->p2c_w >= 0) close(ca->p2c_w);
 
@@ -1300,14 +1317,19 @@ struct post_running_cmd {
  *   {:pty_in, binary}              -- write to the PTY master (PTY mode)
  *   {:pty_winsize, {r, c, xp, yp}} -- TIOCSWINSZ on the PTY master
  *
- * Returns 0 on success (cmd filled), -1 on parse failure (cmd untouched),
- * -2 on EOF/IO error so the caller can distinguish "BEAM went away". */
+ * Returns:
+ *    0 on success (cmd filled)
+ *   -1 on parse failure (cmd untouched; recoverable)
+ *   -2 on EOF/IO error -- "BEAM went away"
+ *   -3 on oversized frame (EMSGSIZE) -- the wire is now desynced
+ *      because we consumed the 4-byte header but skipped the body;
+ *      the caller must surface an error and tear down. */
 static int read_post_running_command(struct post_running_cmd *cmd)
 {
-	uint8_t buf[8192];
+	uint8_t buf[32768];
 	ssize_t len = read_frame(buf, sizeof buf);
 	if (len < 0)
-		return -2;
+		return errno == EMSGSIZE ? -3 : -2;
 
 	int idx = 0, version;
 	if (ei_decode_version((const char *)buf, &idx, &version) < 0)
@@ -1463,6 +1485,18 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 				case CMD_NONE:
 					break;
 				}
+			} else if (r == -3) {
+				/* Oversized frame on fd 3 -- the wire is
+				 * desynced (we ate the 4-byte header but
+				 * skipped the body). Can't recover; surface
+				 * a clean error, SIGKILL the workload so
+				 * the session ends, and stop polling fd 3
+				 * to avoid spinning on the desynced bytes.
+				 * SIGCHLD will fire shortly, the supervise
+				 * loop reaps, and main returns. */
+				emit_error(EMSGSIZE, "command_too_big");
+				kill(child_pid, SIGKILL);
+				pfds[0].fd = -1;
 			}
 		}
 		if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL))
@@ -1560,11 +1594,21 @@ int main(void)
 	}
 
 	/* Read the spawn request. */
-	uint8_t req_buf[8192];
+	uint8_t req_buf[32768];
 	ssize_t req_len = read_frame(req_buf, sizeof req_buf);
 	if (req_len < 0) {
-		fprintf(stderr, "linx_process: read spawn request: %s\n",
-			errno ? strerror(errno) : "eof");
+		if (errno == EMSGSIZE) {
+			/* Frame exceeded our buffer cap (envs and argvs
+			 * are the usual culprits at scale). Surface a
+			 * clean structured error to the BEAM-side
+			 * GenServer before bailing -- without this, the
+			 * caller just sees the port close with no
+			 * detail. */
+			emit_error(EMSGSIZE, "request_too_big");
+		} else {
+			fprintf(stderr, "linx_process: read spawn request: %s\n",
+				errno ? strerror(errno) : "eof");
+		}
 		return 1;
 	}
 
@@ -1692,11 +1736,11 @@ int main(void)
 			return 3;
 		}
 		if (pid == 0) {
-			/* Child: close the parent ends of our internal pipes
-			 * and reuse the same checkpoint+execve logic the
-			 * cloned-child path runs. */
-			close(c2p[0]);
-			close(p2c[1]);
+			/* Child: reuse the same checkpoint+execve logic
+			 * the cloned-child path runs. child_fn does its
+			 * own fd hygiene (closing the parent ends of our
+			 * internal pipes) on entry, so we don't need to
+			 * touch them here. */
 			child_fn(&ca);
 			_exit(127); /* unreachable */
 		}
