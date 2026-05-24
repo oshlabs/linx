@@ -16,11 +16,11 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `list/0` | ⬜ | M0 — parse `/proc/self/mountinfo` |
-| `list/1` (`{:pid, n}`) | ⬜ | M0 — parse `/proc/<n>/mountinfo` |
-| `list/1` (`{:path, p}`) | ⏳ | covered by the same parser; lands when used |
-| Octal-escape decoding (`\040` etc.) | ⬜ | M0 — paths with spaces, tabs, newlines |
-| Optional fields (`shared:`, `master:`, …) | ⬜ | M0 — exposed as a list |
+| `list/0` | ✅ | M0 — parse `/proc/self/mountinfo` |
+| `list/1` (`{:pid, n}`) | ✅ | M0 — parse `/proc/<n>/mountinfo` |
+| `list/1` (`{:path, p}`) | ✅ | M0 — reads any mountinfo-format file |
+| Octal-escape decoding (`\040` etc.) | ✅ | M0 — paths with spaces, tabs, newlines, backslashes |
+| Optional fields (`shared:`, `master:`, …) | ✅ | M0 — exposed as a list of `{:tag, n}` / `:unbindable` |
 
 ## Core verbs
 
@@ -91,7 +91,7 @@ A living doc — update as primitives ship. Status legend:
 
 | Module | Status | Notes |
 |---|---|---|
-| `Linx.Mount.Entry` | ⬜ | M0 — parsed `/proc/<pid>/mountinfo` line |
+| `Linx.Mount.Entry` | ✅ | M0 — parsed `/proc/<pid>/mountinfo` line |
 | `Linx.Mount.Error` | ⬜ | M1 — POSIX-atom errno + path + operation |
 
 ## Error reporting

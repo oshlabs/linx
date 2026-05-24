@@ -119,6 +119,10 @@ defmodule Linx.MixProject do
           Linx.Cgroup.Error,
           Linx.Cgroup.Stats
         ],
+        Mount: [
+          Linx.Mount,
+          Linx.Mount.Entry
+        ],
         "Netlink core": [
           Linx.Netlink,
           Linx.Netlink.Socket,
