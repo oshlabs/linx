@@ -12,10 +12,11 @@ also plain — no installation, no root. Installation
 needs a parked session and (typically) `no_new_privs: true` or
 root.
 
-> 🚧 **In progress.** S0 + S1 are live (detection, syscall table,
-> filter construction, BPF compiler). S2 (kernel-side install at
-> the `Linx.Process` checkpoint) is still in flight. See
-> `PLAN.md` for the roadmap and `COVERAGE.md` for what's in / out.
+> **Status: live.** S0–S2 are shipped — detection, syscall table,
+> filter construction, BPF compiler, and kernel-side install at the
+> `Linx.Process` checkpoint. See `PLAN.md` for the design notes and
+> `COVERAGE.md` for the feature matrix. Per-arg matching (`allow_if/3`)
+> is the deferred S1.5 surface.
 
 ## Detecting seccomp support
 
@@ -160,7 +161,7 @@ the rare `:build` failure that doesn't fit a tagged tuple — today
 just `:e2big` for filters that overflow the 255-instruction jump
 limit.
 
-## (Will land with S2 — install at the checkpoint)
+## Installing a filter at the checkpoint
 
 The headline composition — spawn a workload, install a filter
 before it `execve`s, observe it run with a constrained syscall
@@ -219,7 +220,7 @@ Together: nginx runs as a (mapped) user, with
 `cap_net_bind_service` only, calling only the syscalls in the
 allow-list. Three orthogonal envelopes, three independent verbs.
 
-## (Will land with S2 — observing kernel rejection)
+## Observing kernel rejection — `SIGSYS` on `:kill_process`
 
 If the workload tries a syscall its filter denies with
 `:kill_process`, the kernel sends `SIGSYS` and the process
@@ -245,7 +246,7 @@ receive do {:linx_process, :ready, _} -> :ok end
 receive do {:linx_process, :signaled, 31} -> :ok end
 ```
 
-## (Will land with S2 — graceful failure with errno)
+## Graceful degradation — `{:errno, _}` actions
 
 For workloads where you want graceful degradation rather than
 hard kill, use `{:errno, _}` actions:

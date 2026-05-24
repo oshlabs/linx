@@ -63,35 +63,35 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `install/2` | ⬜ | S2 — Elixir verb; only valid in `:ready` state |
-| Agent-side `apply_seccomp` in `linx_process.c` | ⬜ | S2 — direct `syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, …)` |
-| `{:seccomp_install, bpf_blob}` checkpoint command | ⬜ | S2 — forwarded verbatim through p2c (same as K2 cap commands) |
-| State-machine guards (only at `:ready`) | ⬜ | S2 — mirrors `proceed/1` / `abort/1` / K2 cap verbs |
-| Error stages `:seccomp_install`, `:seccomp_no_new_privs` | ⬜ | S2 — surface via `{:linx_process, :error, errno, stage}` |
+| `install/2` | ✅ | S2 — Elixir verb; checkpoint-bound (`:not_ready` / `:running` / `:already_terminated` guards) |
+| Agent-side `apply_seccomp` in `linx_process.c` | ✅ | S2 — direct `syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, …)`; no libc wrapper dependency |
+| `{:seccomp_install, bpf_blob}` checkpoint command | ✅ | S2 — forwarded verbatim through p2c (same shape as K2 cap commands); 8 KiB frame ceiling |
+| State-machine guards (only at `:ready`) | ✅ | S2 — mirrors `proceed/1` / `abort/1` / K2 cap verbs |
+| Error stages `:seccomp_install`, `:seccomp_no_new_privs` | ✅ | S2 — surface via `{:linx_process, :error, errno, stage}` |
 
 ## `PR_SET_NO_NEW_PRIVS` support
 
 | Feature | Status | Notes |
 |---|---|---|
-| `no_new_privs:` opt on `Linx.Process.spawn/1` | ⬜ | S2 — sets NNP early in child_fn, before the command loop |
-| `no_new_privs:` opt on `Linx.Process.enter/2` | ⬜ | S2 — same shape |
-| `Linx.Seccomp.install/2` auto-sets NNP if unprivileged | ⬜ | S2 — "be helpful" path so callers who forgot the spawn opt don't get a confusing EPERM |
+| `no_new_privs:` opt on `Linx.Process.spawn/1` | ✅ | S2 — sets NNP early in child_fn, before the command loop |
+| `no_new_privs:` opt on `Linx.Process.enter/2` | ✅ | S2 — same shape (shared `build_*_request` plumbing) |
+| `Linx.Seccomp.install/2` auto-sets NNP if unprivileged | ✅ | S2 — `child_read_command` checks `PR_GET_NO_NEW_PRIVS` and sets it before calling seccomp — the "be helpful" path so callers who forgot the spawn opt don't get a confusing EPERM |
 
 ## Composition with other subsystems
 
 | Pairing | Status | Notes |
 |---|---|---|
-| `Linx.Process` filter install at checkpoint | ⬜ | S2 — reuses the K2 command-protocol scaffolding |
-| `Linx.Capabilities` + `Linx.Seccomp` interplay | ⏳ | S2 — documented in EXAMPLES; the composition order (caps then seccomp) matters but no Linx code needs to change |
-| `Linx.User` + `Linx.Seccomp` (rootless) | ⏳ | S2 — works with `no_new_privs: true` and seccomp install in the new user ns; documented in EXAMPLES |
+| `Linx.Process` filter install at checkpoint | ✅ | S2 — reuses the K2 command-protocol scaffolding (single `await_proceed` dispatch, single `child_read_command` decode loop) |
+| `Linx.Capabilities` + `Linx.Seccomp` interplay | ✅ | S2 — integration-tested (`drop_bounding/2` + `install/2` at the same checkpoint); composition order (caps then seccomp) matters in principle but not for correctness |
+| `Linx.User` + `Linx.Seccomp` (rootless) | ⏳ | Works with `no_new_privs: true` and seccomp install in the new user ns; documented in EXAMPLES — no extra Linx code needed |
 
 ## Error reporting
 
 | Mechanism | Status | Notes |
 |---|---|---|
-| `%Linx.Seccomp.Error{operation, errno, code}` | ✅ | S1 — `:build` for caller-side compile failures (currently only the jump-overflow case); `:install` / `:set_no_new_privs` reserved for S2 |
-| `{:linx_process, :error, errno, :seccomp_install}` | ⬜ | S2 — kernel-side install failures |
-| `{:linx_process, :error, errno, :seccomp_no_new_privs}` | ⬜ | S2 — `PR_SET_NO_NEW_PRIVS` failures (rare) |
+| `%Linx.Seccomp.Error{operation, errno, code}` | ✅ | S1 — `:build` for caller-side compile failures (currently only the jump-overflow case); `:install` / `:set_no_new_privs` operations reserved for normalising S2 install errors |
+| `{:linx_process, :error, errno, :seccomp_install}` | ✅ | S2 — kernel-side install failures; `EINVAL` for malformed BPF, `EPERM` when unprivileged + NNP-auto-set also failed |
+| `{:linx_process, :error, errno, :seccomp_no_new_privs}` | ✅ | S2 — `PR_SET_NO_NEW_PRIVS` failures (rare; usually exotic LSM policy) |
 | `{:error, {:unknown_syscall, atom}}` | ✅ | S1 — caller-side unknown atom |
 | `{:error, {:bad_action, term}}` | ✅ | S1 — caller-side malformed action |
 | `{:error, {:duplicate_rule, atom}}` | ✅ | S1 — caller-side duplicate syscall in a rule list |

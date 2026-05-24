@@ -76,15 +76,18 @@ defmodule Linx.Seccomp do
 
   ## Status
 
-  S0 is shipped: `supported?/0`, `arch/0`, the constants table
-  (`Linx.Seccomp.Constants`), the per-arch syscall table
-  (`Linx.Seccomp.Syscalls`), and `%Linx.Seccomp.Filter{}`. The
-  build verbs (`allow_list/2`, `deny_list/2`, `from_rules/1`,
-  `to_rules/1`) and `Linx.Seccomp.Builder` are stubs that return
-  `{:error, :not_yet_implemented}` until S1 lands. `install/2`
-  follows in S2 alongside the agent-side patch to
-  `c_src/linx_process.c`. See `docs/seccomp/PLAN.md` for the
-  roadmap and `COVERAGE.md` for the ship/defer split.
+  S0 + S1 + S2 shipped: detection (`supported?/0`, `arch/0`),
+  constants (`Linx.Seccomp.Constants`), the per-arch syscall table
+  (`Linx.Seccomp.Syscalls`), `%Linx.Seccomp.Filter{}`,
+  `%Linx.Seccomp.Error{}`, the build verbs (`allow_list/2`,
+  `deny_list/2`, `from_rules/1`, `to_rules/1`),
+  `Linx.Seccomp.Builder`, and `install/2` against a parked
+  `Linx.Process` session (with the matching `no_new_privs:` opt on
+  `Linx.Process.spawn/1` / `enter/2`). Per-argument matching
+  (`allow_if/3`) is the deferred S1.5 surface; multi-arch routing
+  and `SECCOMP_USER_NOTIF` are deferred to future work. See
+  `docs/seccomp/PLAN.md` for the design notes and `COVERAGE.md`
+  for the feature matrix.
   """
 
   alias Linx.Seccomp.Builder
@@ -362,13 +365,32 @@ defmodule Linx.Seccomp do
   does the actual install at the checkpoint window before
   `execve`.
 
-  ## Stub
+  If `PR_SET_NO_NEW_PRIVS` isn't already on (either because the
+  caller didn't pass `no_new_privs: true` to `Linx.Process.spawn/1`
+  or because the workload isn't privileged enough to install
+  without NNP), the agent sets it automatically before the
+  `seccomp(2)` call — the "be helpful" path per
+  `docs/seccomp/PLAN.md` D2. Callers who want the principled
+  posture should still pass the spawn opt; the auto-set is just a
+  fallback so an unprivileged caller who forgot doesn't get a
+  confusing `EPERM`.
 
-  Returns `{:error, :not_yet_implemented}` until S2 ships. S2
-  lands the agent-side `apply_seccomp` plus the
-  `{:seccomp_install, bpf_blob}` checkpoint command.
+  ## Errors
 
-  ## Example (lands with S2)
+    * `{:error, :not_ready}` — session hasn't reached the checkpoint
+      yet. Wait for `{:linx_process, :ready, _}` first.
+    * `{:error, :running}` — past `proceed/1`, the child has
+      `execve`'d; installing now is too late.
+    * `{:error, :already_terminated}` — the session emitted its
+      terminal event.
+
+  Kernel-level install failures arrive asynchronously as
+  `{:linx_process, :error, errno, :seccomp_install}` or
+  `{:linx_process, :error, errno, :seccomp_no_new_privs}` on the
+  session's owner mailbox, the same shape as other pre-`execve`
+  failures.
+
+  ## Examples
 
       {:ok, c} = Linx.Process.spawn(argv: ["/usr/sbin/nginx"],
                                     no_new_privs: true)
@@ -379,9 +401,13 @@ defmodule Linx.Seccomp do
       :ok = Linx.Process.proceed(c)
   """
   @spec install(Linx.Process.t(), Filter.t()) ::
-          :ok | {:error, term()}
-  def install(_session, %Filter{}) do
-    {:error, :not_yet_implemented}
+          :ok
+          | {:error,
+             :not_ready
+             | :running
+             | :already_terminated}
+  def install(session, %Filter{bpf: bpf}) when is_pid(session) and is_binary(bpf) do
+    GenServer.call(session, {:seccomp_install, bpf})
   end
 
   # ── Validation helpers ────────────────────────────────────────

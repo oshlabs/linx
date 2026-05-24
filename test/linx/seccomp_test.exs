@@ -609,10 +609,73 @@ defmodule Linx.SeccompTest do
     end
   end
 
-  describe "Linx.Seccomp.install/2 (still a stub — lands with S2)" do
-    test "returns {:error, :not_yet_implemented}" do
+  describe "Linx.Seccomp.install/2 — input validation" do
+    # apply/3 keeps the static type analyser from narrowing the call
+    # site; what we want to test is the runtime function-head guard.
+    test "requires a %Linx.Seccomp.Filter{} as the second argument" do
+      assert_raise FunctionClauseError, fn ->
+        apply(Seccomp, :install, [self(), :not_a_filter])
+      end
+    end
+
+    test "requires a pid as the first argument" do
       f = %Filter{arch: :x86_64, bpf: <<>>, rules: nil}
-      assert Seccomp.install(self(), f) == {:error, :not_yet_implemented}
+
+      assert_raise FunctionClauseError, fn ->
+        apply(Seccomp, :install, [:not_a_pid, f])
+      end
+    end
+  end
+
+  describe "Linx.Seccomp.install/2 — state-machine guards (real sessions)" do
+    # These exercise the actual handle_call clauses in Linx.Process by
+    # inducing each state with /bin/sleep and /bin/true. No root needed.
+    alias Linx.Process, as: P
+
+    test "post-execve: install returns :running" do
+      {:ok, filter} = Seccomp.allow_list([:read, :write, :exit_group])
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      assert {:error, :running} = Seccomp.install(session, filter)
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "post-terminal: install returns :already_terminated" do
+      {:ok, filter} = Seccomp.allow_list([:read, :write, :exit_group])
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert {:error, :already_terminated} = Seccomp.install(session, filter)
+    end
+  end
+
+  describe "Linx.Process.spawn/1 — no_new_privs: opt" do
+    alias Linx.Process, as: P
+
+    test "spawn accepts no_new_privs: true and the workload runs to completion" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"], no_new_privs: true)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+    end
+
+    test "spawn accepts no_new_privs: false (the default behaviour)" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"], no_new_privs: false)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+    end
+
+    test "spawn rejects a non-boolean :no_new_privs" do
+      assert {:error, :bad_no_new_privs} =
+               P.spawn(argv: ["/bin/true"], no_new_privs: :yes)
     end
   end
 
@@ -1003,6 +1066,120 @@ defmodule Linx.SeccompTest do
 
     test "an empty BPF blob is rejected with EINVAL (22)" do
       assert run_helper(<<>>) == 22
+    end
+  end
+
+  # ── End-to-end: install a filter on a real workload ──────────
+  #
+  # These run a workload under a Linx-built seccomp filter and observe
+  # the kernel honouring it. The cap-flow analogue lives in
+  # test/linx/capabilities_test.exs's "K2 — actually applying caps on
+  # a real workload" describe. Tagged :integration because they touch
+  # PR_SET_NO_NEW_PRIVS + seccomp(2), which without NNP need
+  # CAP_SYS_ADMIN — so sudotest.sh is the intended runner. (NNP is
+  # auto-set by the agent inside child_read_command if not on, so the
+  # tests work whether or not the user passed `no_new_privs: true`.)
+
+  describe "end-to-end: install/2 against a real workload" do
+    @describetag :integration
+
+    alias Linx.Process, as: P
+
+    test "malformed BPF surfaces as :seccomp_install with EINVAL" do
+      # One all-zero instruction — no RET; the kernel rejects with
+      # EINVAL the moment seccomp(2) tries to load it. The
+      # {:linx_process, :error, errno, stage} message *is* the
+      # terminal event (handle_agent_frame finalises on it).
+      bad = %Filter{arch: :x86_64, bpf: <<0::64>>, rules: nil}
+
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = Seccomp.install(session, bad)
+
+      # 22 = EINVAL.
+      assert_receive {:linx_process, :error, 22, :seccomp_install}, 2_000
+    end
+
+    test "permissive (default :allow) filter lets /bin/true run to exit 0" do
+      # The cheapest end-to-end sanity check: a filter that doesn't
+      # deny anything. Just exercises the install path.
+      {:ok, filter} = Seccomp.deny_list([], default: :allow)
+
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = Seccomp.install(session, filter)
+      :ok = P.proceed(session)
+
+      assert_receive {:linx_process, :exited, 0}, 5_000
+    end
+
+    test "deny :clock_nanosleep with EPERM — /bin/sleep returns non-zero quickly" do
+      # /bin/sleep on a modern glibc calls clock_nanosleep (older
+      # builds use nanosleep). We deny both so the test is robust.
+      {:ok, filter} =
+        Seccomp.deny_list([:clock_nanosleep, :nanosleep],
+          deny_action: {:errno, :eperm}
+        )
+
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = Seccomp.install(session, filter)
+      :ok = P.proceed(session)
+
+      # The sleep syscall returns -1 with errno EPERM. /bin/sleep
+      # prints an error and exits non-zero. Should be well under 60s.
+      assert_receive {:linx_process, :exited, exit_code}, 5_000
+      assert is_integer(exit_code) and exit_code != 0
+    end
+
+    test "deny :clock_nanosleep with :kill_process — /bin/sleep dies with SIGSYS" do
+      {:ok, filter} =
+        Seccomp.deny_list([:clock_nanosleep, :nanosleep],
+          deny_action: :kill_process
+        )
+
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = Seccomp.install(session, filter)
+      :ok = P.proceed(session)
+
+      # SIGSYS is signal 31 on x86_64/aarch64 Linux.
+      assert_receive {:linx_process, :signaled, 31}, 5_000
+    end
+
+    test "no_new_privs: true on spawn pre-sets NNP; install still succeeds" do
+      {:ok, filter} = Seccomp.deny_list([], default: :allow)
+
+      {:ok, session} =
+        P.spawn(argv: ["/bin/true"], no_new_privs: true)
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = Seccomp.install(session, filter)
+      :ok = P.proceed(session)
+
+      assert_receive {:linx_process, :exited, 0}, 5_000
+    end
+
+    test "composition with K2 caps — drop bounding + install, both apply" do
+      # Verifies the K2 + S2 stack at the same checkpoint: cap_drop
+      # and seccomp_install share the await_proceed dispatch, so a
+      # session that uses both exercises the full command-frame
+      # multiplexing.
+      {:ok, filter} = Seccomp.deny_list([], default: :allow)
+
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = Linx.Capabilities.drop_bounding(session, [:cap_sys_module])
+      :ok = Seccomp.install(session, filter)
+      :ok = P.proceed(session)
+
+      assert_receive {:linx_process, :exited, 0}, 5_000
     end
   end
 

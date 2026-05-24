@@ -1,8 +1,9 @@
 # Linx.Seccomp — implementation plan
 
-> **Not yet shipped.** Work lives on branch `seccomp-foundations`.
-> Milestones S0–S2 land independently; each commits + pushes per the
-> Linx-wide "commit per milestone" rule.
+> **All three milestones shipped on `seccomp-foundations`.** S0
+> scaffolding + S1 BPF compiler + filter verbs + S2 agent-side
+> install. This doc records the design notes; `COVERAGE.md` carries
+> the live status table; `EXAMPLES.md` carries the runnable recipes.
 
 ## Goal
 
