@@ -55,10 +55,11 @@ defmodule Linx.Cgroup do
 
   ## Status
 
-  C0–C1 shipped: `supported?/0`, `create/1`, `destroy/1`,
-  `add_process/2`, `read/2`, `write/3`, plus the
-  `Linx.Cgroup.Error` shape. Limits, stats, and delegation land in
-  C2–C4. See `docs/cgroup/PLAN.md` for the roadmap.
+  C0–C2 shipped: `supported?/0`, `create/1`, `destroy/1`,
+  `add_process/2`, `read/2`, `write/3`, `freeze/1`, `thaw/1`,
+  `set_memory_max/2`, `set_pids_max/2`, `set_cpu_max/2`, plus the
+  `Linx.Cgroup.Error` shape. Stats and delegation land in C3–C4.
+  See `docs/cgroup/PLAN.md` for the roadmap.
   """
 
   alias Linx.Cgroup.Error
@@ -184,51 +185,81 @@ defmodule Linx.Cgroup do
   end
 
   @doc """
-  Freezes every process in `cg` (`cgroup.freeze` ← `"1"`).
+  Freezes every process in `cg` by writing `"1"` to
+  `<cg>/cgroup.freeze`.
 
-  Lands in C2.
+  All processes in the cgroup (and its descendants) are suspended
+  by the kernel — they stop scheduling but stay resident. Pair
+  with `thaw/1`. Always available on cgroup v2; no controller
+  needs to be enabled.
   """
-  @spec freeze(cgroup()) :: :ok | {:error, term()}
-  def freeze(_cg), do: {:error, :not_yet_implemented}
+  @spec freeze(cgroup()) :: :ok | {:error, Error.t()}
+  def freeze(cg) when is_binary(cg) do
+    write_at(cg, "cgroup.freeze", "1", :write)
+  end
 
   @doc """
-  Thaws a previously-frozen cgroup (`cgroup.freeze` ← `"0"`).
-
-  Lands in C2.
+  Thaws a previously-frozen cgroup by writing `"0"` to
+  `<cg>/cgroup.freeze`. Idempotent on an already-thawed cgroup.
   """
-  @spec thaw(cgroup()) :: :ok | {:error, term()}
-  def thaw(_cg), do: {:error, :not_yet_implemented}
+  @spec thaw(cgroup()) :: :ok | {:error, Error.t()}
+  def thaw(cg) when is_binary(cg) do
+    write_at(cg, "cgroup.freeze", "0", :write)
+  end
 
   @doc """
   Sets the memory limit for `cg` (`memory.max`).
 
-  Accepts an integer (bytes) or the atom `:max` (unlimited).
+  Accepts an integer (bytes — the kernel's `memory.max` unit) or
+  the atom `:max` to clear the limit.
 
-  Lands in C2.
+  Requires the `memory` controller to be enabled in the parent's
+  `cgroup.subtree_control` (see `enable_controllers/2`, landing in
+  C4). If the controller isn't delegated, the kernel returns
+  ENOENT on the write because the interface file doesn't exist.
   """
-  @spec set_memory_max(cgroup(), pos_integer() | :max) :: :ok | {:error, term()}
-  def set_memory_max(_cg, _value), do: {:error, :not_yet_implemented}
+  @spec set_memory_max(cgroup(), non_neg_integer() | :max) :: :ok | {:error, Error.t()}
+  def set_memory_max(cg, :max) when is_binary(cg),
+    do: write_at(cg, "memory.max", "max", :write)
+
+  def set_memory_max(cg, bytes) when is_binary(cg) and is_integer(bytes) and bytes >= 0,
+    do: write_at(cg, "memory.max", Integer.to_string(bytes), :write)
 
   @doc """
   Sets the pids limit for `cg` (`pids.max`).
 
-  Accepts an integer or the atom `:max`.
-
-  Lands in C2.
+  Accepts an integer (maximum number of processes) or the atom
+  `:max` to clear the limit. Requires the `pids` controller to be
+  enabled in the parent.
   """
-  @spec set_pids_max(cgroup(), pos_integer() | :max) :: :ok | {:error, term()}
-  def set_pids_max(_cg, _value), do: {:error, :not_yet_implemented}
+  @spec set_pids_max(cgroup(), non_neg_integer() | :max) :: :ok | {:error, Error.t()}
+  def set_pids_max(cg, :max) when is_binary(cg),
+    do: write_at(cg, "pids.max", "max", :write)
+
+  def set_pids_max(cg, n) when is_binary(cg) and is_integer(n) and n >= 0,
+    do: write_at(cg, "pids.max", Integer.to_string(n), :write)
 
   @doc """
-  Sets the CPU limit for `cg` (`cpu.max`).
+  Sets the CPU bandwidth limit for `cg` (`cpu.max`).
 
-  Accepts `{quota_us, period_us}` (microseconds) or `:max`.
+  Accepts either:
 
-  Lands in C2.
+    * `{quota_us, period_us}` — both microseconds. The cgroup may
+      use `quota_us` of CPU time per `period_us` of wall time.
+      `{50_000, 100_000}` is "half a CPU".
+    * `:max` — clear the limit (the kernel default).
+
+  Requires the `cpu` controller to be enabled in the parent.
   """
   @spec set_cpu_max(cgroup(), {pos_integer(), pos_integer()} | :max) ::
-          :ok | {:error, term()}
-  def set_cpu_max(_cg, _value), do: {:error, :not_yet_implemented}
+          :ok | {:error, Error.t()}
+  def set_cpu_max(cg, :max) when is_binary(cg),
+    do: write_at(cg, "cpu.max", "max", :write)
+
+  def set_cpu_max(cg, {quota, period})
+      when is_binary(cg) and is_integer(quota) and quota > 0
+      and is_integer(period) and period > 0,
+      do: write_at(cg, "cpu.max", "#{quota} #{period}", :write)
 
   @doc """
   Enables controllers (e.g. `[:memory, :pids, :cpu]`) on `cg` by

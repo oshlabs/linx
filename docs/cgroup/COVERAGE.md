@@ -27,16 +27,16 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `freeze/1` | ⬜ | C2 — `cgroup.freeze` ← `"1"` |
-| `thaw/1` | ⬜ | C2 — `cgroup.freeze` ← `"0"` |
+| `freeze/1` | ✅ | C2 — `cgroup.freeze` ← `"1"` |
+| `thaw/1` | ✅ | C2 — `cgroup.freeze` ← `"0"` |
 
 ## Resource limits
 
 | Controller | Typed setter | Status | Notes |
 |---|---|---|---|
-| `memory.max` | `set_memory_max/2` | ⬜ | C2 — int (bytes) or `:max` |
-| `pids.max` | `set_pids_max/2` | ⬜ | C2 — int or `:max` |
-| `cpu.max` | `set_cpu_max/2` | ⬜ | C2 — `{quota, period}` (µs) or `:max` |
+| `memory.max` | `set_memory_max/2` | ✅ | C2 — int (bytes) or `:max` |
+| `pids.max` | `set_pids_max/2` | ✅ | C2 — int or `:max` |
+| `cpu.max` | `set_cpu_max/2` | ✅ | C2 — `{quota, period}` (µs) or `:max` |
 | Others (`io.*`, `cpuset.*`, `memory.swap.max`, …) | (via `write/3`) | ⏳ | typed setters can grow |
 
 ## Stats

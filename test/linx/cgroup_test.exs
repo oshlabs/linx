@@ -97,6 +97,42 @@ defmodule Linx.CgroupTest do
       assert errno in [:enoent, :eacces]
       assert String.ends_with?(path, "cgroup.procs")
     end
+
+    test "freeze/1 against a missing cgroup returns a structured error" do
+      assert {:error, %Error{operation: :write, errno: errno, path: path}} =
+               Cgroup.freeze(@nope)
+
+      assert errno in [:enoent, :eacces]
+      assert String.ends_with?(path, "cgroup.freeze")
+    end
+
+    test "thaw/1 against a missing cgroup returns a structured error" do
+      assert {:error, %Error{operation: :write, errno: errno}} = Cgroup.thaw(@nope)
+      assert errno in [:enoent, :eacces]
+    end
+
+    test "set_memory_max/2 against a missing cgroup returns a structured error" do
+      assert {:error, %Error{operation: :write, errno: errno, path: path}} =
+               Cgroup.set_memory_max(@nope, 1024)
+
+      assert errno in [:enoent, :eacces]
+      assert String.ends_with?(path, "memory.max")
+    end
+
+    test "set_pids_max/2 accepts :max" do
+      assert {:error, %Error{operation: :write, path: path}} = Cgroup.set_pids_max(@nope, :max)
+      assert String.ends_with?(path, "pids.max")
+    end
+
+    test "set_cpu_max/2 with {quota, period} formats the kernel's expected text" do
+      # We can't observe the bytes that would have been written when
+      # the path doesn't exist, but the error tells us the right
+      # interface file was targeted.
+      assert {:error, %Error{operation: :write, path: path}} =
+               Cgroup.set_cpu_max(@nope, {50_000, 100_000})
+
+      assert String.ends_with?(path, "cpu.max")
+    end
   end
 
   describe "C1 integration round-trip" do
@@ -176,6 +212,84 @@ defmodule Linx.CgroupTest do
       # Some kernels surface this as :esrch; some give :einval
       # depending on the pid range. Both are correct refusals.
       assert errno in [:esrch, :einval]
+
+      assert :ok = Cgroup.destroy(path)
+    end
+  end
+
+  describe "C2 freeze/thaw integration" do
+    @moduletag :integration
+
+    setup do
+      path = "/sys/fs/cgroup/linx-test-#{System.unique_integer([:positive])}"
+      on_exit(fn -> _ = File.rmdir(path) end)
+      {:ok, path: path}
+    end
+
+    test "freeze/1 and thaw/1 round-trip through cgroup.freeze", %{path: path} do
+      assert {:ok, ^path} = Cgroup.create(path)
+      assert {:ok, "0"} = Cgroup.read(path, "cgroup.freeze")
+
+      assert :ok = Cgroup.freeze(path)
+      assert {:ok, "1"} = Cgroup.read(path, "cgroup.freeze")
+
+      assert :ok = Cgroup.thaw(path)
+      assert {:ok, "0"} = Cgroup.read(path, "cgroup.freeze")
+
+      assert :ok = Cgroup.destroy(path)
+    end
+  end
+
+  describe "C2 typed limit setters integration" do
+    @moduletag :integration
+
+    # The host needs the memory/pids/cpu controllers delegated at the
+    # root (/sys/fs/cgroup/cgroup.subtree_control). On systemd hosts
+    # this is the default. If a host doesn't have a given controller
+    # delegated, the kernel surfaces ENOENT on the write because the
+    # interface file (e.g. memory.max) won't exist in the child --
+    # those tests will skip with a clear log.
+
+    setup do
+      path = "/sys/fs/cgroup/linx-test-#{System.unique_integer([:positive])}"
+      on_exit(fn -> _ = File.rmdir(path) end)
+
+      {:ok, ^path} = Cgroup.create(path)
+      {:ok, path: path}
+    end
+
+    test "set_memory_max/2 with an integer round-trips through read/2",
+         %{path: path} do
+      assert :ok = Cgroup.set_memory_max(path, 256 * 1024 * 1024)
+      assert {:ok, "268435456"} = Cgroup.read(path, "memory.max")
+
+      # And :max clears it back to unlimited.
+      assert :ok = Cgroup.set_memory_max(path, :max)
+      assert {:ok, "max"} = Cgroup.read(path, "memory.max")
+
+      assert :ok = Cgroup.destroy(path)
+    end
+
+    test "set_pids_max/2 with an integer and :max round-trip", %{path: path} do
+      assert :ok = Cgroup.set_pids_max(path, 100)
+      assert {:ok, "100"} = Cgroup.read(path, "pids.max")
+
+      assert :ok = Cgroup.set_pids_max(path, :max)
+      assert {:ok, "max"} = Cgroup.read(path, "pids.max")
+
+      assert :ok = Cgroup.destroy(path)
+    end
+
+    test "set_cpu_max/2 formats {quota, period} per the kernel's contract",
+         %{path: path} do
+      assert :ok = Cgroup.set_cpu_max(path, {50_000, 100_000})
+      assert {:ok, "50000 100000"} = Cgroup.read(path, "cpu.max")
+
+      # :max keeps the period the kernel chose at creation time and
+      # restores quota to "max".
+      assert :ok = Cgroup.set_cpu_max(path, :max)
+      {:ok, after_max} = Cgroup.read(path, "cpu.max")
+      assert String.starts_with?(after_max, "max ")
 
       assert :ok = Cgroup.destroy(path)
     end
