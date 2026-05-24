@@ -1,8 +1,12 @@
 # Linx.User — implementation plan
 
-> **Not yet shipped.** Work lives on branch `user-foundations`.
-> Milestones U0–U2 land independently; each commits + pushes per the
-> Linx-wide "commit per milestone" rule.
+> ✅ **U0–U2 shipped** on branch `user-foundations` — ready to
+> merge to `main`. The full surface is in: `supported?/0`,
+> `deny_setgroups/1`, `set_uid_map/2`, `set_gid_map/2`,
+> `read_uid_map/1`, `read_gid_map/1`, `setup_maps/2`, plus the
+> `Linx.User.Error` and `Linx.User.Map` value types.
+> `COVERAGE.md` is the canonical "what's in / what's deferred"
+> tracker.
 
 ## Goal
 

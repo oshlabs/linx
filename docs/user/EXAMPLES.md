@@ -10,11 +10,11 @@ process's `/proc/<pid>/...`. **Write** operations need either
 *or* a single-line identity map that the kernel allows for
 unprivileged callers.
 
-> 🚧 **Partial.** U0–U1 ship now: scaffolding, `supported?/0`,
-> the write side (`deny_setgroups/1`, `set_uid_map/2`,
-> `set_gid_map/2`), and `%Linx.User.Error{}`. Read side and
-> `setup_maps/2` (U2) land in a follow-up. See `PLAN.md` for the
-> roadmap.
+> ✅ **All foundation milestones shipped (U0–U2).** Scaffolding,
+> the write side, the read side, the `setup_maps/2` convenience,
+> and the `%Linx.User.Error{}` + `%Linx.User.Map{}` value types.
+> See `PLAN.md` for what was built and `COVERAGE.md` for what's
+> deferred.
 
 ## Detecting user-namespace support
 
@@ -171,4 +171,162 @@ iex> Exception.message(err)
 "user set_uid_map failed on /proc/1/uid_map: eperm (errno 1)"
 ```
 
-## (Will land with U2 — read side + setup_maps/2)
+## Reading uid/gid maps
+
+`read_uid_map/1` and `read_gid_map/1` parse `/proc/<pid>/{uid,gid}_map`
+into a list of `%Linx.User.Map{}` structs:
+
+```elixir
+iex> Linx.User.read_uid_map(host_pid)
+{:ok, [#Linx.User.Map<0 -> 1000>]}
+
+# Multi-range identity (the runc-style rootless layout):
+iex> Linx.User.read_uid_map(host_pid)
+{:ok, [
+  #Linx.User.Map<0 -> 0>,
+  #Linx.User.Map<1..65535 -> 100000..165535>
+]}
+
+# A user ns whose maps haven't been written yet -- the file
+# exists but is empty; the kernel defaults the workload's
+# identity to "nobody".
+iex> Linx.User.read_uid_map(host_pid)
+{:ok, []}
+```
+
+The `Inspect` impl picks its format by length:
+
+| Length | Renders as |
+|---|---|
+| 1 | `#Linx.User.Map<0 -> 1000>` (compact, no range syntax) |
+| > 1 | `#Linx.User.Map<0..65535 -> 100000..165535>` (range form, inclusive end) |
+
+The struct itself is just three fields — `:inside`, `:outside`,
+`:length` — and a `%Linx.User.Map{}` round-trips cleanly back to a
+`{inside, outside, length}` tuple if you want to hand it to
+`set_uid_map/2` on a different pid:
+
+```elixir
+{:ok, maps} = Linx.User.read_uid_map(source_pid)
+mappings = Enum.map(maps, &{&1.inside, &1.outside, &1.length})
+:ok = Linx.User.set_uid_map(target_pid, mappings)
+```
+
+### Errors
+
+Same shape as the write verbs — `%Linx.User.Error{operation:
+:read_uid_map | :read_gid_map}` for kernel-level failures:
+
+```elixir
+iex> Linx.User.read_uid_map(9_999_999)
+{:error,
+ %Linx.User.Error{
+   path: "/proc/9999999/uid_map",
+   operation: :read_uid_map,
+   errno: :enoent,
+   code: 2
+ }}
+```
+
+The parser silently drops malformed lines (forward-compatible
+against any future kernel additions to the format) — so the
+returned `[%Map{}]` is always well-formed.
+
+## The `setup_maps/2` convenience
+
+For the canonical rootless dance, `setup_maps/2` does
+`deny_setgroups → set_uid_map → set_gid_map` in one call:
+
+```elixir
+:ok = Linx.User.setup_maps(host_pid,
+  uid: [{0, my_host_uid, 1}],
+  gid: [{0, my_host_gid, 1}]
+)
+```
+
+Equivalent to:
+
+```elixir
+:ok = Linx.User.deny_setgroups(host_pid)
+:ok = Linx.User.set_uid_map(host_pid, [{0, my_host_uid, 1}])
+:ok = Linx.User.set_gid_map(host_pid, [{0, my_host_gid, 1}])
+```
+
+### Options
+
+| Option | Required? | Meaning |
+|---|---|---|
+| `:uid` | yes | mappings list, same shape as `set_uid_map/2` |
+| `:gid` | yes | mappings list, same shape as `set_gid_map/2` |
+| `:setgroups` | default `:deny` | `:deny` writes "deny" to setgroups; `:skip` leaves it alone (for privileged callers) |
+
+### Failure semantics
+
+Returns the first error encountered, with the failing step's
+`:operation` (or a `:bad_setup` / `:bad_setgroups` /
+`:bad_map` shape for caller mistakes):
+
+```elixir
+{:error, {:bad_setup, {:missing, :uid}}}    # required opt missing
+{:error, {:bad_setgroups, :sometimes}}      # bad :setgroups value
+{:error, {:bad_map, _}}                     # bad uid/gid input
+{:error, %Linx.User.Error{operation: :deny_setgroups, ...}}
+{:error, %Linx.User.Error{operation: :set_uid_map, ...}}
+{:error, %Linx.User.Error{operation: :set_gid_map, ...}}
+```
+
+Steps that ran successfully before a later step failed are **not
+rolled back** — the kernel's write-once semantics on uid_map /
+gid_map make rollback impossible anyway, and `deny_setgroups` is
+idempotent. The error's `:operation` tells you exactly where the
+sequence stopped.
+
+## Full end-to-end: rootless bash in a browser-ready container
+
+Combining everything across `Linx.Process` + `Linx.Mount` +
+`Linx.User` for the headline composition. The workload becomes
+*root inside its own user namespace*, with `/proc` remounted so
+`ps` shows container processes:
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.{Mount, User, Tty}
+
+iex> {:ok, c} =
+...>   P.spawn(
+...>     argv: ["/bin/bash"],
+...>     namespaces: [:user, :mount, :pid, :uts, :ipc],
+...>     stdio: :pty
+...>   )
+iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+
+# Set up the rootless mapping at the checkpoint.
+iex> my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
+iex> my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integer()
+iex> :ok = User.setup_maps(host_pid, uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
+
+# Give the container its own /proc (also at the checkpoint).
+iex> :ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+
+# Release -- the workload execs already inside its own user ns
+# with the right identity, and with a /proc that only shows
+# container processes.
+iex> :ok = P.proceed(c)
+iex> Tty.attach(:controlling, c)
+```
+
+Inside the attached bash:
+
+```
+[root@... /]$ whoami
+root
+[root@... /]$ ps
+    PID TTY          TIME CMD
+      1 pts/0    00:00:00 bash
+      ...
+```
+
+The headline transcript from the project README, but now with
+**root inside** and a **container-only `/proc` view** — both
+fixes layered on top of the original via the same checkpoint
+window that everything else composes through.

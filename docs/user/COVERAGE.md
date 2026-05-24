@@ -31,15 +31,15 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `read_uid_map/1` | ⬜ | U2 — parses `/proc/<pid>/uid_map` into `[%Linx.User.Map{}]` |
-| `read_gid_map/1` | ⬜ | U2 — parses `/proc/<pid>/gid_map` similarly |
-| Empty-map handling (`{:ok, []}`) | ⬜ | U2 — pre-write user ns reports an empty file |
+| `read_uid_map/1` | ✅ | U2 — parses `/proc/<pid>/uid_map` into `[%Linx.User.Map{}]` |
+| `read_gid_map/1` | ✅ | U2 — parses `/proc/<pid>/gid_map` similarly |
+| Empty-map handling (`{:ok, []}`) | ✅ | U2 — pre-write user ns reports an empty file |
 
 ## Convenience
 
 | Feature | Status | Notes |
 |---|---|---|
-| `setup_maps/2` | ⬜ | U2 — canonical sequence: `deny_setgroups → set_uid_map → set_gid_map`; opts `:uid`, `:gid`, `:setgroups` |
+| `setup_maps/2` | ✅ | U2 — canonical sequence: `deny_setgroups → set_uid_map → set_gid_map`; opts `:uid`, `:gid`, `:setgroups` |
 
 ## Composition with other subsystems
 
@@ -51,7 +51,7 @@ A living doc — update as primitives ship. Status legend:
 
 | Module | Status | Notes |
 |---|---|---|
-| `Linx.User.Map` | ⬜ | U2 — `%{inside, outside, length}` with compact Inspect |
+| `Linx.User.Map` | ✅ | U2 — `%{inside, outside, length}` with compact Inspect |
 | `Linx.User.Error` | ✅ | U1 — POSIX-atom errno + path + operation |
 
 ## Error reporting

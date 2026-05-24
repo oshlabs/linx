@@ -138,7 +138,8 @@ defmodule Linx.MixProject do
         ],
         User: [
           Linx.User,
-          Linx.User.Error
+          Linx.User.Error,
+          Linx.User.Map
         ],
         "Netlink core": [
           Linx.Netlink,

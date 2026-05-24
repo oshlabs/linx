@@ -69,13 +69,16 @@ defmodule Linx.User do
 
   ## Status
 
-  U0–U1 shipped: `supported?/0`, `deny_setgroups/1`,
-  `set_uid_map/2`, `set_gid_map/2`, plus the `Linx.User.Error`
-  shape. Read side and the `setup_maps/2` convenience land in U2.
-  See `docs/user/PLAN.md` for the roadmap.
+  All foundation milestones shipped (U0–U2): `supported?/0`,
+  `deny_setgroups/1`, `set_uid_map/2`, `set_gid_map/2`,
+  `read_uid_map/1`, `read_gid_map/1`, `setup_maps/2`, plus the
+  `Linx.User.Error` and `Linx.User.Map` shapes. See
+  `docs/user/PLAN.md` for what was built and `COVERAGE.md` for
+  what's deferred.
   """
 
   alias Linx.User.Error
+  alias Linx.User.Map, as: UserMap
 
   @proc "/proc"
   @self_uid_map Path.join([@proc, "self", "uid_map"])
@@ -227,19 +230,58 @@ defmodule Linx.User do
   A user namespace whose maps haven't been written yet returns
   `{:ok, []}` — the file exists but is empty.
 
-  Lands in U2.
+  ## Examples
+
+      iex> Linx.User.read_uid_map(host_pid)
+      {:ok, [#Linx.User.Map<0 -> 1000>]}
+
+      iex> Linx.User.read_uid_map(host_pid)  # multi-range
+      {:ok, [
+        #Linx.User.Map<0 -> 0>,
+        #Linx.User.Map<1..65535 -> 100000..165535>
+      ]}
   """
-  @spec read_uid_map(pid_target()) :: {:ok, [term()]} | {:error, term()}
-  def read_uid_map(_pid), do: {:error, :not_yet_implemented}
+  @spec read_uid_map(pid_target()) :: {:ok, [UserMap.t()]} | {:error, Error.t()}
+  def read_uid_map(pid) when is_integer(pid) and pid > 0 do
+    read_map(pid, "uid_map", :read_uid_map)
+  end
 
   @doc """
   Reads and parses `/proc/<pid>/gid_map` into a list of
-  `%Linx.User.Map{}` entries.
-
-  Lands in U2.
+  `%Linx.User.Map{}` entries. Same shape as `read_uid_map/1`.
   """
-  @spec read_gid_map(pid_target()) :: {:ok, [term()]} | {:error, term()}
-  def read_gid_map(_pid), do: {:error, :not_yet_implemented}
+  @spec read_gid_map(pid_target()) :: {:ok, [UserMap.t()]} | {:error, Error.t()}
+  def read_gid_map(pid) when is_integer(pid) and pid > 0 do
+    read_map(pid, "gid_map", :read_gid_map)
+  end
+
+  defp read_map(pid, file, operation) do
+    path = Path.join([@proc, Integer.to_string(pid), file])
+
+    case File.read(path) do
+      {:ok, data} -> {:ok, parse_map(data)}
+      {:error, posix} -> {:error, Error.from_posix(posix, path, operation)}
+    end
+  end
+
+  @doc false
+  # Parses the kernel's uid_map / gid_map format into a list of
+  # %Linx.User.Map{} structs. The format is one "inside outside
+  # length" triple per line; the kernel right-pads each field to
+  # 10 chars, so we split on whitespace and ignore padding.
+  # Lines that don't parse as three integers are silently dropped
+  # (forward-compat against any future kernel additions).
+  @spec parse_map(binary()) :: [UserMap.t()]
+  def parse_map(data) when is_binary(data) do
+    for line <- String.split(data, "\n", trim: true),
+        [a, b, c | _] <- [String.split(line, ~r/\s+/, trim: true)],
+        {inside, ""} <- [Integer.parse(a)],
+        {outside, ""} <- [Integer.parse(b)],
+        {length, ""} <- [Integer.parse(c)],
+        inside >= 0 and outside >= 0 and length > 0 do
+      %UserMap{inside: inside, outside: outside, length: length}
+    end
+  end
 
   @doc """
   Applies the canonical map-setup sequence in one call:
@@ -247,13 +289,63 @@ defmodule Linx.User do
 
   ## Options
 
-    * `:uid` — mappings list for uid_map (required)
-    * `:gid` — mappings list for gid_map (required)
-    * `:setgroups` — `:deny` (default) or `:skip` for privileged
-      callers who don't need the setgroups gate
+    * `:uid` (required) — mappings list for uid_map; same shape as
+      `set_uid_map/2`.
+    * `:gid` (required) — mappings list for gid_map.
+    * `:setgroups` (default `:deny`) — whether to write
+      `"deny"` to `/proc/<pid>/setgroups` before the gid_map
+      write. `:skip` is for privileged callers who don't need
+      the kernel's setgroups gate.
 
-  Lands in U2.
+  Returns `:ok` if every step succeeded, or the first error
+  encountered (with the failing step's `:operation`):
+
+      :ok                                                 -- everything worked
+      {:error, %Linx.User.Error{operation: :deny_setgroups, ...}}
+      {:error, %Linx.User.Error{operation: :set_uid_map, ...}}
+      {:error, %Linx.User.Error{operation: :set_gid_map, ...}}
+      {:error, {:bad_map, _}}                             -- bad uid/gid input
+      {:error, {:bad_setgroups, value}}                   -- bad :setgroups opt
+
+  Steps that ran successfully before a later step failed are
+  **not** rolled back — the kernel's write-once semantics mean
+  uid_map / gid_map can't be undone, and `deny_setgroups` is
+  idempotent anyway. The error tells you exactly where the
+  sequence stopped.
+
+  ## Example
+
+      :ok = Linx.User.setup_maps(host_pid,
+        uid: [{0, my_uid, 1}],
+        gid: [{0, my_gid, 1}]
+      )
   """
-  @spec setup_maps(pid_target(), keyword()) :: :ok | {:error, term()}
-  def setup_maps(_pid, _opts), do: {:error, :not_yet_implemented}
+  @spec setup_maps(pid_target(), keyword()) ::
+          :ok
+          | {:error,
+             Error.t() | {:bad_map, term()} | {:bad_setgroups, term()}}
+  def setup_maps(pid, opts) when is_integer(pid) and pid > 0 and is_list(opts) do
+    with {:ok, uid} <- fetch_required(opts, :uid),
+         {:ok, gid} <- fetch_required(opts, :gid),
+         {:ok, setgroups_mode} <- validate_setgroups(Keyword.get(opts, :setgroups, :deny)),
+         :ok <- maybe_deny_setgroups(pid, setgroups_mode),
+         :ok <- set_uid_map(pid, uid),
+         :ok <- set_gid_map(pid, gid) do
+      :ok
+    end
+  end
+
+  defp fetch_required(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> {:error, {:bad_setup, {:missing, key}}}
+    end
+  end
+
+  defp validate_setgroups(:deny), do: {:ok, :deny}
+  defp validate_setgroups(:skip), do: {:ok, :skip}
+  defp validate_setgroups(other), do: {:error, {:bad_setgroups, other}}
+
+  defp maybe_deny_setgroups(_pid, :skip), do: :ok
+  defp maybe_deny_setgroups(pid, :deny), do: deny_setgroups(pid)
 end

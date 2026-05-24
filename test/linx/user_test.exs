@@ -3,6 +3,7 @@ defmodule Linx.UserTest do
 
   alias Linx.User
   alias Linx.User.Error
+  alias Linx.User.Map, as: UserMap
 
   describe "supported?/0" do
     test "returns a boolean" do
@@ -143,21 +144,212 @@ defmodule Linx.UserTest do
     end
   end
 
-  describe "U2 stubs" do
-    # Until U2 lands, the read side + setup_maps/2 return
-    # :not_yet_implemented.
-
-    test "read_uid_map/1" do
-      assert {:error, :not_yet_implemented} = User.read_uid_map(1)
+  describe "Linx.User.Map struct" do
+    test "@enforce_keys covers inside, outside, length" do
+      assert_raise ArgumentError, fn -> struct!(UserMap, %{}) end
     end
 
-    test "read_gid_map/1" do
-      assert {:error, :not_yet_implemented} = User.read_gid_map(1)
+    test "Inspect renders length-1 maps without range syntax" do
+      assert inspect(%UserMap{inside: 0, outside: 1000, length: 1}) ==
+               "#Linx.User.Map<0 -> 1000>"
     end
 
-    test "setup_maps/2" do
-      assert {:error, :not_yet_implemented} =
-               User.setup_maps(1, uid: [{0, 1000, 1}], gid: [{0, 1000, 1}])
+    test "Inspect renders length>1 maps in range form" do
+      assert inspect(%UserMap{inside: 0, outside: 100_000, length: 65_536}) ==
+               "#Linx.User.Map<0..65535 -> 100000..165535>"
+    end
+
+    test "Inspect range form uses inclusive end (start + length - 1)" do
+      assert inspect(%UserMap{inside: 1, outside: 2, length: 5}) ==
+               "#Linx.User.Map<1..5 -> 2..6>"
+    end
+  end
+
+  describe "parse_map/1 (plain)" do
+    test "parses the canonical kernel-padded format" do
+      # The kernel right-pads each id to 10 chars; we tolerate
+      # arbitrary whitespace.
+      blob = "         0       1000          1\n"
+      assert [%UserMap{inside: 0, outside: 1000, length: 1}] = User.parse_map(blob)
+    end
+
+    test "parses an unpadded blob (space-separated, trailing LF)" do
+      blob = "0 1000 1\n"
+      assert [%UserMap{inside: 0, outside: 1000, length: 1}] = User.parse_map(blob)
+    end
+
+    test "parses a multi-line blob into multiple entries in order" do
+      blob = """
+      0 0 1
+      1 100000 65535
+      """
+
+      assert [
+               %UserMap{inside: 0, outside: 0, length: 1},
+               %UserMap{inside: 1, outside: 100_000, length: 65_535}
+             ] = User.parse_map(blob)
+    end
+
+    test "empty input returns []" do
+      assert User.parse_map("") == []
+    end
+
+    test "whitespace-only input returns []" do
+      assert User.parse_map("\n\n   \n") == []
+    end
+
+    test "silently drops malformed lines (forward-compat)" do
+      blob = """
+      not an entry at all
+      0 1000 1
+      also nonsense
+      """
+
+      assert [%UserMap{inside: 0, outside: 1000, length: 1}] = User.parse_map(blob)
+    end
+
+    test "drops lines with non-positive length (kernel guarantees > 0)" do
+      blob = "0 1000 0\n"
+      assert User.parse_map(blob) == []
+    end
+  end
+
+  describe "read_uid_map/1 + read_gid_map/1 against a non-existent pid (plain)" do
+    @nope_pid 2_147_483_640
+
+    test "read_uid_map/1 returns ENOENT" do
+      assert {:error, %Error{operation: :read_uid_map, errno: errno, path: path}} =
+               User.read_uid_map(@nope_pid)
+
+      assert errno in [:enoent, :eacces]
+      assert path == "/proc/#{@nope_pid}/uid_map"
+    end
+
+    test "read_gid_map/1 returns ENOENT" do
+      assert {:error, %Error{operation: :read_gid_map, errno: errno}} =
+               User.read_gid_map(@nope_pid)
+
+      assert errno in [:enoent, :eacces]
+    end
+  end
+
+  describe "read_uid_map/1 against the BEAM's own (plain)" do
+    test "reads /proc/self/uid_map without error" do
+      # The BEAM's own uid_map exists and is readable by definition.
+      # On a process not in a fresh user ns it's typically a single
+      # identity mapping (0..max -> 0..max). Either way we get
+      # {:ok, [%Map{}, ...]} or {:ok, []} -- both valid shapes.
+      beam_pid = System.pid() |> String.to_integer()
+
+      assert {:ok, maps} = User.read_uid_map(beam_pid)
+      assert is_list(maps)
+
+      Enum.each(maps, fn entry ->
+        assert %UserMap{} = entry
+        assert is_integer(entry.inside) and entry.inside >= 0
+        assert is_integer(entry.outside) and entry.outside >= 0
+        assert is_integer(entry.length) and entry.length > 0
+      end)
+    end
+  end
+
+  describe "setup_maps/2 input validation (plain)" do
+    test "missing :uid is rejected" do
+      assert {:error, {:bad_setup, {:missing, :uid}}} =
+               User.setup_maps(1, gid: [{0, 1000, 1}])
+    end
+
+    test "missing :gid is rejected" do
+      assert {:error, {:bad_setup, {:missing, :gid}}} =
+               User.setup_maps(1, uid: [{0, 1000, 1}])
+    end
+
+    test "an invalid :setgroups value is rejected" do
+      assert {:error, {:bad_setgroups, :sometimes}} =
+               User.setup_maps(1,
+                 uid: [{0, 1000, 1}],
+                 gid: [{0, 1000, 1}],
+                 setgroups: :sometimes
+               )
+    end
+
+    test "bad uid mapping bubbles up as {:bad_map, _}" do
+      assert {:error, {:bad_map, :empty}} =
+               User.setup_maps(1, uid: [], gid: [{0, 1000, 1}], setgroups: :skip)
+    end
+  end
+
+  describe "U2 integration: read side + setup_maps round-trip" do
+    @describetag :integration
+
+    test "set_uid_map/2 + read_uid_map/1 round-trip a single-line map" do
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "10"],
+          namespaces: [:user]
+        )
+
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+
+      assert :ok = User.set_uid_map(host_pid, [{0, host_uid(), 1}])
+
+      assert {:ok, [entry]} = User.read_uid_map(host_pid)
+      assert %UserMap{inside: 0, outside: outside, length: 1} = entry
+      assert outside == host_uid()
+
+      assert :ok = Linx.Process.abort(c)
+      assert_receive {:linx_process, :aborted}, 5_000
+    end
+
+    test "setup_maps/2 does the canonical sequence in one call" do
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "10"],
+          namespaces: [:user]
+        )
+
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+
+      assert :ok =
+               User.setup_maps(host_pid,
+                 uid: [{0, host_uid(), 1}],
+                 gid: [{0, host_gid(), 1}]
+               )
+
+      # All three /proc files now show the written state.
+      assert "deny" == String.trim(File.read!("/proc/#{host_pid}/setgroups"))
+      assert {:ok, [%UserMap{inside: 0}]} = User.read_uid_map(host_pid)
+      assert {:ok, [%UserMap{inside: 0}]} = User.read_gid_map(host_pid)
+
+      assert :ok = Linx.Process.abort(c)
+      assert_receive {:linx_process, :aborted}, 5_000
+    end
+
+    test "setup_maps/2 with :setgroups :skip leaves setgroups untouched" do
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "10"],
+          namespaces: [:user]
+        )
+
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+
+      # Default state of /proc/<pid>/setgroups is "allow" for a
+      # fresh user ns. With :skip we don't touch it.
+      pre = String.trim(File.read!("/proc/#{host_pid}/setgroups"))
+
+      assert :ok =
+               User.setup_maps(host_pid,
+                 uid: [{0, host_uid(), 1}],
+                 gid: [{0, host_gid(), 1}],
+                 setgroups: :skip
+               )
+
+      post = String.trim(File.read!("/proc/#{host_pid}/setgroups"))
+      assert pre == post
+
+      assert :ok = Linx.Process.abort(c)
+      assert_receive {:linx_process, :aborted}, 5_000
     end
   end
 
