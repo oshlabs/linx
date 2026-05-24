@@ -267,6 +267,49 @@ defmodule Linx.Process do
   end
 
   @doc """
+  Returns the workload's pid **as the host sees it**.
+
+  `Linx.Process` delivers two different pid views via lifecycle
+  events:
+
+    * `{:linx_process, :ready, child_pid}` — the *child's own* view
+      of its pid. When `:pid` is in the namespaces list, this is
+      `1` (the child is PID 1 inside its fresh PID namespace).
+      Without `:pid`, it equals the host pid.
+    * The host's view of the child's pid is reported by the agent
+      separately (via `:spawned`, before `:ready`) and stored in
+      the session's state. `host_pid/1` returns it.
+
+  Use `host_pid/1` when you need to address the workload from
+  the host — typically for procfs paths like
+  `/proc/<host_pid>/{ns,uid_map,gid_map,setgroups,mountinfo}`.
+  Every cross-namespace primitive in Linx (`Linx.Mount`'s
+  `:in: {:pid, _}`, `Linx.User.set_uid_map/2`, `Linx.User.setup_maps/2`)
+  wants the host pid.
+
+  ## Returns
+
+    * `{:ok, host_pid}` — the agent has reported `:spawned` (which
+      arrives before `:ready`), so the value is available.
+    * `{:error, :not_ready}` — the spawn hasn't progressed far
+      enough yet. Typically only possible if you call `host_pid/1`
+      synchronously after `spawn/1` without first awaiting any
+      lifecycle event. Once you've seen `:ready`, `host_pid/1`
+      always succeeds.
+
+  ## Example
+
+      {:ok, c} = Linx.Process.spawn(argv: [...], namespaces: [:user, :pid])
+      receive do {:linx_process, :ready, _child_view} -> :ok end
+      {:ok, host_pid} = Linx.Process.host_pid(c)
+      :ok = Linx.User.setup_maps(host_pid, uid: [...], gid: [...])
+  """
+  @spec host_pid(t()) :: {:ok, pos_integer()} | {:error, :not_ready}
+  def host_pid(session) when is_pid(session) do
+    GenServer.call(session, :host_pid)
+  end
+
+  @doc """
   Synchronously waits for the workload's terminal event.
 
   Returns one of:
@@ -569,6 +612,17 @@ defmodule Linx.Process do
   # pre-:running buffering shape.
   def handle_call(:abort, _from, %{child_pid: nil} = state) do
     {:reply, :ok, %{state | pending_abort?: true}}
+  end
+
+  # host_pid/1 -- the value is set by handle_info on :spawned, which
+  # arrives before :ready. If the caller asks before :spawned has
+  # been processed (race-y but possible), they get :not_ready.
+  def handle_call(:host_pid, _from, %{host_pid: nil} = state) do
+    {:reply, {:error, :not_ready}, state}
+  end
+
+  def handle_call(:host_pid, _from, %{host_pid: host_pid} = state) do
+    {:reply, {:ok, host_pid}, state}
   end
 
   # The workload has already terminated; sending a signal would have no

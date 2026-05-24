@@ -9,6 +9,11 @@
 > target's namespaces, and `:stdio` plumbing primitives including PTY.
 > P5 added `abort/1` — release a parked session without `execve`'ing,
 > with a distinct `{:linx_process, :aborted}` terminal event.
+> P6 added `host_pid/1` — returns the host's view of the child's
+> pid; required for cross-namespace primitives in `Linx.Mount` /
+> `Linx.User` when `:pid` is in the namespaces list (the `:ready`
+> event delivers the child's *own* view, which is `1` inside a
+> fresh PID namespace).
 
 ## Goal
 

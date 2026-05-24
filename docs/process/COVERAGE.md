@@ -22,6 +22,7 @@ A living doc — update as primitives ship. Status legend:
 | Input validation on opts | ✅ | P1 |
 | `proceed/1` | ✅ | P1 |
 | `abort/1` | ✅ | P5 — discard a parked session without execve; emits `{:linx_process, :aborted}` |
+| `host_pid/1` | ✅ | P6 — returns the host's view of the child's pid (matters when `:pid` is in the namespaces list) |
 | `signal/2` (queued before `:running`) | ✅ | P2 — buffered pre-running, forwarded post |
 | `wait/1` (synchronous wait for terminal event) | ✅ | P2 — with timeout in `wait/2`; returns `{:ok, :aborted}` for aborted sessions |
 | Exit status via `waitpid(2)` | ✅ | P1 (drives `:exited` / `:signaled`) |

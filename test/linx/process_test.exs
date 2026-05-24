@@ -149,6 +149,63 @@ defmodule Linx.ProcessTest do
     end
   end
 
+  describe "host_pid/1" do
+    test "returns the host's view of the child's pid after :ready" do
+      # No :pid namespace -> the :ready event's value IS the host
+      # pid, so we can cross-check.
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "10"])
+      assert_receive {:linx_process, :ready, ready_pid}, 2_000
+
+      assert {:ok, host_pid} = P.host_pid(session)
+      assert is_integer(host_pid) and host_pid > 0
+      assert host_pid == ready_pid
+
+      # Clean up.
+      :ok = P.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+    end
+
+    @tag :integration
+    test "with :pid namespace, host_pid differs from the :ready value" do
+      # The whole point of host_pid/1: when :pid is in the
+      # namespaces list, the :ready event's pid is 1 (child's view),
+      # but the host pid is something else entirely.
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "10"], namespaces: [:pid])
+      assert_receive {:linx_process, :ready, ready_pid}, 2_000
+
+      # Inside the fresh PID namespace, the child is PID 1.
+      assert ready_pid == 1
+
+      # The host sees it with a real pid.
+      assert {:ok, host_pid} = P.host_pid(session)
+      assert is_integer(host_pid) and host_pid > 1
+      assert host_pid != ready_pid
+
+      # And that host_pid actually points at a live process in
+      # /proc -- sanity check.
+      assert File.exists?("/proc/#{host_pid}")
+
+      :ok = P.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+    end
+
+    test "host_pid/1 keeps returning the same value across the lifecycle" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      assert {:ok, p1} = P.host_pid(session)
+
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      # The host pid the session reports doesn't change just
+      # because the workload exited -- the stored value persists
+      # (useful for post-mortem logging / inspection).
+      assert {:ok, p2} = P.host_pid(session)
+      assert p1 == p2
+    end
+  end
+
   describe "abort/1" do
     test "abort/1 on a :ready parked session discards the workload" do
       # /bin/sleep 60 would normally run for a minute; abort/1 means
