@@ -22,10 +22,10 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `deny_setgroups/1` | ⬜ | U1 — writes `"deny"` to `/proc/<pid>/setgroups`; required before `set_gid_map/2` from an unprivileged caller |
-| `set_uid_map/2` | ⬜ | U1 — writes `/proc/<pid>/uid_map`; write-once |
-| `set_gid_map/2` | ⬜ | U1 — writes `/proc/<pid>/gid_map`; write-once |
-| Input validation (`{:bad_map, reason}`) | ⬜ | U1 — non-list, negative ids, zero length, wrong-arity tuples |
+| `deny_setgroups/1` | ✅ | U1 — writes `"deny"` to `/proc/<pid>/setgroups`; required before `set_gid_map/2` from an unprivileged caller |
+| `set_uid_map/2` | ✅ | U1 — writes `/proc/<pid>/uid_map`; write-once |
+| `set_gid_map/2` | ✅ | U1 — writes `/proc/<pid>/gid_map`; write-once |
+| Input validation (`{:bad_map, reason}`) | ✅ | U1 — non-list, negative ids, zero length, wrong-arity tuples |
 
 ## Read side
 
@@ -45,22 +45,22 @@ A living doc — update as primitives ship. Status legend:
 
 | Pairing | Status | Notes |
 |---|---|---|
-| `Linx.Process` rootless mapping at checkpoint | ⬜ | U1 — caller writes maps between `:ready` and `proceed/1`; no `Linx.Process` change needed |
+| `Linx.Process` rootless mapping at checkpoint | ✅ | U1 — caller writes maps between `:ready` and `proceed/1`; no `Linx.Process` change needed |
 
 ## Value types
 
 | Module | Status | Notes |
 |---|---|---|
 | `Linx.User.Map` | ⬜ | U2 — `%{inside, outside, length}` with compact Inspect |
-| `Linx.User.Error` | ⬜ | U1 — POSIX-atom errno + path + operation |
+| `Linx.User.Error` | ✅ | U1 — POSIX-atom errno + path + operation |
 
 ## Error reporting
 
 | Mechanism | Status | Notes |
 |---|---|---|
-| `%Linx.User.Error{path, operation, errno, code}` | ⬜ | U1 |
-| `Exception` impl for `raise`-able paths | ⬜ | U1 |
-| `{:bad_map, reason}` for input mistakes | ⬜ | U1 — distinct from kernel-level errors |
+| `%Linx.User.Error{path, operation, errno, code}` | ✅ | U1 |
+| `Exception` impl for `raise`-able paths | ✅ | U1 |
+| `{:bad_map, reason}` for input mistakes | ✅ | U1 — distinct from kernel-level errors |
 
 ## Deferred — not in `Linx.User` itself
 

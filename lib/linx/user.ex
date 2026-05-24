@@ -69,10 +69,13 @@ defmodule Linx.User do
 
   ## Status
 
-  U0 — scaffolding only. `supported?/0` is functional; the
-  write-side and read-side verbs land in U1–U2. See
-  `docs/user/PLAN.md` for the roadmap.
+  U0–U1 shipped: `supported?/0`, `deny_setgroups/1`,
+  `set_uid_map/2`, `set_gid_map/2`, plus the `Linx.User.Error`
+  shape. Read side and the `setup_maps/2` convenience land in U2.
+  See `docs/user/PLAN.md` for the roadmap.
   """
+
+  alias Linx.User.Error
 
   @proc "/proc"
   @self_uid_map Path.join([@proc, "self", "uid_map"])
@@ -105,35 +108,117 @@ defmodule Linx.User do
 
   **Required before `set_gid_map/2`** for unprivileged callers (no
   `CAP_SETGID` in the parent user ns) — the kernel rejects the
-  gid_map write otherwise. Privileged callers may skip it.
+  gid_map write otherwise. Privileged callers may skip it; the
+  effect is idempotent (re-writing `"deny"` over an already-denied
+  setgroups returns `:ok`).
 
-  Lands in U1.
+  Common failure modes:
+
+    * `{:error, %Linx.User.Error{errno: :enoent}}` — the target pid
+      no longer exists.
+    * `{:error, %Linx.User.Error{errno: :eperm}}` — calling at the
+      wrong moment (some kernel versions; rare in modern setups).
   """
-  @spec deny_setgroups(pid_target()) :: :ok | {:error, term()}
-  def deny_setgroups(_pid), do: {:error, :not_yet_implemented}
+  @spec deny_setgroups(pid_target()) :: :ok | {:error, Error.t()}
+  def deny_setgroups(pid) when is_integer(pid) and pid > 0 do
+    path = Path.join([@proc, Integer.to_string(pid), "setgroups"])
+    write_or_error(path, "deny", :deny_setgroups)
+  end
 
   @doc """
   Writes a uid mapping to `/proc/<pid>/uid_map`.
 
-  `mappings` is a list of `{inside_id, outside_id, length}`
-  non-negative integer tuples. The kernel writes are **write-once**
-  per user namespace — a second call returns `EPERM`.
+  `mappings` is a non-empty list of `{inside_id, outside_id, length}`
+  non-negative-integer tuples (with `length > 0`). The kernel
+  serialises it as one line per entry; we render and write the whole
+  blob in one syscall.
 
-  Lands in U1.
+  The write is **write-once** per user namespace — a second call
+  returns `EPERM`. Plan your mapping fully before calling.
+
+  ## Examples
+
+      # The canonical rootless "root inside ↔ me outside" mapping:
+      :ok = Linx.User.set_uid_map(host_pid, [{0, my_uid, 1}])
+
+      # A multi-range identity map (needs CAP_SETUID or
+      # newuidmap(1) — deferred U3 territory):
+      :ok = Linx.User.set_uid_map(host_pid,
+        [{0, 0, 1}, {1, 100_000, 65_536}])
+
+  ## Errors
+
+    * `{:error, {:bad_map, reason}}` — caller-side input mistake
+      (not a list, wrong-arity tuple, negative id, zero length).
+    * `{:error, %Linx.User.Error{}}` — kernel-level rejection.
+      Common: `:eperm` (write-once already done; map too broad for
+      an unprivileged caller), `:einval` (overlapping or invalid
+      range), `:enoent` (target pid is gone).
   """
-  @spec set_uid_map(pid_target(), [mapping()]) :: :ok | {:error, term()}
-  def set_uid_map(_pid, _mappings), do: {:error, :not_yet_implemented}
+  @spec set_uid_map(pid_target(), [mapping()]) ::
+          :ok | {:error, Error.t() | {:bad_map, term()}}
+  def set_uid_map(pid, mappings) when is_integer(pid) and pid > 0 do
+    write_map(pid, "uid_map", mappings, :set_uid_map)
+  end
 
   @doc """
   Writes a gid mapping to `/proc/<pid>/gid_map`. Same shape and
   write-once semantics as `set_uid_map/2`.
 
-  Unprivileged callers must call `deny_setgroups/1` first.
-
-  Lands in U1.
+  **Unprivileged callers must call `deny_setgroups/1` first** —
+  the kernel returns `EPERM` otherwise. The
+  `Linx.User.setup_maps/2` convenience (lands in U2) does this
+  sequence automatically.
   """
-  @spec set_gid_map(pid_target(), [mapping()]) :: :ok | {:error, term()}
-  def set_gid_map(_pid, _mappings), do: {:error, :not_yet_implemented}
+  @spec set_gid_map(pid_target(), [mapping()]) ::
+          :ok | {:error, Error.t() | {:bad_map, term()}}
+  def set_gid_map(pid, mappings) when is_integer(pid) and pid > 0 do
+    write_map(pid, "gid_map", mappings, :set_gid_map)
+  end
+
+  defp write_map(pid, file, mappings, operation) do
+    with {:ok, blob} <- render_map(mappings) do
+      path = Path.join([@proc, Integer.to_string(pid), file])
+      write_or_error(path, blob, operation)
+    end
+  end
+
+  # Renders a list of {inside, outside, length} into the
+  # kernel's "inside outside length\n" format. Validates strictly
+  # before producing any output -- partial maps are not allowed
+  # (the kernel takes the whole blob in one write or rejects).
+  defp render_map([]), do: {:error, {:bad_map, :empty}}
+
+  defp render_map(mappings) when is_list(mappings) do
+    Enum.reduce_while(mappings, {:ok, []}, fn entry, {:ok, acc} ->
+      case validate_entry(entry) do
+        {:ok, line} -> {:cont, {:ok, [line | acc]}}
+        {:error, reason} -> {:halt, {:error, {:bad_map, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, lines} -> {:ok, lines |> Enum.reverse() |> IO.iodata_to_binary()}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp render_map(_other), do: {:error, {:bad_map, :not_a_list}}
+
+  defp validate_entry({inside, outside, length})
+       when is_integer(inside) and inside >= 0 and
+            is_integer(outside) and outside >= 0 and
+            is_integer(length) and length > 0 do
+    {:ok, "#{inside} #{outside} #{length}\n"}
+  end
+
+  defp validate_entry(other), do: {:error, {:bad_entry, other}}
+
+  defp write_or_error(path, blob, operation) do
+    case File.write(path, blob) do
+      :ok -> :ok
+      {:error, posix} -> {:error, Error.from_posix(posix, path, operation)}
+    end
+  end
 
   @doc """
   Reads and parses `/proc/<pid>/uid_map` into a list of

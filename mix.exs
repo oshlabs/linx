@@ -137,7 +137,8 @@ defmodule Linx.MixProject do
           Linx.Mount.Native
         ],
         User: [
-          Linx.User
+          Linx.User,
+          Linx.User.Error
         ],
         "Netlink core": [
           Linx.Netlink,
