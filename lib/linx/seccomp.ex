@@ -88,7 +88,10 @@ defmodule Linx.Seccomp do
   """
 
   alias Linx.Seccomp.Builder
+  alias Linx.Seccomp.Compiler
+  alias Linx.Seccomp.Constants
   alias Linx.Seccomp.Filter
+  alias Linx.Seccomp.Syscalls
 
   @proc_self_status "/proc/self/status"
 
@@ -189,22 +192,28 @@ defmodule Linx.Seccomp do
       contracts ("I have enumerated what's safe"); a syscall outside
       is a bug or attack and should fail loudly.
 
-  ## Stub
+  ## Errors
 
-  Returns `{:error, :not_yet_implemented}` until S1 ships. The
-  shape is locked in.
+  Same shape as `from_rules/1`. See its docs for the full list.
 
-  ## Example (lands with S1)
+  ## Examples
 
       {:ok, filter} = Linx.Seccomp.allow_list(
         ~w(read write openat close exit_group)a,
         default: :kill_process
       )
+
+      # Looser default — useful when the goal is to log unlisted
+      # syscalls for profiling rather than killing the workload.
+      {:ok, filter} = Linx.Seccomp.allow_list([:read, :write],
+                                              default: :log)
   """
   @spec allow_list(Enumerable.t(), keyword()) ::
           {:ok, Filter.t()} | {:error, term()}
-  def allow_list(_syscalls, _opts \\ []) do
-    {:error, :not_yet_implemented}
+  def allow_list(syscalls, opts \\ []) do
+    default = Keyword.get(opts, :default, :kill_process)
+    rules = Enum.map(syscalls, &{:allow, &1})
+    from_rules({rules, default})
   end
 
   @doc """
@@ -220,20 +229,30 @@ defmodule Linx.Seccomp do
     * `:deny_action` — the action for listed syscalls. Defaults to
       `{:errno, :eperm}`.
 
-  ## Stub
+  ## Errors
 
-  Returns `{:error, :not_yet_implemented}` until S1 ships.
+  Same shape as `from_rules/1`.
 
-  ## Example (lands with S1)
+  ## Examples
 
+      # Docker-style: deny the dangerous syscalls, allow the rest.
       {:ok, filter} = Linx.Seccomp.deny_list(
-        ~w(kexec_load init_module delete_module ptrace)a
+        ~w(kexec_load init_module delete_module ptrace mount)a
+      )
+
+      # Same denies but with a sharper edge — kill instead of EPERM.
+      {:ok, filter} = Linx.Seccomp.deny_list(
+        [:kexec_load, :init_module],
+        deny_action: :kill_process
       )
   """
   @spec deny_list(Enumerable.t(), keyword()) ::
           {:ok, Filter.t()} | {:error, term()}
-  def deny_list(_syscalls, _opts \\ []) do
-    {:error, :not_yet_implemented}
+  def deny_list(syscalls, opts \\ []) do
+    default = Keyword.get(opts, :default, :allow)
+    deny_action = Keyword.get(opts, :deny_action, {:errno, :eperm})
+    rules = Enum.map(syscalls, &{deny_action, &1})
+    from_rules({rules, default})
   end
 
   @doc """
@@ -243,14 +262,37 @@ defmodule Linx.Seccomp do
   `{action, syscall_atom}` tuples and `default_action` is the
   fallthrough verdict. The seam external consumers (Silo's
   `seccomp.json` adapter, custom DSLs, runtime policy) use to hand
-  fully-resolved policy to Linx.
+  fully-resolved policy to Linx — Silo's job is "translate JSON to
+  this list shape"; Linx's job starts here.
 
-  ## Stub
+  The filter targets the current host architecture (see `arch/0`).
+  Filters built for one arch don't install on another; per
+  `docs/seccomp/PLAN.md` D5 multi-arch filters are deferred.
 
-  Returns `{:error, :not_yet_implemented}` until S1 ships. The
-  shape is locked in.
+  ## Returns
 
-  ## Example (lands with S1)
+    * `{:ok, %Linx.Seccomp.Filter{}}` on success — the filter's
+      `:rules` field carries the normalised `{rules, default}` so
+      `to_rules/1` can introspect it later.
+
+    * `{:error, {:unsupported_arch, arch}}` — the host arch isn't
+      in Linx's supported list (`:x86_64`, `:aarch64`).
+    * `{:error, {:bad_action, term}}` — the default or one of the
+      per-rule actions isn't a recognised verdict.
+    * `{:error, {:unknown_syscall, atom}}` — a rule names a syscall
+      atom that isn't in the per-arch table. See
+      `Linx.Seccomp.Syscalls` "Extending this table" for how to
+      add one.
+    * `{:error, {:duplicate_rule, atom}}` — the same syscall
+      appears in more than one rule.
+    * `{:error, {:bad_rule, term}}` — an element of the rules list
+      isn't a `{action, syscall_atom}` tuple.
+    * `{:error, %Linx.Seccomp.Error{operation: :build, errno: :e2big}}`
+      — the filter would need a jump > 255 instructions
+      (jump-trampoline support is deferred; the current
+      ~150-syscall table fits comfortably under this limit).
+
+  ## Examples
 
       rules = [
         {:allow, :read},
@@ -259,31 +301,57 @@ defmodule Linx.Seccomp do
         {:kill_process, :kexec_load}
       ]
       {:ok, filter} = Linx.Seccomp.from_rules({rules, :allow})
+
+      # Errors are caller-actionable atoms:
+      Linx.Seccomp.from_rules({[{:allow, :not_a_real_syscall}], :allow})
+      # => {:error, {:unknown_syscall, :not_a_real_syscall}}
   """
   @spec from_rules({[Filter.rule()], Filter.action()}) ::
           {:ok, Filter.t()} | {:error, term()}
-  def from_rules(_rules_and_default) do
-    {:error, :not_yet_implemented}
+  def from_rules({rules, default}) when is_list(rules) do
+    arch = arch()
+
+    with :ok <- validate_arch(arch),
+         :ok <- validate_action(default),
+         :ok <- validate_rules(rules, arch),
+         {:ok, bpf} <- Compiler.compile(rules, default, arch) do
+      {:ok,
+       %Filter{
+         arch: arch,
+         bpf: bpf,
+         rules: {rules, default}
+       }}
+    end
+  end
+
+  def from_rules(other) do
+    {:error, {:bad_rules_arg, other}}
   end
 
   @doc """
   Inverse of `from_rules/1` — extract the rules list from a filter
   Linx itself built.
 
-  Filters that came from a raw BPF blob (a future Silo use case
-  for loading externally-supplied filters) don't carry rule
-  metadata; for those this returns `{:error, :no_rules}`.
+  Filters whose `:rules` field is `nil` (which would arise from a
+  future Silo path that loads externally-supplied raw BPF blobs)
+  return `{:error, :no_rules}`. The current build verbs always
+  populate `:rules`, so this is reliable for any filter Linx
+  itself produced.
 
-  ## Stub
+  ## Examples
 
-  Returns `{:error, :not_yet_implemented}` until S1 ships.
+      iex> {:ok, f} = Linx.Seccomp.allow_list([:read, :write])
+      iex> {:ok, {rules, default}} = Linx.Seccomp.to_rules(f)
+      iex> rules
+      [{:allow, :read}, {:allow, :write}]
+      iex> default
+      :kill_process
   """
   @spec to_rules(Filter.t()) ::
           {:ok, {[Filter.rule()], Filter.action()}}
-          | {:error, term()}
-  def to_rules(%Filter{}) do
-    {:error, :not_yet_implemented}
-  end
+          | {:error, :no_rules}
+  def to_rules(%Filter{rules: nil}), do: {:error, :no_rules}
+  def to_rules(%Filter{rules: {rules, default}}), do: {:ok, {rules, default}}
 
   @doc """
   Install a compiled filter on a parked `Linx.Process` session.
@@ -314,5 +382,63 @@ defmodule Linx.Seccomp do
           :ok | {:error, term()}
   def install(_session, %Filter{}) do
     {:error, :not_yet_implemented}
+  end
+
+  # ── Validation helpers ────────────────────────────────────────
+  # Used by from_rules/1 + the sugar verbs. Tagged-tuple errors per
+  # `docs/seccomp/PLAN.md`'s S1 contract.
+
+  defp validate_arch(:unsupported), do: {:error, {:unsupported_arch, :unsupported}}
+  defp validate_arch(arch) when is_atom(arch), do: :ok
+
+  # Walk the rules list, accumulating seen syscalls to detect
+  # duplicates. Short-circuits on the first malformed rule / unknown
+  # syscall / duplicate per the PLAN's S1 contract.
+  defp validate_rules(rules, arch) do
+    do_validate_rules(rules, arch, MapSet.new())
+  end
+
+  defp do_validate_rules([], _arch, _seen), do: :ok
+
+  defp do_validate_rules([{action, syscall} | rest], arch, seen)
+       when is_atom(syscall) do
+    cond do
+      not valid_action?(action) ->
+        {:error, {:bad_action, action}}
+
+      not Syscalls.known?(syscall, arch) ->
+        {:error, {:unknown_syscall, syscall}}
+
+      MapSet.member?(seen, syscall) ->
+        {:error, {:duplicate_rule, syscall}}
+
+      true ->
+        do_validate_rules(rest, arch, MapSet.put(seen, syscall))
+    end
+  end
+
+  defp do_validate_rules([bad | _rest], _arch, _seen) do
+    {:error, {:bad_rule, bad}}
+  end
+
+  @doc false
+  # Exported because the Builder needs the same validation predicate.
+  @spec validate_action(term()) :: :ok | {:error, {:bad_action, term()}}
+  def validate_action(action) do
+    if valid_action?(action) do
+      :ok
+    else
+      {:error, {:bad_action, action}}
+    end
+  end
+
+  # `Linx.Seccomp.Constants.action_to_u32/1` raises on a bad action;
+  # we use that as the oracle so the two stay in sync. Validation is
+  # build-time, not hot-path — rescue cost is irrelevant here.
+  defp valid_action?(action) do
+    _ = Constants.action_to_u32(action)
+    true
+  rescue
+    ArgumentError -> false
   end
 end

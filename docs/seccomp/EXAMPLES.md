@@ -12,9 +12,10 @@ also plain — no installation, no root. Installation
 needs a parked session and (typically) `no_new_privs: true` or
 root.
 
-> 🚧 **Skeleton.** Primitives are still in flight; sections
-> fill in as milestones ship. See `PLAN.md` for the roadmap
-> and `COVERAGE.md` for what's in / out.
+> 🚧 **In progress.** S0 + S1 are live (detection, syscall table,
+> filter construction, BPF compiler). S2 (kernel-side install at
+> the `Linx.Process` checkpoint) is still in flight. See
+> `PLAN.md` for the roadmap and `COVERAGE.md` for what's in / out.
 
 ## Detecting seccomp support
 
@@ -42,46 +43,81 @@ The arch atom drives which syscall table is used when building
 filters. Linx v1 supports `:x86_64` and `:aarch64`; other
 arches return `:unsupported`.
 
-## (Will land with S0 — table queries)
-
-## (Will land with S1 — filter construction)
+## Querying the syscall table
 
 ```elixir
-# Allow-list -- the most secure shape. Anything not listed gets
-# the default action, which for allow_list is :kill_process.
+iex> Linx.Seccomp.Syscalls.to_number(:read, :x86_64)
+0
+iex> Linx.Seccomp.Syscalls.to_number(:read, :aarch64)
+63
+iex> Linx.Seccomp.Syscalls.from_number(317, :x86_64)
+:seccomp
+iex> Linx.Seccomp.Syscalls.from_number(99999, :x86_64)
+:unknown
+iex> MapSet.size(Linx.Seccomp.Syscalls.all(:x86_64))
+239
+```
+
+`Linx.Seccomp.Syscalls` is `@moduledoc false` and the inverse is
+intended for use by `Linx.Seccomp` itself, but it's accessible for
+introspection. See `docs/seccomp/PLAN.md` "Extending the syscall
+table" for how to add an entry the table doesn't ship yet.
+
+## Building filters — `allow_list/2` and `deny_list/2`
+
+```elixir
+# Allow-list — the most secure shape. Anything not listed gets the
+# default action, which for allow_list is :kill_process (per D1).
 {:ok, filter} = Linx.Seccomp.allow_list(
   ~w(read write openat close fstat brk mmap munmap mprotect
-     exit exit_group rt_sigreturn)a,
+     exit_group rt_sigreturn)a,
   default: :kill_process
 )
+filter
+#=> #Linx.Seccomp.Filter<x86_64 11 syscalls, 17 BPF insns>
 
-# Deny-list -- the Docker default shape. Listed syscalls get the
+# Deny-list — the Docker default shape. Listed syscalls get the
 # deny action (EPERM by default); everything else is allowed.
 {:ok, filter} = Linx.Seccomp.deny_list(
   ~w(kexec_load init_module delete_module ptrace swapon swapoff
-     mount umount2 pivot_root iopl ioperm)a
+     mount umount2 pivot_root)a
 )
+filter
+#=> #Linx.Seccomp.Filter<x86_64 9 syscalls, 15 BPF insns>
 ```
 
-## (Will land with S1 — Builder DSL)
+The `Filter` struct's compact Inspect shows the arch, the rule
+count, and the cBPF instruction count — the raw BPF binary lives
+in `filter.bpf` if you ever need to look at the bytes.
+
+## Building filters — `Linx.Seccomp.Builder`
+
+The fluent DSL for filters constructed in code (rather than
+translated from external policy):
 
 ```elixir
 {:ok, filter} =
   Linx.Seccomp.builder()
   |> Linx.Seccomp.Builder.allow(:read)
   |> Linx.Seccomp.Builder.allow(:write)
+  |> Linx.Seccomp.Builder.allow(:exit_group)
   |> Linx.Seccomp.Builder.deny(:ptrace, errno: :eperm)
   |> Linx.Seccomp.Builder.deny(:kexec_load, action: :kill_process)
   |> Linx.Seccomp.Builder.build(default: :allow)
 ```
 
-## (Will land with S1 — from_rules/1 data-layer API)
+`deny/3` takes either `errno: :eacces` (shorthand for `{:errno,
+:eacces}`) or `action: :kill_process` for an explicit verdict; if
+both are given, `:action` wins.
 
-The data-layer API for consumers like Silo that build filters
-from external sources:
+## Building filters — `from_rules/1` (data-layer API)
+
+The seam consumers like Silo use when they translate external
+policy (Docker `seccomp.json`, custom DSLs, runtime config) into
+a fully-resolved Linx filter:
 
 ```elixir
-# A rules list -- the shape Silo would build from a parsed
+# A rules list — the shape Silo would build from a parsed
 # Docker seccomp.json.
 rules = [
   {:allow, :read},
@@ -94,7 +130,35 @@ rules = [
 ]
 
 {:ok, filter} = Linx.Seccomp.from_rules({rules, _default = :allow})
+
+# And back again — for filters Linx itself built.
+{:ok, {^rules, :allow}} = Linx.Seccomp.to_rules(filter)
 ```
+
+## Error shapes
+
+Build errors are caller-actionable atoms — what the failing
+expression returned, and what to fix:
+
+```elixir
+iex> Linx.Seccomp.allow_list([:not_a_real_syscall])
+{:error, {:unknown_syscall, :not_a_real_syscall}}
+
+iex> Linx.Seccomp.allow_list([:read], default: :not_an_action)
+{:error, {:bad_action, :not_an_action}}
+
+iex> Linx.Seccomp.allow_list([:read, :read])
+{:error, {:duplicate_rule, :read}}
+
+iex> Linx.Seccomp.from_rules({[:not_a_rule], :allow})
+{:error, {:bad_rule, :not_a_rule}}
+```
+
+The `%Linx.Seccomp.Error{}` struct is reserved for kernel-side
+failures (S2's `:install` / `:set_no_new_privs` operations) and
+the rare `:build` failure that doesn't fit a tagged tuple — today
+just `:e2big` for filters that overflow the 255-instruction jump
+limit.
 
 ## (Will land with S2 — install at the checkpoint)
 

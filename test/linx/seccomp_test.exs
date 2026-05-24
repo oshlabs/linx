@@ -432,35 +432,187 @@ defmodule Linx.SeccompTest do
 
   # ── Stub verbs ───────────────────────────────────────────────
 
-  describe "stub verbs (S1/S2)" do
-    test "Linx.Seccomp.allow_list/2 returns {:error, :not_yet_implemented}" do
-      assert Seccomp.allow_list([:read, :write]) ==
-               {:error, :not_yet_implemented}
+  # ── Build verbs — happy paths ────────────────────────────────
 
-      assert Seccomp.allow_list([:read], default: :kill_process) ==
-               {:error, :not_yet_implemented}
+  describe "Linx.Seccomp.allow_list/2" do
+    test "returns a %Filter{} for known syscalls" do
+      assert {:ok, %Filter{} = f} = Seccomp.allow_list([:read, :write])
+      assert f.arch == Seccomp.arch()
+      assert byte_size(f.bpf) > 0
     end
 
-    test "Linx.Seccomp.deny_list/2 returns {:error, :not_yet_implemented}" do
-      assert Seccomp.deny_list([:ptrace]) ==
-               {:error, :not_yet_implemented}
+    test "defaults the fallthrough to :kill_process" do
+      {:ok, f} = Seccomp.allow_list([:read])
+      assert {:ok, {_rules, :kill_process}} = Seccomp.to_rules(f)
     end
 
-    test "Linx.Seccomp.from_rules/1 returns {:error, :not_yet_implemented}" do
-      assert Seccomp.from_rules({[{:allow, :read}], :kill_process}) ==
-               {:error, :not_yet_implemented}
+    test "honours an explicit :default opt" do
+      {:ok, f} = Seccomp.allow_list([:read], default: :log)
+      assert {:ok, {_rules, :log}} = Seccomp.to_rules(f)
     end
 
-    test "Linx.Seccomp.to_rules/1 returns {:error, :not_yet_implemented}" do
+    test "rules are all {:allow, syscall} in source order" do
+      {:ok, f} = Seccomp.allow_list([:read, :write, :openat])
+      {:ok, {rules, _}} = Seccomp.to_rules(f)
+      assert rules == [{:allow, :read}, {:allow, :write}, {:allow, :openat}]
+    end
+
+    test "an empty allow_list compiles to a fall-through-only filter" do
+      {:ok, f} = Seccomp.allow_list([], default: :allow)
+      # 5 insns: arch prologue (3) + load nr (1) + default RET (1).
+      assert div(byte_size(f.bpf), 8) == 5
+    end
+  end
+
+  describe "Linx.Seccomp.deny_list/2" do
+    test "returns a %Filter{} with the deny action on each listed syscall" do
+      {:ok, f} = Seccomp.deny_list([:ptrace, :kexec_load])
+
+      assert {:ok, {rules, :allow}} = Seccomp.to_rules(f)
+      assert rules == [{{:errno, :eperm}, :ptrace}, {{:errno, :eperm}, :kexec_load}]
+    end
+
+    test "defaults the fallthrough to :allow (Docker-style)" do
+      {:ok, f} = Seccomp.deny_list([:ptrace])
+      assert {:ok, {_, :allow}} = Seccomp.to_rules(f)
+    end
+
+    test "honours :deny_action opt" do
+      {:ok, f} = Seccomp.deny_list([:kexec_load], deny_action: :kill_process)
+      {:ok, {rules, _}} = Seccomp.to_rules(f)
+      assert rules == [{:kill_process, :kexec_load}]
+    end
+
+    test "honours both :default and :deny_action opts together" do
+      {:ok, f} =
+        Seccomp.deny_list([:ptrace], default: :log, deny_action: :kill_thread)
+
+      assert {:ok, {[{:kill_thread, :ptrace}], :log}} = Seccomp.to_rules(f)
+    end
+  end
+
+  describe "Linx.Seccomp.from_rules/1" do
+    test "compiles a mixed rules list to a %Filter{}" do
+      rules = [
+        {:allow, :read},
+        {:allow, :write},
+        {{:errno, :eperm}, :ptrace},
+        {:kill_process, :kexec_load}
+      ]
+
+      assert {:ok, %Filter{} = f} = Seccomp.from_rules({rules, :allow})
+      assert {:ok, {^rules, :allow}} = Seccomp.to_rules(f)
+    end
+
+    test "preserves source order in the resulting filter's rules" do
+      rules = [{:allow, :write}, {:allow, :read}, {:allow, :openat}]
+      {:ok, f} = Seccomp.from_rules({rules, :kill_process})
+      {:ok, {round_tripped, _}} = Seccomp.to_rules(f)
+      assert round_tripped == rules
+    end
+
+    test "all valid action shapes pass validation" do
+      for action <- [
+            :allow,
+            :kill_process,
+            :kill_thread,
+            :trap,
+            :log,
+            {:errno, :eperm},
+            {:errno, :einval},
+            {:errno, 42}
+          ] do
+        assert {:ok, %Filter{}} =
+                 Seccomp.from_rules({[{action, :read}], :allow}),
+               "expected #{inspect(action)} to validate"
+      end
+    end
+
+    test "rejects an unknown syscall atom" do
+      assert {:error, {:unknown_syscall, :not_a_real_syscall}} =
+               Seccomp.from_rules({[{:allow, :not_a_real_syscall}], :allow})
+    end
+
+    test "rejects a malformed action" do
+      assert {:error, {:bad_action, :not_an_action}} =
+               Seccomp.from_rules({[{:not_an_action, :read}], :allow})
+    end
+
+    test "rejects a malformed default" do
+      assert {:error, {:bad_action, :not_an_action}} =
+               Seccomp.from_rules({[{:allow, :read}], :not_an_action})
+    end
+
+    test "rejects {:errno, _} with an unknown errno atom" do
+      assert {:error, {:bad_action, {:errno, :enot_real}}} =
+               Seccomp.from_rules({[{{:errno, :enot_real}, :read}], :allow})
+    end
+
+    test "rejects a duplicate syscall" do
+      assert {:error, {:duplicate_rule, :read}} =
+               Seccomp.from_rules({[{:allow, :read}, {:allow, :read}], :allow})
+    end
+
+    test "rejects a duplicate with different actions" do
+      # Same syscall, different actions → still a duplicate.
+      rules = [{:allow, :read}, {:kill_process, :read}]
+      assert {:error, {:duplicate_rule, :read}} =
+               Seccomp.from_rules({rules, :allow})
+    end
+
+    test "rejects a non-tuple rule" do
+      assert {:error, {:bad_rule, :not_a_tuple}} =
+               Seccomp.from_rules({[:not_a_tuple], :allow})
+    end
+
+    test "rejects a rule with a non-atom syscall" do
+      assert {:error, {:bad_rule, {:allow, 0}}} =
+               Seccomp.from_rules({[{:allow, 0}], :allow})
+    end
+
+    test "rejects a non-tuple argument" do
+      assert {:error, {:bad_rules_arg, :nope}} = Seccomp.from_rules(:nope)
+    end
+
+    test "short-circuits on the first error" do
+      # The :read rule is valid; the :not_real rule fails. Validation
+      # stops there.
+      rules = [{:allow, :read}, {:allow, :not_real_syscall}, {:allow, :write}]
+      assert {:error, {:unknown_syscall, :not_real_syscall}} =
+               Seccomp.from_rules({rules, :allow})
+    end
+  end
+
+  describe "Linx.Seccomp.to_rules/1" do
+    test "returns the {rules, default} tuple for a Linx-built filter" do
+      rules = [{:allow, :read}, {:allow, :write}]
+      {:ok, f} = Seccomp.from_rules({rules, :kill_process})
+
+      assert {:ok, {^rules, :kill_process}} = Seccomp.to_rules(f)
+    end
+
+    test "round-trips through from_rules/1" do
+      original = [
+        {:allow, :read},
+        {{:errno, :eacces}, :ptrace},
+        {:kill_process, :kexec_load}
+      ]
+
+      {:ok, f} = Seccomp.from_rules({original, :log})
+      {:ok, round_tripped} = Seccomp.to_rules(f)
+      assert round_tripped == {original, :log}
+    end
+
+    test "returns {:error, :no_rules} for an externally-supplied filter" do
       f = %Filter{arch: :x86_64, bpf: <<>>, rules: nil}
-      assert Seccomp.to_rules(f) == {:error, :not_yet_implemented}
+      assert Seccomp.to_rules(f) == {:error, :no_rules}
     end
+  end
 
-    test "Linx.Seccomp.install/2 returns {:error, :not_yet_implemented}" do
+  describe "Linx.Seccomp.install/2 (still a stub — lands with S2)" do
+    test "returns {:error, :not_yet_implemented}" do
       f = %Filter{arch: :x86_64, bpf: <<>>, rules: nil}
-      # We pass a fake PID — the stub doesn't dispatch yet.
-      assert Seccomp.install(self(), f) ==
-               {:error, :not_yet_implemented}
+      assert Seccomp.install(self(), f) == {:error, :not_yet_implemented}
     end
   end
 
@@ -518,11 +670,368 @@ defmodule Linx.SeccompTest do
              ]
     end
 
-    test "build/1 returns {:error, :not_yet_implemented} (stub)" do
-      b = Builder.new() |> Builder.allow(:read)
-      assert Builder.build(b) == {:error, :not_yet_implemented}
-      assert Builder.build(b, default: :kill_process) ==
-               {:error, :not_yet_implemented}
+    test "build/1 produces a %Filter{} with rules in source order" do
+      assert {:ok, %Filter{} = f} =
+               Builder.new()
+               |> Builder.allow(:read)
+               |> Builder.allow(:write)
+               |> Builder.deny(:ptrace)
+               |> Builder.build()
+
+      assert {:ok, {rules, :kill_process}} = Seccomp.to_rules(f)
+
+      assert rules == [
+               {:allow, :read},
+               {:allow, :write},
+               {{:errno, :eperm}, :ptrace}
+             ]
+    end
+
+    test "build/1 defaults the fallthrough to :kill_process" do
+      {:ok, f} = Builder.new() |> Builder.allow(:read) |> Builder.build()
+      assert {:ok, {_, :kill_process}} = Seccomp.to_rules(f)
+    end
+
+    test "build/1 honours the :default opt" do
+      {:ok, f} =
+        Builder.new()
+        |> Builder.deny(:ptrace)
+        |> Builder.build(default: :allow)
+
+      assert {:ok, {_, :allow}} = Seccomp.to_rules(f)
+    end
+
+    test "build/1 surfaces validation errors from from_rules/1" do
+      assert {:error, {:unknown_syscall, :not_a_real_syscall}} =
+               Builder.new()
+               |> Builder.allow(:not_a_real_syscall)
+               |> Builder.build()
+
+      assert {:error, {:duplicate_rule, :read}} =
+               Builder.new()
+               |> Builder.allow(:read)
+               |> Builder.allow(:read)
+               |> Builder.build()
+    end
+
+    test "build/1 of an empty builder gives a 5-insn fall-through filter" do
+      {:ok, f} = Builder.new() |> Builder.build(default: :allow)
+      assert div(byte_size(f.bpf), 8) == 5
+    end
+  end
+
+  # ── Compiler — direct unit tests (golden bytes) ──────────────
+
+  alias Linx.Seccomp.Compiler
+
+  describe "Linx.Seccomp.Compiler — empty rules / x86_64" do
+    test "empty allow filter is 5 instructions / 40 bytes" do
+      {:ok, bpf} = Compiler.compile([], :allow, :x86_64)
+      assert byte_size(bpf) == 40
+    end
+
+    test "empty allow filter has the canonical bytes" do
+      {:ok, bpf} = Compiler.compile([], :allow, :x86_64)
+
+      # Hand-decoded against include/uapi/linux/{filter,seccomp,audit}.h.
+      expected =
+        # ld [4] (load arch into A)
+        <<0x20, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00>> <>
+          # jeq AUDIT_ARCH_X86_64=0xC000003E, jt=1, jf=0
+          <<0x15, 0x00, 0x01, 0x00, 0x3E, 0x00, 0x00, 0xC0>> <>
+          # ret KILL_PROCESS = 0x80000000 (arch mismatch fall-through)
+          <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
+          # ld [0] (load syscall nr into A)
+          <<0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
+          # ret ALLOW = 0x7FFF0000 (default)
+          <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x7F>>
+
+      assert bpf == expected
+    end
+
+    test "empty deny filter (default kill_process) ends with ret KILL_PROCESS" do
+      {:ok, bpf} = Compiler.compile([], :kill_process, :x86_64)
+      # Last 8 bytes = the default RET instruction.
+      <<_::32-bytes, last::binary>> = bpf
+      assert last == <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>>
+    end
+  end
+
+  describe "Linx.Seccomp.Compiler — single rule / x86_64" do
+    test "[{:allow, :read}] + default :kill_process is 7 insns" do
+      {:ok, bpf} = Compiler.compile([{:allow, :read}], :kill_process, :x86_64)
+      assert div(byte_size(bpf), 8) == 7
+    end
+
+    test "has the canonical byte layout" do
+      {:ok, bpf} = Compiler.compile([{:allow, :read}], :kill_process, :x86_64)
+
+      expected =
+        # ld [4]
+        <<0x20, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00>> <>
+          # jeq AUDIT_ARCH_X86_64, jt=1, jf=0
+          <<0x15, 0x00, 0x01, 0x00, 0x3E, 0x00, 0x00, 0xC0>> <>
+          # ret KILL_PROCESS (arch mismatch)
+          <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
+          # ld [0]
+          <<0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
+          # jeq __NR_read=0, jt=1 (skip default RET, land on ALLOW), jf=0
+          <<0x15, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
+          # ret KILL_PROCESS (default)
+          <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
+          # ret ALLOW (per-rule)
+          <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x7F>>
+
+      assert bpf == expected
+    end
+  end
+
+  describe "Linx.Seccomp.Compiler — multi-rule shared actions" do
+    test "two :allow rules share one ret ALLOW (8 insns, not 9)" do
+      # rules with the same action share one terminal RET, so:
+      # 3 (prologue) + 1 (ld nr) + 2 (JEQs) + 1 (default RET) + 1 (allow RET) = 8
+      {:ok, bpf} =
+        Compiler.compile([{:allow, :read}, {:allow, :write}], :kill_process,
+          :x86_64
+        )
+
+      assert div(byte_size(bpf), 8) == 8
+    end
+
+    test "two rules with distinct actions get distinct terminal RETs" do
+      # 3 + 1 + 2 + 1 + 2 = 9 insns
+      {:ok, bpf} =
+        Compiler.compile(
+          [{:allow, :read}, {{:errno, :eperm}, :ptrace}],
+          :kill_process,
+          :x86_64
+        )
+
+      assert div(byte_size(bpf), 8) == 9
+    end
+
+    test "rule with action == default reuses the default RET" do
+      # default :kill_process, rule action :kill_process — no extra RET.
+      # 3 + 1 + 1 + 1 = 6 insns
+      {:ok, bpf} =
+        Compiler.compile([{:kill_process, :ptrace}], :kill_process, :x86_64)
+
+      assert div(byte_size(bpf), 8) == 6
+    end
+  end
+
+  describe "Linx.Seccomp.Compiler — aarch64" do
+    test "uses AUDIT_ARCH_AARCH64 in the arch check" do
+      {:ok, bpf} = Compiler.compile([], :allow, :aarch64)
+
+      # The arch JEQ is at byte offset 8 (second instruction).
+      # Its k-field (last 4 bytes of the 8-byte slot) holds AUDIT_ARCH.
+      <<_::8-bytes, _::4-bytes, audit::32-little, _::binary>> = bpf
+      assert audit == 0xC00000B7
+    end
+
+    test "uses aarch64 syscall numbers when resolving rules" do
+      {:ok, bpf} = Compiler.compile([{:allow, :read}], :kill_process, :aarch64)
+      # The JEQ for :read is the 5th instruction (index 4); its k-field
+      # holds the syscall number, which is 63 on aarch64.
+      <<_::32-bytes, _::4-bytes, nr::32-little, _::binary>> = bpf
+      assert nr == 63
+    end
+  end
+
+  describe "Linx.Seccomp.Compiler — error paths" do
+    test "rejects an unsupported arch" do
+      assert {:error, {:unsupported_arch, :riscv64}} =
+               Compiler.compile([{:allow, :read}], :allow, :riscv64)
+    end
+
+    test "rejects a syscall not in the per-arch table" do
+      assert {:error, {:unknown_syscall, :open}} =
+               Compiler.compile([{:allow, :open}], :allow, :aarch64)
+    end
+
+    test "errors with E2BIG on a jump that would overflow the 8-bit jt slot" do
+      # The hand-curated syscall tables (239 entries on x86_64, 214
+      # on aarch64) aren't large enough to construct an overflow
+      # naturally — we'd need ~256 distinct rules with distinct
+      # actions. We exercise the path with synthetic pre-resolved
+      # tuples via the doc-false `emit_resolved/3` hook.
+      #
+      # 280 rules, each with a unique {:errno, i} action — the worst-
+      # case rule (the last) has jt = N = 280 > 255 → overflow.
+      resolved =
+        for i <- 0..279 do
+          {{:errno, i}, :synthetic_sc, i + 1000}
+        end
+
+      audit_arch_x86_64 = 0xC000003E
+
+      assert {:error, %Linx.Seccomp.Error{operation: :build, errno: :e2big}} =
+               Compiler.emit_resolved(resolved, :allow, audit_arch_x86_64)
+    end
+
+    test "succeeds at exactly the boundary (jt == 255)" do
+      # 255 unique rules → last rule's jt = N = 255 — exactly at the
+      # limit, still accepted.
+      resolved =
+        for i <- 0..254 do
+          {{:errno, i}, :synthetic_sc, i + 1000}
+        end
+
+      audit_arch_x86_64 = 0xC000003E
+
+      assert {:ok, _bpf} =
+               Compiler.emit_resolved(resolved, :allow, audit_arch_x86_64)
+    end
+  end
+
+  # ── Linx.Seccomp.Error ───────────────────────────────────────
+
+  alias Linx.Seccomp.Error
+
+  describe "Linx.Seccomp.Error" do
+    test "@enforce_keys requires :operation and :errno" do
+      assert_raise ArgumentError, fn -> struct!(Error, []) end
+      assert_raise ArgumentError, fn -> struct!(Error, operation: :build) end
+      assert_raise ArgumentError, fn -> struct!(Error, errno: :einval) end
+    end
+
+    test "from_posix/2 fills in :code from the POSIX table" do
+      e = Error.from_posix(:einval, :build)
+      assert e.operation == :build
+      assert e.errno == :einval
+      assert e.code == 22
+    end
+
+    test "from_posix/2 fills in :code as nil for atoms outside the table" do
+      e = Error.from_posix(:something_made_up, :install)
+      assert e.code == nil
+      assert e.errno == :something_made_up
+    end
+
+    test "knows :e2big as errno 7 (filter too large)" do
+      e = Error.from_posix(:e2big, :build)
+      assert e.code == 7
+    end
+
+    test "implements Exception" do
+      e = Error.from_posix(:einval, :build)
+      assert Exception.message(e) =~ "seccomp build failed: einval (errno 22)"
+    end
+
+    test "Exception message omits errno code when nil" do
+      e = Error.from_posix(:something_made_up, :install)
+      assert Exception.message(e) == "seccomp install failed: something_made_up"
+    end
+
+    test "can be raised" do
+      e = Error.from_posix(:einval, :build)
+      assert_raise Error, ~r/seccomp build failed: einval/, fn -> raise e end
+    end
+  end
+
+  # ── Kernel-acceptance — hand a real filter to seccomp(2) ─────
+  #
+  # These tests spawn a small Python helper (test/support/seccomp_check.py)
+  # that does PR_SET_NO_NEW_PRIVS + seccomp(SECCOMP_SET_MODE_FILTER, …)
+  # on a fork()ed child, then exits with 0 on acceptance / errno on
+  # rejection. The same syscall path Linx will use from
+  # c_src/linx_process.c in S2. Tagged :integration because they
+  # depend on python3 being on PATH and spawn an external process.
+
+  @moduletag_helper Path.join([
+                      File.cwd!(),
+                      "test/support/seccomp_check.py"
+                    ])
+
+  describe "kernel acceptance (compiled filter installs cleanly)" do
+    @describetag :integration
+
+    test "an allow-list with exit_group installs successfully" do
+      # exit_group must be allowed so the child can return 0 cleanly
+      # after install; without it the child is SIGSYS'd during
+      # teardown (which the helper still treats as acceptance, but
+      # this test wants the clean path).
+      {:ok, filter} = Seccomp.allow_list(~w(exit_group read write)a)
+
+      assert run_helper(filter.bpf) == 0
+    end
+
+    test "a deny-list with EPERM-on-ptrace installs successfully" do
+      {:ok, filter} = Seccomp.deny_list([:ptrace])
+
+      assert run_helper(filter.bpf) == 0
+    end
+
+    test "the empty fall-through-allow filter installs successfully" do
+      {:ok, filter} = Seccomp.allow_list([], default: :allow)
+
+      assert run_helper(filter.bpf) == 0
+    end
+
+    test "a complex multi-action filter installs successfully" do
+      rules = [
+        {:allow, :read},
+        {:allow, :write},
+        {:allow, :exit_group},
+        {{:errno, :eperm}, :ptrace},
+        {:kill_process, :kexec_load},
+        {:log, :openat}
+      ]
+
+      {:ok, filter} = Seccomp.from_rules({rules, :allow})
+
+      assert run_helper(filter.bpf) == 0
+    end
+
+    test "a Builder-produced filter installs successfully" do
+      {:ok, filter} =
+        Seccomp.builder()
+        |> Builder.allow(:exit_group)
+        |> Builder.allow(:read)
+        |> Builder.deny(:ptrace)
+        |> Builder.build(default: :allow)
+
+      assert run_helper(filter.bpf) == 0
+    end
+
+    test "a deliberately malformed blob is rejected with EINVAL (22)" do
+      # Eight zero bytes — one "instruction" but with code=0, which the
+      # kernel rejects as an invalid BPF program.
+      assert run_helper(<<0::64>>) == 22
+    end
+
+    test "an empty BPF blob is rejected with EINVAL (22)" do
+      assert run_helper(<<>>) == 22
+    end
+  end
+
+  # Spawn the python helper, write `bpf` to a temp file, return the
+  # helper's exit code.
+  defp run_helper(bpf) do
+    helper = @moduletag_helper
+
+    unless File.exists?(helper) do
+      flunk("seccomp_check.py helper missing at #{helper}")
+    end
+
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "linx_seccomp_test_#{System.unique_integer([:positive])}.bin"
+      )
+
+    File.write!(path, bpf)
+
+    try do
+      {_output, exit_code} =
+        System.cmd("python3", [helper, path],
+          stderr_to_stdout: true
+        )
+
+      exit_code
+    after
+      File.rm(path)
     end
   end
 end

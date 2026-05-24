@@ -170,6 +170,7 @@ defmodule Linx.MixProject do
         Seccomp: [
           Linx.Seccomp,
           Linx.Seccomp.Builder,
+          Linx.Seccomp.Error,
           Linx.Seccomp.Filter
         ],
         "Netlink core": [

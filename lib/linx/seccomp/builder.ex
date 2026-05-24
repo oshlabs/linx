@@ -105,13 +105,15 @@ defmodule Linx.Seccomp.Builder do
       typically used for tight filters where unknown syscalls
       should fail loudly.
 
-  ## Stub
-
-  Returns `{:error, :not_yet_implemented}` until S1 ships. The
-  rule-accumulation shape is real; only the BPF emit is stubbed.
+  Errors mirror `Linx.Seccomp.from_rules/1`: `{:bad_action, _}`,
+  `{:unknown_syscall, _}`, `{:duplicate_rule, _}`,
+  `{:unsupported_arch, _}`, and the jump-overflow
+  `%Linx.Seccomp.Error{}`.
   """
   @spec build(t(), keyword()) :: {:ok, Filter.t()} | {:error, term()}
-  def build(%__MODULE__{}, _opts \\ []) do
-    {:error, :not_yet_implemented}
+  def build(%__MODULE__{rules: rev_rules}, opts \\ []) do
+    default = Keyword.get(opts, :default, :kill_process)
+    rules = Enum.reverse(rev_rules)
+    Linx.Seccomp.from_rules({rules, default})
   end
 end

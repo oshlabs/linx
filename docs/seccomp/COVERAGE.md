@@ -44,20 +44,20 @@ A living doc — update as primitives ship. Status legend:
 | Module | Status | Notes |
 |---|---|---|
 | `Linx.Seccomp.Filter` | ✅ | S0 — `%{arch, bpf, rules, summary}`; compact Inspect |
-| `Linx.Seccomp.Error` | ⬜ | S1 — `%{operation, errno, code}`; Exception impl |
+| `Linx.Seccomp.Error` | ✅ | S1 — `%{operation, errno, code}`; Exception impl; `from_posix/2`; `:e2big` recognised for the jump-overflow build failure |
 
 ## BPF compilation (the risky milestone)
 
 | Feature | Status | Notes |
 |---|---|---|
-| `allow_list/2` | ⬜ | S1 — defaults to `:kill_process` for non-listed |
-| `deny_list/2` | ⬜ | S1 — defaults to `{:errno, :eperm}` for listed denies |
-| `from_rules/1` | ⬜ | S1 — data-layer API; what Silo will use |
-| `to_rules/1` | ⬜ | S1 — inverse for filters Linx itself built |
-| `Builder` (fluent DSL) | ⬜ | S1 — `builder/0 \|> allow/2 \|> deny/3 \|> build/1` |
-| Cap-BPF compiler (binary cBPF emit) | ⬜ | S1 — `Linx.Seccomp.Compiler`; golden-byte tests + kernel-acceptance tests |
-| Forward-compat: unknown bits in unparsed filters | ⬜ | S1 — `from_number/2` returns `:unknown` for numbers past table |
-| Jump-trampoline support (filters > 250 syscalls) | ⏳ | S1 — panic with clear error for now; trampolines later if needed |
+| `allow_list/2` | ✅ | S1 — defaults to `:kill_process` for non-listed; `:default` opt overrides |
+| `deny_list/2` | ✅ | S1 — defaults to `{:errno, :eperm}` for listed denies; `:default` and `:deny_action` opts override |
+| `from_rules/1` | ✅ | S1 — data-layer API; what Silo will use; full validation per the contract |
+| `to_rules/1` | ✅ | S1 — inverse for filters Linx itself built; `{:error, :no_rules}` for externally-supplied BPF |
+| `Builder` (fluent DSL) | ✅ | S1 — `builder/0 \|> allow/2 \|> deny/3 \|> build/1`; reuses `from_rules/1` validation |
+| Cap-BPF compiler (binary cBPF emit) | ✅ | S1 — `Linx.Seccomp.Compiler` (`@moduledoc false`); golden-byte tests + kernel-acceptance tests via `test/support/seccomp_check.py` |
+| Forward-compat: unknown bits in unparsed filters | ✅ | S0 — `from_number/2` returns `:unknown` for numbers past table |
+| Jump-trampoline support (filters > 250 syscalls) | ⏳ | S1 — errors with `%Error{operation: :build, errno: :e2big}` for now; trampolines later if needed |
 
 ## Write side (via Linx.Process agent at the checkpoint)
 
@@ -89,13 +89,15 @@ A living doc — update as primitives ship. Status legend:
 
 | Mechanism | Status | Notes |
 |---|---|---|
-| `%Linx.Seccomp.Error{operation, errno, code}` | ⬜ | S1 — caller-side build failures (`:build` operation) |
+| `%Linx.Seccomp.Error{operation, errno, code}` | ✅ | S1 — `:build` for caller-side compile failures (currently only the jump-overflow case); `:install` / `:set_no_new_privs` reserved for S2 |
 | `{:linx_process, :error, errno, :seccomp_install}` | ⬜ | S2 — kernel-side install failures |
 | `{:linx_process, :error, errno, :seccomp_no_new_privs}` | ⬜ | S2 — `PR_SET_NO_NEW_PRIVS` failures (rare) |
-| `{:error, {:unknown_syscall, atom}}` | ⬜ | S1 — caller-side unknown atom |
-| `{:error, {:bad_action, term}}` | ⬜ | S1 — caller-side malformed action |
-| `{:error, {:duplicate_rule, atom}}` | ⬜ | S1 — caller-side duplicate syscall in a rule list |
-| `{:error, {:unsupported_arch, atom}}` | ⬜ | S1 — caller-side filter built for an arch we don't support |
+| `{:error, {:unknown_syscall, atom}}` | ✅ | S1 — caller-side unknown atom |
+| `{:error, {:bad_action, term}}` | ✅ | S1 — caller-side malformed action |
+| `{:error, {:duplicate_rule, atom}}` | ✅ | S1 — caller-side duplicate syscall in a rule list |
+| `{:error, {:unsupported_arch, atom}}` | ✅ | S1 — caller-side filter built for an arch we don't support |
+| `{:error, {:bad_rule, term}}` | ✅ | S1 — a rule isn't a `{action, syscall_atom}` tuple |
+| `{:error, {:bad_rules_arg, term}}` | ✅ | S1 — `from_rules/1` called with something other than `{rules, default}` |
 
 ## Deferred — not in `Linx.Seccomp` itself
 
