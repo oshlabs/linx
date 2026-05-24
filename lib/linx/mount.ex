@@ -44,13 +44,57 @@ defmodule Linx.Mount do
 
   ## Status
 
-  M0 — scaffolding + the read side. `list/0`, `list/1`, and the
-  mountinfo parser are functional. The mutating verbs (`mount/4`,
-  `umount/2`, `bind/3`, `remount/2`, `move/2`, `pivot_root/3`)
-  ship in M1–M4. See `docs/mount/PLAN.md` for the roadmap.
+  M0–M1 shipped: `list/0`, `list/1`, the mountinfo parser,
+  `mount/4`, `umount/2`, plus `%Linx.Mount.Entry{}` and
+  `%Linx.Mount.Error{}`. Convenience verbs (M2), cross-namespace
+  `:in` (M3), and `pivot_root/3` (M4) land in follow-ups. See
+  `docs/mount/PLAN.md` for the roadmap.
   """
 
-  alias Linx.Mount.Entry
+  import Bitwise, only: [|||: 2]
+
+  alias Linx.Mount.{Entry, Error, Native}
+
+  # MS_* mount flag constants from <sys/mount.h>. Stable across Linux
+  # versions for ~30 years. Pattern-match atoms in the public API
+  # against this table; the OR'd integer goes to the NIF.
+  @mount_flags %{
+    ro: 0x1,
+    nosuid: 0x2,
+    nodev: 0x4,
+    noexec: 0x8,
+    sync: 0x10,
+    remount: 0x20,
+    mandlock: 0x40,
+    dirsync: 0x80,
+    noatime: 0x400,
+    nodiratime: 0x800,
+    bind: 0x1000,
+    move: 0x2000,
+    rec: 0x4000,
+    silent: 0x8000,
+    unbindable: 0x20000,
+    private: 0x40000,
+    slave: 0x80000,
+    shared: 0x100000,
+    relatime: 0x200000,
+    strictatime: 0x1000000,
+    lazytime: 0x2000000
+  }
+
+  # umount(2) / umount2(2) flag constants from <sys/mount.h>.
+  @umount_flags %{
+    force: 0x1,
+    detach: 0x2,
+    expire: 0x4,
+    no_follow: 0x8
+  }
+
+  @doc false
+  def __mount_flags__, do: @mount_flags
+
+  @doc false
+  def __umount_flags__, do: @umount_flags
 
   @typedoc """
   Target of a `list/1` call — either a pid (reads
@@ -213,25 +257,132 @@ defmodule Linx.Mount do
 
   defp unescape(<<ch, rest::binary>>, acc), do: unescape(rest, <<acc::binary, ch>>)
 
-  # --- M1+ surface stubs ---------------------------------------------------
+  # --- mutating verbs ------------------------------------------------------
 
   @doc """
   Mounts `source` at `target` with filesystem type `fstype`.
 
-  Lands in M1.
+  ## Options
+
+    * `:flags` — a list of flag atoms (see the table below).
+      Mapped to the OR'd `MS_*` integer the kernel expects.
+    * `:data` — a filesystem-specific options string (e.g.
+      `"size=64M,mode=755"` for tmpfs). Defaults to `""`.
+
+  ## Flag atoms
+
+  | atom | `MS_*` constant |
+  |---|---|
+  | `:ro` | `MS_RDONLY` |
+  | `:nosuid` | `MS_NOSUID` |
+  | `:nodev` | `MS_NODEV` |
+  | `:noexec` | `MS_NOEXEC` |
+  | `:sync` | `MS_SYNCHRONOUS` |
+  | `:remount` | `MS_REMOUNT` (driven by `remount/2` in M2) |
+  | `:mandlock` | `MS_MANDLOCK` |
+  | `:dirsync` | `MS_DIRSYNC` |
+  | `:noatime` | `MS_NOATIME` |
+  | `:nodiratime` | `MS_NODIRATIME` |
+  | `:bind` | `MS_BIND` (driven by `bind/3` in M2) |
+  | `:move` | `MS_MOVE` (driven by `move/2` in M2) |
+  | `:rec` | `MS_REC` — recursive variant |
+  | `:silent` | `MS_SILENT` |
+  | `:private` | `MS_PRIVATE` — propagation |
+  | `:shared` | `MS_SHARED` — propagation |
+  | `:slave` | `MS_SLAVE` — propagation |
+  | `:unbindable` | `MS_UNBINDABLE` — propagation |
+  | `:relatime` | `MS_RELATIME` |
+  | `:strictatime` | `MS_STRICTATIME` |
+  | `:lazytime` | `MS_LAZYTIME` |
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`
+  on failure. Common errnos: `:eperm` (no `CAP_SYS_ADMIN`),
+  `:enoent` (source or target missing), `:einval` (incompatible
+  flags), `:ebusy` (target is busy), `:enodev` (unknown fstype).
+
+  ## Cross-namespace
+
+  M1 only mounts in the BEAM's own mount namespace. The `:in`
+  option for cross-namespace mounts lands in M3.
   """
   @spec mount(String.t(), String.t(), String.t(), keyword()) ::
-          :ok | {:error, term()}
-  def mount(_source, _target, _fstype, _opts \\ []),
-    do: {:error, :not_yet_implemented}
+          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+  def mount(source, target, fstype, opts \\ [])
+      when is_binary(source) and is_binary(target) and is_binary(fstype) and
+             is_list(opts) do
+    with {:ok, flags} <- pack_flags(opts[:flags] || [], @mount_flags) do
+      data = opts[:data] || ""
+      do_mount(source, target, fstype, flags, data)
+    end
+  end
 
   @doc """
   Unmounts the filesystem at `target`.
 
-  Lands in M1.
+  ## Options
+
+    * `:flags` — a list of flag atoms:
+      * `:force` — `MNT_FORCE`. Try harder when the filesystem is
+        busy (only meaningful for NFS-style network filesystems).
+      * `:detach` — `MNT_DETACH`. Lazy unmount: detach from the
+        namespace immediately, clean up when the last user is
+        done.
+      * `:expire` — `MNT_EXPIRE`. Mark for later auto-unmount.
+      * `:no_follow` — `UMOUNT_NOFOLLOW`. Don't follow symlinks at
+        `target`.
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :umount}}`.
+
+  ## Cross-namespace
+
+  M1 only unmounts in the BEAM's own mount namespace. The `:in`
+  option for cross-namespace unmounts lands in M3.
   """
-  @spec umount(String.t(), keyword()) :: :ok | {:error, term()}
-  def umount(_target, _opts \\ []), do: {:error, :not_yet_implemented}
+  @spec umount(String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+  def umount(target, opts \\ []) when is_binary(target) and is_list(opts) do
+    with {:ok, flags} <- pack_flags(opts[:flags] || [], @umount_flags) do
+      do_umount(target, flags)
+    end
+  end
+
+  defp do_mount(source, target, fstype, flags, data) do
+    case Native.mount(source, target, fstype, flags, data, -1) do
+      :ok -> :ok
+      {:error, posix} when is_atom(posix) ->
+        {:error, Error.from_posix(posix, target, :mount)}
+      {:error, code} when is_integer(code) ->
+        # Unmapped errno -- the atom field carries an `:unknown`
+        # marker; the integer is preserved in `:code`. This is rare
+        # (only odd Linux variants), but it keeps the Error shape
+        # consistent.
+        {:error, %Error{path: target, operation: :mount, errno: :unknown, code: code}}
+    end
+  end
+
+  defp do_umount(target, flags) do
+    case Native.umount(target, flags, -1) do
+      :ok -> :ok
+      {:error, posix} when is_atom(posix) ->
+        {:error, Error.from_posix(posix, target, :umount)}
+      {:error, code} when is_integer(code) ->
+        {:error, %Error{path: target, operation: :umount, errno: :unknown, code: code}}
+    end
+  end
+
+  # Folds a list of flag atoms into the OR'd integer the kernel
+  # expects. An unknown atom returns {:error, {:bad_flag, atom}} so
+  # the caller gets a clear error rather than a silently-dropped flag.
+  defp pack_flags(flags, table) when is_list(flags) do
+    Enum.reduce_while(flags, {:ok, 0}, fn flag, {:ok, acc} ->
+      case Map.fetch(table, flag) do
+        {:ok, bit} -> {:cont, {:ok, acc ||| bit}}
+        :error -> {:halt, {:error, {:bad_flag, flag}}}
+      end
+    end)
+  end
+
+  defp pack_flags(_, _), do: {:error, {:bad_flag, :flags_must_be_a_list}}
 
   @doc """
   Bind-mounts `source` at `target`.

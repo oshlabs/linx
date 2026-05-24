@@ -26,8 +26,8 @@ A living doc — update as primitives ship. Status legend:
 
 | Verb | Status | Notes |
 |---|---|---|
-| `mount/4` | ⬜ | M1 — `mount(2)` via NIF |
-| `umount/2` | ⬜ | M1 — `umount2(2)` via NIF |
+| `mount/4` | ✅ | M1 — `mount(2)` via NIF (BEAM's mount ns only; `:in` lands in M3) |
+| `umount/2` | ✅ | M1 — `umount2(2)` via NIF (BEAM's mount ns only; `:in` lands in M3) |
 | `bind/3` | ⬜ | M2 — `mount(MS_BIND)` |
 | `remount/2` | ⬜ | M2 — `mount(MS_REMOUNT)` |
 | `move/2` | ⬜ | M2 — `mount(MS_MOVE)` |
@@ -37,36 +37,36 @@ A living doc — update as primitives ship. Status legend:
 
 | Atom | `MS_*` constant | Status | Notes |
 |---|---|---|---|
-| `:ro` | `MS_RDONLY` | ⬜ | M1 |
-| `:nosuid` | `MS_NOSUID` | ⬜ | M1 |
-| `:nodev` | `MS_NODEV` | ⬜ | M1 |
-| `:noexec` | `MS_NOEXEC` | ⬜ | M1 |
-| `:sync` | `MS_SYNCHRONOUS` | ⬜ | M1 |
-| `:remount` | `MS_REMOUNT` | ⬜ | M1 (driven by `remount/2`) |
-| `:mandlock` | `MS_MANDLOCK` | ⬜ | M1 |
-| `:dirsync` | `MS_DIRSYNC` | ⬜ | M1 |
-| `:noatime` | `MS_NOATIME` | ⬜ | M1 |
-| `:nodiratime` | `MS_NODIRATIME` | ⬜ | M1 |
-| `:bind` | `MS_BIND` | ⬜ | M1 (driven by `bind/3`) |
-| `:move` | `MS_MOVE` | ⬜ | M1 (driven by `move/2`) |
-| `:rec` | `MS_REC` | ⬜ | M1 — recursive variant of bind/propagation |
-| `:silent` | `MS_SILENT` | ⬜ | M1 |
-| `:private` | `MS_PRIVATE` | ⬜ | M1 — propagation |
-| `:shared` | `MS_SHARED` | ⬜ | M1 — propagation |
-| `:slave` | `MS_SLAVE` | ⬜ | M1 — propagation |
-| `:unbindable` | `MS_UNBINDABLE` | ⬜ | M1 — propagation |
-| `:relatime` | `MS_RELATIME` | ⬜ | M1 |
-| `:strictatime` | `MS_STRICTATIME` | ⬜ | M1 |
-| `:lazytime` | `MS_LAZYTIME` | ⬜ | M1 |
+| `:ro` | `MS_RDONLY` | ✅ | M1 |
+| `:nosuid` | `MS_NOSUID` | ✅ | M1 |
+| `:nodev` | `MS_NODEV` | ✅ | M1 |
+| `:noexec` | `MS_NOEXEC` | ✅ | M1 |
+| `:sync` | `MS_SYNCHRONOUS` | ✅ | M1 |
+| `:remount` | `MS_REMOUNT` | ✅ | M1 (driven by `remount/2` in M2) |
+| `:mandlock` | `MS_MANDLOCK` | ✅ | M1 |
+| `:dirsync` | `MS_DIRSYNC` | ✅ | M1 |
+| `:noatime` | `MS_NOATIME` | ✅ | M1 |
+| `:nodiratime` | `MS_NODIRATIME` | ✅ | M1 |
+| `:bind` | `MS_BIND` | ✅ | M1 (driven by `bind/3` in M2) |
+| `:move` | `MS_MOVE` | ✅ | M1 (driven by `move/2` in M2) |
+| `:rec` | `MS_REC` | ✅ | M1 — recursive variant |
+| `:silent` | `MS_SILENT` | ✅ | M1 |
+| `:private` | `MS_PRIVATE` | ✅ | M1 — propagation |
+| `:shared` | `MS_SHARED` | ✅ | M1 — propagation |
+| `:slave` | `MS_SLAVE` | ✅ | M1 — propagation |
+| `:unbindable` | `MS_UNBINDABLE` | ✅ | M1 — propagation |
+| `:relatime` | `MS_RELATIME` | ✅ | M1 |
+| `:strictatime` | `MS_STRICTATIME` | ✅ | M1 |
+| `:lazytime` | `MS_LAZYTIME` | ✅ | M1 |
 
 ## Umount flags (the `:flags` opt to `umount/2`)
 
 | Atom | `UMOUNT_*` / `MNT_*` constant | Status | Notes |
 |---|---|---|---|
-| `:force` | `MNT_FORCE` | ⬜ | M1 |
-| `:detach` | `MNT_DETACH` | ⬜ | M1 — lazy unmount |
-| `:expire` | `MNT_EXPIRE` | ⬜ | M1 |
-| `:no_follow` | `UMOUNT_NOFOLLOW` | ⬜ | M1 |
+| `:force` | `MNT_FORCE` | ✅ | M1 |
+| `:detach` | `MNT_DETACH` | ✅ | M1 — lazy unmount |
+| `:expire` | `MNT_EXPIRE` | ✅ | M1 |
+| `:no_follow` | `UMOUNT_NOFOLLOW` | ✅ | M1 |
 
 ## Cross-namespace `:in` option
 
@@ -92,14 +92,14 @@ A living doc — update as primitives ship. Status legend:
 | Module | Status | Notes |
 |---|---|---|
 | `Linx.Mount.Entry` | ✅ | M0 — parsed `/proc/<pid>/mountinfo` line |
-| `Linx.Mount.Error` | ⬜ | M1 — POSIX-atom errno + path + operation |
+| `Linx.Mount.Error` | ✅ | M1 — POSIX-atom errno + path + operation |
 
 ## Error reporting
 
 | Mechanism | Status | Notes |
 |---|---|---|
-| `%Linx.Mount.Error{path, operation, errno, code}` | ⬜ | M1 |
-| `Exception` impl for `raise`-able paths | ⬜ | M1 |
+| `%Linx.Mount.Error{path, operation, errno, code}` | ✅ | M1 |
+| `Exception` impl for `raise`-able paths | ✅ | M1 |
 
 ## Deferred — not in `Linx.Mount` itself
 

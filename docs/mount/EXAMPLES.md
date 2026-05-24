@@ -10,10 +10,10 @@ namespace (root in the simple case). Start with `./sudorun.sh iex
 -S mix`.
 
 > 🚧 **Partial.** M0 (the read side: `list/0`, `list/1`, the
-> `Entry` struct) ships now. Mutating verbs (`mount/4`,
-> `umount/2`, `bind/3`, `remount/2`, `move/2`, `pivot_root/3`) and
-> the cross-namespace `:in` option land in M1–M4. See `PLAN.md`
-> for the roadmap.
+> `Entry` struct) and M1 (`mount/4`, `umount/2`,
+> `%Linx.Mount.Error{}`) ship now. Convenience verbs (M2),
+> cross-namespace `:in` (M3), and `pivot_root/3` (M4) land in
+> follow-ups. See `PLAN.md` for the roadmap.
 
 ## Reading the mount table
 
@@ -110,14 +110,6 @@ for backslash. `Linx.Mount` decodes them transparently:
 iex> entry.mount_point
 "/mnt/with spaces"
 ```
-
-## (Will land with M1 — basic mount + umount)
-
-## (Will land with M2 — bind / remount / move)
-
-## (Will land with M3 — mounting into another namespace via `:in`)
-
-## (Will land with M4 — pivot_root)
 
 ## (Will land with M1 — basic mount + umount)
 
