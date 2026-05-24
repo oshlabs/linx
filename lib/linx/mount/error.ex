@@ -18,6 +18,9 @@ defmodule Linx.Mount.Error do
         a mount namespace; extremely unlikely to fail.
       * `:setns` — couldn't enter the target namespace (lacks
         `CAP_SYS_ADMIN` in the right user namespace).
+      * `:chdir` — couldn't `chdir` into `new_root` before
+        `pivot_root`. Typically the path doesn't exist or isn't
+        a directory.
       * `:thread` — couldn't create the worker thread that does
         the cross-namespace dance. Rare; typically `EAGAIN` from
         thread-creation pressure.
@@ -54,6 +57,7 @@ defmodule Linx.Mount.Error do
           | :open_ns
           | :unshare
           | :setns
+          | :chdir
           | :thread
 
   @type t :: %__MODULE__{

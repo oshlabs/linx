@@ -44,11 +44,12 @@ defmodule Linx.Mount do
 
   ## Status
 
-  M0–M3 shipped: `list/0`, `list/1`, the mountinfo parser,
-  `mount/4`, `umount/2`, `bind/3`, `remount/2`, `move/2`, the
-  cross-namespace `:in` option, plus `%Linx.Mount.Entry{}` and
-  `%Linx.Mount.Error{}`. `pivot_root/3` (M4) lands in a
-  follow-up. See `docs/mount/PLAN.md` for the roadmap.
+  All foundation milestones shipped (M0–M4): `list/0`, `list/1`,
+  the mountinfo parser, `mount/4`, `umount/2`, `bind/3`,
+  `remount/2`, `move/2`, the cross-namespace `:in` option,
+  `pivot_root/3`, plus `%Linx.Mount.Entry{}` and
+  `%Linx.Mount.Error{}`. See `docs/mount/PLAN.md` for what was
+  built and `COVERAGE.md` for what's deferred.
   """
 
   import Bitwise, only: [|||: 2]
@@ -522,12 +523,93 @@ defmodule Linx.Mount do
   end
 
   @doc """
-  Changes the calling thread's root to `new_root`, stashing the old
-  one at `put_old`.
+  Swaps the mount-namespace's root: makes `new_root` the new `/`
+  and stashes the old root at `put_old`.
 
-  Lands in M4.
+  Wraps `pivot_root(2)`. After a successful call, processes in the
+  target mount namespace see `new_root`'s contents as `/`; the
+  former root tree is accessible at `put_old`. The standard next
+  step in container init is to `umount("/old_root", flags: [:detach])`
+  to discard the old root entirely.
+
+  ## Options
+
+    * `:in` — the same shape as `mount/4` (`:self` /
+      `{:pid, n}` / `{:path, p}`). Picks which mount namespace's
+      root to swap.
+
+  ## Kernel constraints
+
+  `pivot_root(2)` is one of the pickiest syscalls in Linux. The
+  call returns `:einval` unless **all** of these hold:
+
+    * `new_root` is a directory **and** a mount point. The
+      typical setup is a bind-mount-to-self:
+      `Linx.Mount.bind(new_root, new_root)`.
+    * `put_old` is a directory under `new_root`. By convention:
+      `Path.join(new_root, "old_root")`, created beforehand.
+    * No other filesystem is mounted on `put_old`.
+    * The propagation of `new_root`'s mount and the current root's
+      mount are not both shared. Usually: mark `new_root` private
+      before calling pivot_root.
+
+  See `pivot_root(2)` for the full list.
+
+  ## CWD handling
+
+  pivot_root requires the calling thread's CWD to be inside
+  `new_root`. The NIF runs on a worker thread that `unshare`s its
+  `fs_struct` and `chdir`s into `new_root` before the syscall, so
+  the BEAM's CWD stays at whatever it was. The chdir is a worker-
+  thread concern; the caller doesn't observe it.
+
+  ## Composition
+
+  The headline use case is rootfs swapping inside a freshly-spawned
+  container at the checkpoint, before `proceed/1`:
+
+      {:ok, c} = Linx.Process.spawn(argv: ["/init"], namespaces: [:mount, ...])
+      host_pid = receive do {:linx_process, :ready, p} -> p end
+
+      :ok = Linx.Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
+      :ok = Linx.Mount.mount("", rootfs, "", flags: [:private], in: {:pid, host_pid})
+      :ok = Linx.Mount.pivot_root(rootfs, Path.join(rootfs, "old_root"), in: {:pid, host_pid})
+      :ok = Linx.Mount.umount("/old_root", flags: [:detach], in: {:pid, host_pid})
+
+      :ok = Linx.Process.proceed(c)
+
+  After `proceed/1`, the workload `execve`s `/init` from inside
+  the new rootfs.
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :pivot_root | :chdir | :open_ns | :unshare | :setns | :thread}}`.
   """
-  @spec pivot_root(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
-  def pivot_root(_new_root, _put_old, _opts \\ []),
-    do: {:error, :not_yet_implemented}
+  @spec pivot_root(String.t(), String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_in, term()}}
+  def pivot_root(new_root, put_old, opts \\ [])
+      when is_binary(new_root) and is_binary(put_old) and is_list(opts) do
+    with {:ok, ns_path} <- resolve_in(opts[:in] || :self) do
+      do_pivot_root(new_root, put_old, ns_path)
+    end
+  end
+
+  defp do_pivot_root(new_root, put_old, ns_path) do
+    case Native.pivot_root(new_root, put_old, ns_path) do
+      :ok -> :ok
+      {:error, {stage, errno}} -> {:error, build_pivot_root_error(stage, errno, new_root, ns_path)}
+    end
+  end
+
+  # pivot_root has more failure stages than mount/umount. :pivot_root
+  # and :chdir both fail with new_root as the natural :path subject
+  # (the chdir target IS new_root); namespace-acquisition stages
+  # carry ns_path.
+  defp build_pivot_root_error(stage, errno, new_root, _ns_path)
+       when stage in [:pivot_root, :chdir] do
+    do_build_error(stage, errno, new_root)
+  end
+
+  defp build_pivot_root_error(stage, errno, _new_root, ns_path)
+       when stage in [:open_ns, :unshare, :setns, :thread] do
+    do_build_error(stage, errno, ns_path)
+  end
 end

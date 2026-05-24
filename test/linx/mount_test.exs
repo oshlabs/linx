@@ -180,10 +180,111 @@ defmodule Linx.MountTest do
     end
   end
 
-  describe "M4 stubs" do
-    # Until M4 lands, pivot_root/3 returns :not_yet_implemented.
-    test "pivot_root/3" do
-      assert {:error, :not_yet_implemented} = Mount.pivot_root("/new", "/new/old")
+  describe "pivot_root/3 -- plain shape" do
+    test "an invalid :in value returns {:error, {:bad_in, _}}" do
+      assert {:error, {:bad_in, :wat}} =
+               Mount.pivot_root("/new", "/new/old", in: :wat)
+    end
+
+    test "pivot_root against a non-existent new_root fails with :chdir" do
+      # The chdir into new_root happens before pivot_root itself;
+      # a missing path surfaces here with stage :chdir.
+      assert {:error, %Error{operation: :chdir, errno: :enoent, path: "/nope-pivot"}} =
+               Mount.pivot_root("/nope-pivot", "/nope-pivot/old")
+    end
+
+    test "pivot_root with :in to a non-existent pid fails at :open_ns" do
+      # Namespace acquisition fails before chdir or pivot_root.
+      assert {:error, %Error{operation: :open_ns, errno: :enoent, path: path}} =
+               Mount.pivot_root("/new", "/new/old", in: {:pid, 2_147_483_640})
+
+      assert path == "/proc/2147483640/ns/mnt"
+    end
+  end
+
+  describe "M4 integration: pivot_root inside a container" do
+    @describetag :integration
+
+    test "pivot_root inside a child's fresh mount namespace at the checkpoint" do
+      # The whole dance to make pivot_root happy:
+      #
+      #   1. Spawn a workload in a fresh :mount namespace -- it
+      #      starts with a COPY of the host's mount table.
+      #   2. Mark / private recursively inside the child. The
+      #      kernel rejects pivot_root if the parent of new_root
+      #      or the current root has shared propagation (which
+      #      `/` typically does on systemd hosts -- shared:1 from
+      #      the rootfs mount, propagating down to /tmp, etc.).
+      #      `mount --make-rprivate /` is the standard runc/docker
+      #      detach.
+      #   3. Create the rootfs + old_root dirs and bind the rootfs
+      #      to itself inside the child's namespace. The bind makes
+      #      it a mount point; the fresh-mount-in-child means it
+      #      has no peer group with anything on the host.
+      #   4. pivot_root: new_root = the rootfs, put_old = old_root.
+      #   5. Verify via list/1 that the child's mount table now has
+      #      a fresh root mount.
+      rootfs = "/tmp/linx-pivot-#{System.unique_integer([:positive])}"
+      old_root = Path.join(rootfs, "old_root")
+      File.mkdir_p!(rootfs)
+      File.mkdir_p!(old_root)
+
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "10"],
+          namespaces: [:mount]
+        )
+
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+
+      on_exit(fn ->
+        # Best-effort: the session may already be gone (the test
+        # may have run to a terminal event), in which case
+        # signal/2 raises -- swallow.
+        try do
+          _ = Linx.Process.signal(c, 9)
+        catch
+          _, _ -> :ok
+        end
+
+        _ = File.rm_rf(rootfs)
+      end)
+
+      # Step 2: detach the child's mount subtree from any shared
+      # peer groups inherited from the host.
+      assert :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
+
+      # Step 3: bind the rootfs to itself inside the child so it's
+      # a mount point in the child's namespace with no peer group.
+      assert :ok = Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
+
+      # Snapshot the child's root-mount id before pivot.
+      {:ok, before} = Mount.list({:pid, host_pid})
+      root_before = Enum.find(before, &(&1.mount_point == "/"))
+      assert %Entry{} = root_before
+      root_id_before = root_before.mount_id
+
+      # Step 4: the pivot itself.
+      assert :ok = Mount.pivot_root(rootfs, old_root, in: {:pid, host_pid})
+
+      # Step 5: verify the swap. The child's root mount now points
+      # at the rootfs bind, with a different mount_id; /old_root
+      # exposes the former root.
+      {:ok, after_mounts} = Mount.list({:pid, host_pid})
+      root_after = Enum.find(after_mounts, &(&1.mount_point == "/"))
+      assert %Entry{} = root_after
+      assert root_after.mount_id != root_id_before
+
+      assert Enum.any?(after_mounts, &(&1.mount_point == "/old_root"))
+
+      # Proceeding now triggers execve, which fails with ENOENT --
+      # the new (empty) rootfs has no `/bin/sleep`. That failure
+      # itself confirms the pivot took effect: from the agent's
+      # perspective, `/bin/sleep` is no longer reachable, which
+      # is exactly what a pivot to an empty rootfs should do.
+      # A real consumer would have populated the rootfs first.
+      :ok = Linx.Process.proceed(c)
+      assert_receive {:linx_process, :error, 2, :execve}, 5_000
     end
   end
 
@@ -592,10 +693,8 @@ defmodule Linx.MountTest do
     test "version/0 reflects the running milestone" do
       v = Mount.Native.version() |> List.to_string()
       assert String.starts_with?(v, "linx_mount ")
-      # M3 marker; bumped when the NIF changes shape (M1 → M3 added
-      # the cross-namespace setns dance and the {stage, errno}
-      # error shape).
-      assert String.ends_with?(v, "(M3)")
+      # M4 marker; bumped when the NIF changes shape.
+      assert String.ends_with?(v, "(M4)")
     end
   end
 

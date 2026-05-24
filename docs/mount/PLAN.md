@@ -1,8 +1,12 @@
 # Linx.Mount — implementation plan
 
-> **Not yet shipped.** Work lives on branch `mount-foundations`.
-> Milestones M0–M4 land independently; each commits + pushes per the
-> Linx-wide "commit per milestone" rule.
+> ✅ **M0–M4 shipped** on branch `mount-foundations` — ready to
+> merge to `main`. The full surface is in: `list/0`, `list/1`, the
+> mountinfo parser, `mount/4`, `umount/2`, `bind/3`, `remount/2`,
+> `move/2`, `pivot_root/3`, the cross-namespace `:in` option,
+> plus the `Linx.Mount.Entry` and `Linx.Mount.Error` value
+> types. `COVERAGE.md` is the canonical "what's in / what's
+> deferred" tracker.
 
 ## Goal
 

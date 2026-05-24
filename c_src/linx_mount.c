@@ -47,10 +47,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/syscall.h> /* SYS_pivot_root (no glibc wrapper) */
 #include <unistd.h>
 
 /* Bumped per shipping milestone. */
-#define LINX_MOUNT_VERSION "linx_mount 0.1.0 (M3)"
+#define LINX_MOUNT_VERSION "linx_mount 0.1.0 (M4)"
 
 /* --- errno -> atom ------------------------------------------------------- */
 
@@ -152,6 +153,13 @@ struct umount_job {
 	int flags;
 };
 
+struct pivot_root_job {
+	struct ns_job_result r;
+	const char *ns_path;   /* empty == BEAM ns */
+	const char *new_root;
+	const char *put_old;
+};
+
 /* Common setns enter/exit pattern used by mount/umount workers.
  * Returns the opened ns fd (caller closes after the syscall), or
  * -1 on failure (with j->r.{err,stage} set).
@@ -226,6 +234,48 @@ static void *umount_worker(void *arg)
 	}
 
 	close(ns);
+	return NULL;
+}
+
+/* pivot_root requires the calling thread's CWD to be inside
+ * new_root before the syscall (kernel-enforced). We chdir on the
+ * worker thread so the BEAM's CWD is untouched.
+ *
+ * Empty ns_path = BEAM's own mount namespace. We still need to
+ * unshare(CLONE_FS) so the chdir is private to this thread; we
+ * just skip the open+setns. */
+static void *pivot_root_worker(void *arg)
+{
+	struct pivot_root_job *j = arg;
+	int ns = -1;
+
+	if (j->ns_path[0] == '\0') {
+		/* BEAM ns: unshare so the chdir is thread-local. */
+		if (unshare(CLONE_FS) < 0) {
+			j->r.err = errno;
+			j->r.stage = "unshare";
+			return NULL;
+		}
+	} else {
+		ns = enter_target_ns(&j->r, j->ns_path);
+		if (ns < 0)
+			return NULL;
+	}
+
+	if (chdir(j->new_root) < 0) {
+		j->r.err = errno;
+		j->r.stage = "chdir";
+		if (ns >= 0) close(ns);
+		return NULL;
+	}
+
+	/* glibc doesn't ship a pivot_root() wrapper; go direct. */
+	if (syscall(SYS_pivot_root, j->new_root, j->put_old) < 0) {
+		j->r.err = errno;
+		j->r.stage = "pivot_root";
+	}
+
+	if (ns >= 0) close(ns);
 	return NULL;
 }
 
@@ -356,17 +406,68 @@ static ERL_NIF_TERM nif_umount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
 	return result;
 }
 
+/* --- pivot_root/3 ------------------------------------------------------- */
+
+/* Args: new_root (binary), put_old (binary), ns_path (binary).
+ *
+ * Always runs on a worker thread -- even in the BEAM-namespace
+ * case, because pivot_root requires the calling thread's CWD to be
+ * inside new_root, and we don't want to change the BEAM's CWD. The
+ * worker unshare(CLONE_FS)'s first so its chdir is isolated. */
+static ERL_NIF_TERM nif_pivot_root(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
+{
+	(void)argc;
+
+	char *new_root = binary_to_cstr(env, argv[0]);
+	char *put_old  = binary_to_cstr(env, argv[1]);
+	char *ns_path  = binary_to_cstr(env, argv[2]);
+
+	if (!new_root || !put_old || !ns_path) {
+		enif_free(new_root);
+		enif_free(put_old);
+		enif_free(ns_path);
+		return enif_make_badarg(env);
+	}
+
+	struct pivot_root_job job = {
+		.r = { .err = 0, .stage = NULL },
+		.ns_path  = ns_path,
+		.new_root = new_root,
+		.put_old  = put_old,
+	};
+
+	ERL_NIF_TERM result;
+	ErlNifTid tid;
+	int rc = enif_thread_create("linx_pivot_root", &tid, pivot_root_worker, &job, NULL);
+	if (rc != 0) {
+		result = make_error(env, "thread", rc);
+	} else {
+		enif_thread_join(tid, NULL);
+		result = job.r.err
+			? make_error(env, job.r.stage, job.r.err)
+			: ok_atom(env);
+	}
+
+	enif_free(new_root);
+	enif_free(put_old);
+	enif_free(ns_path);
+
+	return result;
+}
+
 /* --- NIF init ----------------------------------------------------------- */
 
-/* mount/umount get the dirty-I/O-bound flag because (a) the
- * cross-namespace path spawns a thread + opens a file, and (b)
- * mount(2) on real filesystems (NFS, network mounts, large
- * superblock reads) can take milliseconds. version/0 stays on a
- * normal scheduler -- it just returns a string. */
+/* mount/umount/pivot_root get the dirty-I/O-bound flag because
+ * (a) the cross-namespace path spawns a thread + opens a file,
+ * and (b) the underlying syscalls on real filesystems (NFS,
+ * network mounts, large superblock reads) can take milliseconds.
+ * version/0 stays on a normal scheduler -- it just returns a
+ * string. */
 static ErlNifFunc nif_funcs[] = {
-	{ "version", 0, version,    0                          },
-	{ "mount",   6, nif_mount,  ERL_NIF_DIRTY_JOB_IO_BOUND },
-	{ "umount",  3, nif_umount, ERL_NIF_DIRTY_JOB_IO_BOUND },
+	{ "version",    0, version,        0                          },
+	{ "mount",      6, nif_mount,      ERL_NIF_DIRTY_JOB_IO_BOUND },
+	{ "umount",     3, nif_umount,     ERL_NIF_DIRTY_JOB_IO_BOUND },
+	{ "pivot_root", 3, nif_pivot_root, ERL_NIF_DIRTY_JOB_IO_BOUND },
 };
 
 ERL_NIF_INIT(Elixir.Linx.Mount.Native, nif_funcs, NULL, NULL, NULL, NULL)

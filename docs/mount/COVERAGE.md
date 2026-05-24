@@ -31,7 +31,7 @@ A living doc — update as primitives ship. Status legend:
 | `bind/3` | ✅ | M2 — `mount(MS_BIND)` |
 | `remount/2` | ✅ | M2 — `mount(MS_REMOUNT)`; for propagation changes use `mount/4` with `:private` / `:shared` / `:slave` / `:unbindable` directly (not with `:remount`) |
 | `move/2` | ✅ | M2 — `mount(MS_MOVE)` |
-| `pivot_root/3` | ⬜ | M4 — `pivot_root(2)` with CWD-handling on throwaway thread |
+| `pivot_root/3` | ✅ | M4 — `pivot_root(2)` with CWD-handling on throwaway thread |
 
 ## Mount flags (the `:flags` opt to `mount/4`)
 
@@ -77,7 +77,7 @@ A living doc — update as primitives ship. Status legend:
 | `bind/3` `:in` | ✅ | M3 |
 | `remount/2` `:in` | ✅ | M3 |
 | `move/2` `:in` | ✅ | M3 — note: source must not be in a shared peer group (kernel constraint) |
-| `pivot_root/3` `:in` | ⬜ | M4 |
+| `pivot_root/3` `:in` | ✅ | M4 |
 | `list/1` cross-ns (via `{:pid, _}`) | ⬜ | M0 — reads `/proc/<n>/mountinfo`; no setns needed |
 
 ## Composition with other subsystems

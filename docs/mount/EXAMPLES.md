@@ -9,11 +9,10 @@ the calling thread to have `CAP_SYS_ADMIN` in the target user
 namespace (root in the simple case). Start with `./sudorun.sh iex
 -S mix`.
 
-> 🚧 **Partial.** M0–M3 ship now: the read side, the mutating
-> verbs (`mount/4`, `umount/2`, `bind/3`, `remount/2`, `move/2`),
-> the cross-namespace `:in` option, and `%Linx.Mount.Error{}`.
-> `pivot_root/3` (M4) is the last remaining piece. See `PLAN.md`
-> for the roadmap.
+> ✅ **All foundation milestones shipped (M0–M4).** Read side,
+> mutating verbs, cross-namespace `:in`, `pivot_root/3`, errors,
+> the `Entry` and `Error` value types. See `PLAN.md` for what
+> was built and `COVERAGE.md` for what's deferred.
 
 ## Reading the mount table
 
@@ -365,4 +364,100 @@ its private `fs_struct` is discarded; the BEAM's scheduler
 threads are completely unaffected. Same trick that `nsenter(1)`
 uses when it switches mount namespaces.
 
-## (Will land with M4 — pivot_root)
+## Pivoting the root
+
+`pivot_root/3` swaps the mount-namespace's root: makes
+`new_root` the new `/` and stashes the old root tree at
+`put_old`. It's the kernel call container runtimes use to switch
+a workload into a custom rootfs before `execve`.
+
+The syscall is the pickiest in the mount API — there's a setup
+ritual to satisfy its constraints. Here's the headline pattern,
+running entirely inside a freshly-spawned child via `:in`:
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Mount
+
+iex> rootfs = "/run/myorg/web-42"
+iex> File.mkdir_p!(rootfs)
+iex> File.mkdir_p!(Path.join(rootfs, "old_root"))
+# ... populate rootfs with bin/, lib/, etc/, ... before pivoting
+
+iex> {:ok, c} = P.spawn(argv: ["/init"], namespaces: [:mount, :pid, :uts, :ipc])
+iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+
+# Detach the child's mount subtree from the host's shared peer
+# groups -- pivot_root rejects shared propagation on ancestors.
+# `mount --make-rprivate /` is the runc/docker idiom.
+iex> :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
+
+# Make new_root a mount point (pivot_root requires it). Doing the
+# bind inside the child's namespace means it has no peer group
+# with anything on the host.
+iex> :ok = Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
+
+# The pivot itself.
+iex> :ok = Mount.pivot_root(rootfs, Path.join(rootfs, "old_root"), in: {:pid, host_pid})
+
+# Final cleanup: discard the old root tree entirely.
+iex> :ok = Mount.umount("/old_root", flags: [:detach], in: {:pid, host_pid})
+
+# Release the workload -- it execs /init from inside the new rootfs.
+iex> :ok = P.proceed(c)
+```
+
+### Kernel constraints
+
+`pivot_root(2)` returns `EINVAL` unless *all* of these hold:
+
+  * `new_root` is a directory and a mount point.
+  * `put_old` is a directory and a path under `new_root`.
+  * `put_old` has no other filesystem mounted on it.
+  * Neither `new_root`'s parent nor the current root's mount has
+    shared propagation flowing into the other.
+  * `new_root` and the current root are different mounts.
+
+The setup ritual above satisfies all of them.
+
+### CWD handling
+
+pivot_root requires the calling thread's CWD to be inside
+`new_root`. The NIF runs on a worker thread that `unshare`s its
+`fs_struct` and `chdir`s into `new_root` before the syscall — so
+the BEAM's CWD stays at whatever it was. The chdir is a
+worker-thread concern; the caller doesn't observe it. Same
+`unshare(CLONE_FS)` trick the M3 cross-namespace path uses.
+
+### Error stages
+
+Beyond the `:pivot_root` stage itself, `pivot_root/3` can fail
+at:
+
+  * `:chdir` — couldn't enter `new_root` (doesn't exist, isn't a
+    directory). `:path` field carries `new_root`.
+  * `:open_ns` / `:unshare` / `:setns` / `:thread` — same as
+    other cross-namespace verbs. `:path` field carries the
+    namespace path.
+
+```elixir
+iex> Linx.Mount.pivot_root("/nope", "/nope/old")
+{:error,
+ %Linx.Mount.Error{
+   path: "/nope",
+   operation: :chdir,
+   errno: :enoent,
+   code: 2
+ }}
+```
+
+### After pivot: what the workload sees
+
+Inside the new rootfs the workload sees:
+
+  * `/` — the contents of what used to be `new_root`.
+  * `/old_root` — the old root tree, exactly as it was.
+
+A real init then typically `umount`s `/old_root` (as in the
+example above, via `in:` from outside, or from inside its own
+namespace) to free the old rootfs entirely.

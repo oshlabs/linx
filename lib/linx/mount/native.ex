@@ -50,7 +50,8 @@ defmodule Linx.Mount.Native do
   @typedoc """
   Native error shape: `{stage_atom, errno_atom_or_int}`.
   """
-  @type stage :: :mount | :umount | :pivot_root | :open_ns | :setns | :thread
+  @type stage ::
+          :mount | :umount | :pivot_root | :open_ns | :unshare | :setns | :chdir | :thread
 
   @type error :: {:error, {stage(), atom() | pos_integer()}}
 
@@ -71,4 +72,18 @@ defmodule Linx.Mount.Native do
   """
   @spec umount(binary(), integer(), binary()) :: :ok | error()
   def umount(_target, _flags, _ns_path), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Wraps `pivot_root(2)`. Always runs on a worker thread (even in
+  the BEAM-namespace case) because `pivot_root` requires the
+  calling thread's CWD to be inside `new_root`, and we don't want
+  to mutate the BEAM's CWD. The worker `unshare`s `CLONE_FS`,
+  `chdir`s into `new_root`, then calls the syscall.
+
+  `ns_path` is `""` for the caller's namespace, or a path to a
+  namespace file for cross-namespace.
+  """
+  @spec pivot_root(binary(), binary(), binary()) :: :ok | error()
+  def pivot_root(_new_root, _put_old, _ns_path),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
