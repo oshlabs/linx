@@ -55,10 +55,13 @@ defmodule Linx.Cgroup do
 
   ## Status
 
-  C0 — scaffolding only. `supported?/0` is functional; the
-  lifecycle / limit / stats verbs land in C1–C4. See
-  `docs/cgroup/PLAN.md` for the roadmap.
+  C0–C1 shipped: `supported?/0`, `create/1`, `destroy/1`,
+  `add_process/2`, `read/2`, `write/3`, plus the
+  `Linx.Cgroup.Error` shape. Limits, stats, and delegation land in
+  C2–C4. See `docs/cgroup/PLAN.md` for the roadmap.
   """
+
+  alias Linx.Cgroup.Error
 
   @cgroupfs "/sys/fs/cgroup"
   @controllers_file Path.join(@cgroupfs, "cgroup.controllers")
@@ -82,53 +85,103 @@ defmodule Linx.Cgroup do
   def supported?, do: File.exists?(@controllers_file)
 
   @doc """
-  Creates a cgroup at `path` (and any missing ancestors that are
-  themselves valid cgroup parents).
+  Creates a cgroup at `path`.
 
-  Idempotent: an already-existing cgroup is treated as success.
+  Idempotent: an already-existing cgroup (`EEXIST`) is treated as
+  success — calling `create/1` twice in a row is safe. Other
+  failures (e.g. parent missing, no permission) return
+  `{:error, %Linx.Cgroup.Error{}}`.
 
-  Lands in C1.
+  Returns `{:ok, path}` so the path can flow into the rest of the
+  API by piping: `Linx.Cgroup.create(path) |> elem(1) |>
+  Linx.Cgroup.add_process(pid)`.
   """
-  @spec create(Path.t()) :: {:ok, cgroup()} | {:error, term()}
-  def create(_path), do: {:error, :not_yet_implemented}
+  @spec create(Path.t()) :: {:ok, cgroup()} | {:error, Error.t()}
+  def create(path) when is_binary(path) do
+    case File.mkdir(path) do
+      :ok -> {:ok, path}
+      {:error, :eexist} -> {:ok, path}
+      {:error, posix} -> {:error, Error.from_posix(posix, path, :create)}
+    end
+  end
 
   @doc """
   Removes the cgroup at `path`.
 
-  Succeeds only once the cgroup is empty (the kernel enforces this
-  via `EBUSY` on `rmdir`).
-
-  Lands in C1.
+  Succeeds only once the cgroup is empty — the kernel returns
+  `EBUSY` while any process is still in the cgroup, surfaced as
+  `{:error, %Linx.Cgroup.Error{errno: :ebusy}}`. Pattern-match on
+  that to handle "still has live processes" without surprise.
   """
-  @spec destroy(cgroup()) :: :ok | {:error, term()}
-  def destroy(_cg), do: {:error, :not_yet_implemented}
+  @spec destroy(cgroup()) :: :ok | {:error, Error.t()}
+  def destroy(path) when is_binary(path) do
+    case File.rmdir(path) do
+      :ok -> :ok
+      {:error, posix} -> {:error, Error.from_posix(posix, path, :destroy)}
+    end
+  end
 
   @doc """
   Moves OS process `pid` (and so its future children) into `cg` by
-  writing the pid to `<cg>/cgroup.procs`.
+  writing the pid's decimal text to `<cg>/cgroup.procs`.
 
-  Lands in C1.
+  The classic checkpoint composition with `Linx.Process`:
+
+      host_pid = receive do {:linx_process, :ready, p} -> p end
+      :ok = Linx.Cgroup.add_process(cg, host_pid)
+      :ok = Linx.Process.proceed(c)
+
+  The pid the kernel accepts is in the cgroup's *own namespace* —
+  on a `:cgroup`-namespaced workload this matters; outside one
+  it's the global pid.
   """
-  @spec add_process(cgroup(), pos_integer()) :: :ok | {:error, term()}
-  def add_process(_cg, _pid), do: {:error, :not_yet_implemented}
+  @spec add_process(cgroup(), pos_integer()) :: :ok | {:error, Error.t()}
+  def add_process(cg, pid) when is_binary(cg) and is_integer(pid) and pid > 0 do
+    write_at(cg, "cgroup.procs", Integer.to_string(pid), :add_process)
+  end
 
   @doc """
   Reads cgroup interface file `file` (e.g. `"memory.current"`) under
-  `cg`. Returns `{:ok, trimmed_string}` or `{:error, %Linx.Cgroup.Error{}}`.
+  `cg`. Returns `{:ok, trimmed_string}` — cgroupfs interface files
+  end in newlines that the caller almost never wants — or
+  `{:error, %Linx.Cgroup.Error{}}`.
 
-  Raw escape hatch for fields without a typed reader. Lands in C1.
+  Raw escape hatch for fields without a typed reader.
   """
-  @spec read(cgroup(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def read(_cg, _file), do: {:error, :not_yet_implemented}
+  @spec read(cgroup(), String.t()) :: {:ok, String.t()} | {:error, Error.t()}
+  def read(cg, file) when is_binary(cg) and is_binary(file) do
+    full = Path.join(cg, file)
+
+    case File.read(full) do
+      {:ok, data} -> {:ok, String.trim(data)}
+      {:error, posix} -> {:error, Error.from_posix(posix, full, :read)}
+    end
+  end
 
   @doc """
-  Writes `value` (any term `to_string/1` can render) to cgroup
-  interface file `file` (e.g. `"memory.max"`) under `cg`.
+  Writes `value` to cgroup interface file `file` (e.g.
+  `"memory.max"`) under `cg`. `value` is rendered via
+  `to_string/1`, so atoms (`:max`), integers, and binaries all work
+  directly.
 
-  Raw escape hatch for fields without a typed setter. Lands in C1.
+  Raw escape hatch for fields without a typed setter.
   """
-  @spec write(cgroup(), String.t(), term()) :: :ok | {:error, term()}
-  def write(_cg, _file, _value), do: {:error, :not_yet_implemented}
+  @spec write(cgroup(), String.t(), term()) :: :ok | {:error, Error.t()}
+  def write(cg, file, value) when is_binary(cg) and is_binary(file) do
+    write_at(cg, file, to_string(value), :write)
+  end
+
+  # Shared write helper used by add_process/2 (operation: :add_process)
+  # and write/3 (operation: :write). Keeps the operation tag accurate
+  # for Linx.Cgroup.Error consumers pattern-matching on it.
+  defp write_at(cg, file, value, operation) do
+    full = Path.join(cg, file)
+
+    case File.write(full, value) do
+      :ok -> :ok
+      {:error, posix} -> {:error, Error.from_posix(posix, full, operation)}
+    end
+  end
 
   @doc """
   Freezes every process in `cg` (`cgroup.freeze` ← `"1"`).

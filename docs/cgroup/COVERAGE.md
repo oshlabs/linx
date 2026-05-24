@@ -17,11 +17,11 @@ A living doc — update as primitives ship. Status legend:
 | Feature | Status | Notes |
 |---|---|---|
 | `supported?/0` | ✅ | C0 — true iff `/sys/fs/cgroup/cgroup.controllers` exists |
-| `create/1` | ⬜ | C1 — idempotent (treats `EEXIST` as success) |
-| `destroy/1` | ⬜ | C1 — succeeds only on empty cgroups (kernel enforces) |
-| `add_process/2` | ⬜ | C1 — writes pid to `<cg>/cgroup.procs` |
-| `read/2` | ⬜ | C1 — raw escape hatch; trims trailing whitespace |
-| `write/3` | ⬜ | C1 — raw escape hatch |
+| `create/1` | ✅ | C1 — idempotent (treats `EEXIST` as success) |
+| `destroy/1` | ✅ | C1 — succeeds only on empty cgroups (kernel enforces) |
+| `add_process/2` | ✅ | C1 — writes pid to `<cg>/cgroup.procs` |
+| `read/2` | ✅ | C1 — raw escape hatch; trims trailing whitespace |
+| `write/3` | ✅ | C1 — raw escape hatch |
 
 ## Freeze / thaw
 
@@ -58,20 +58,20 @@ A living doc — update as primitives ship. Status legend:
 
 | Pairing | Status | Notes |
 |---|---|---|
-| `Linx.Process` workload placed at checkpoint | ⬜ | C1 — caller wires it via `add_process/2`; no `Linx.Process` change |
+| `Linx.Process` workload placed at checkpoint | ✅ | C1 — caller wires it via `add_process/2`; no `Linx.Process` change |
 
 ## Error reporting
 
 | Mechanism | Status | Notes |
 |---|---|---|
-| `%Linx.Cgroup.Error{path, operation, errno, code}` | ⬜ | C1 |
-| `Exception` impl for `raise`-able paths | ⬜ | C1 |
+| `%Linx.Cgroup.Error{path, operation, errno, code}` | ✅ | C1 |
+| `Exception` impl for `raise`-able paths | ✅ | C1 |
 
 ## Value types
 
 | Module | Status | Notes |
 |---|---|---|
-| `Linx.Cgroup.Error` | ⬜ | C1 — POSIX-atom errno + path + operation |
+| `Linx.Cgroup.Error` | ✅ | C1 — POSIX-atom errno + path + operation |
 | `Linx.Cgroup.Stats` | ⬜ | C3 — curated counters; `nil` for unavailable fields |
 
 ## Deferred — not in `Linx.Cgroup` itself

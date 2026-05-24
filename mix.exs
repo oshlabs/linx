@@ -105,7 +105,8 @@ defmodule Linx.MixProject do
           Linx.Tty.Native
         ],
         Cgroup: [
-          Linx.Cgroup
+          Linx.Cgroup,
+          Linx.Cgroup.Error
         ],
         "Netlink core": [
           Linx.Netlink,
