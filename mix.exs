@@ -104,6 +104,9 @@ defmodule Linx.MixProject do
           Linx.Tty.WindowSize,
           Linx.Tty.Native
         ],
+        Cgroup: [
+          Linx.Cgroup
+        ],
         "Netlink core": [
           Linx.Netlink,
           Linx.Netlink.Socket,

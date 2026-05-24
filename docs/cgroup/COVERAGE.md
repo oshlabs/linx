@@ -16,7 +16,7 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `supported?/0` | ⬜ | C0 — true iff `/sys/fs/cgroup/cgroup.controllers` exists |
+| `supported?/0` | ✅ | C0 — true iff `/sys/fs/cgroup/cgroup.controllers` exists |
 | `create/1` | ⬜ | C1 — idempotent (treats `EEXIST` as success) |
 | `destroy/1` | ⬜ | C1 — succeeds only on empty cgroups (kernel enforces) |
 | `add_process/2` | ⬜ | C1 — writes pid to `<cg>/cgroup.procs` |
