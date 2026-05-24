@@ -43,7 +43,12 @@ iex> {:ok, c} =
 ...>     namespaces: [:user, :mount, :pid, :uts, :ipc],
 ...>     stdio: :pty
 ...>   )
-iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+
+# The :ready event's pid is the child's *own* view of itself --
+# = 1 inside a fresh :pid namespace. For procfs writes we need
+# the host's view: that's P.host_pid/1.
+iex> receive do {:linx_process, :ready, _child_view} -> :ok end
+iex> {:ok, host_pid} = P.host_pid(c)
 
 # "root inside ↔ me outside" -- the canonical rootless mapping.
 iex> :ok = User.deny_setgroups(host_pid)
@@ -298,7 +303,12 @@ iex> {:ok, c} =
 ...>     namespaces: [:user, :mount, :pid, :uts, :ipc],
 ...>     stdio: :pty
 ...>   )
-iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+
+# With :pid in the namespaces list, the :ready event's pid is
+# the child's *own* view (= 1). For procfs writes we need the
+# host's view of the child -- P.host_pid/1 returns that.
+iex> receive do {:linx_process, :ready, _child_view} -> :ok end
+iex> {:ok, host_pid} = P.host_pid(c)
 
 # Set up the rootless mapping at the checkpoint.
 iex> my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
@@ -306,6 +316,14 @@ iex> my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_
 iex> :ok = User.setup_maps(host_pid, uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
 
 # Give the container its own /proc (also at the checkpoint).
+#
+# NOTE: this step requires the BEAM to have CAP_SYS_ADMIN in the
+# child's user namespace -- i.e. the BEAM must be running as the
+# system root, not just "root inside the new user ns". A rootless
+# BEAM (uid 1000) will get EPERM here. The runc-style workaround
+# in that case is to have the workload itself do the /proc
+# remount after its execve (where it has full caps in its own
+# user ns); see docs/mount/EXAMPLES.md for the rootless caveat.
 iex> :ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
 
 # Release -- the workload execs already inside its own user ns
@@ -318,9 +336,9 @@ iex> Tty.attach(:controlling, c)
 Inside the attached bash:
 
 ```
-[root@... /]$ whoami
+[root@... /]# whoami
 root
-[root@... /]$ ps
+[root@... /]# ps
     PID TTY          TIME CMD
       1 pts/0    00:00:00 bash
       ...
