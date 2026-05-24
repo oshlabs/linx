@@ -1,0 +1,615 @@
+defmodule Linx.Mount do
+  @moduledoc """
+  Linux filesystem-mount primitives — `mount(2)`, `umount2(2)`,
+  `pivot_root(2)`, and the read-side `/proc/.../mountinfo` parser.
+
+  ## Why a separate subsystem
+
+  Mounts are a coherent kernel concept (the filesystem hierarchy a
+  process sees) with their own syscalls, their own configuration via
+  `/proc/.../mountinfo`, and per-namespace semantics that compose
+  cleanly with `Linx.Process`'s `:mount` namespace. Like
+  `Linx.Cgroup`, mount primitives are useful even outside the
+  cloned-child case — bind-mounting host paths, propagating mount
+  changes between namespaces, debugging mount tables.
+
+  ## Cross-namespace via `:in`
+
+  Every mutating verb takes an `:in` option naming the mount
+  namespace to operate on:
+
+    * `:self` (default) — the BEAM's mount namespace.
+    * `{:pid, n}` — the mount namespace of pid `n`.
+    * `{:path, p}` — an explicit path to a namespace file
+      (typically `/proc/<n>/ns/mnt`).
+
+  The mechanism is the same throwaway-thread + `setns(2)` trick
+  `Linx.Netlink` uses for opening sockets in another netns. It works
+  for **any process whose namespace files exist** — parked at a
+  `Linx.Process` checkpoint, fully running after `proceed/1`, or any
+  other live pid. The `:in` option is lifecycle-agnostic.
+
+  ## Composition with `Linx.Process`
+
+  Mount `/proc` inside a child's fresh `:mount` namespace at the
+  checkpoint, then proceed:
+
+      {:ok, c} = Linx.Process.spawn(argv: ["/bin/bash"], namespaces: [:mount, :pid])
+      host_pid = receive do {:linx_process, :ready, p} -> p end
+      :ok = Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+      :ok = Linx.Process.proceed(c)
+
+  The same call works post-`proceed/1` against a running container
+  for hot-mounting volumes or remounting paths.
+
+  ## Status
+
+  All foundation milestones shipped (M0–M4): `list/0`, `list/1`,
+  the mountinfo parser, `mount/4`, `umount/2`, `bind/3`,
+  `remount/2`, `move/2`, the cross-namespace `:in` option,
+  `pivot_root/3`, plus `%Linx.Mount.Entry{}` and
+  `%Linx.Mount.Error{}`. See `docs/mount/PLAN.md` for what was
+  built and `COVERAGE.md` for what's deferred.
+  """
+
+  import Bitwise, only: [|||: 2]
+
+  alias Linx.Mount.{Entry, Error, Native}
+
+  # MS_* mount flag constants from <sys/mount.h>. Stable across Linux
+  # versions for ~30 years. Pattern-match atoms in the public API
+  # against this table; the OR'd integer goes to the NIF.
+  @mount_flags %{
+    ro: 0x1,
+    nosuid: 0x2,
+    nodev: 0x4,
+    noexec: 0x8,
+    sync: 0x10,
+    remount: 0x20,
+    mandlock: 0x40,
+    dirsync: 0x80,
+    noatime: 0x400,
+    nodiratime: 0x800,
+    bind: 0x1000,
+    move: 0x2000,
+    rec: 0x4000,
+    silent: 0x8000,
+    unbindable: 0x20000,
+    private: 0x40000,
+    slave: 0x80000,
+    shared: 0x100000,
+    relatime: 0x200000,
+    strictatime: 0x1000000,
+    lazytime: 0x2000000
+  }
+
+  # umount(2) / umount2(2) flag constants from <sys/mount.h>.
+  @umount_flags %{
+    force: 0x1,
+    detach: 0x2,
+    expire: 0x4,
+    no_follow: 0x8
+  }
+
+  @doc false
+  def __mount_flags__, do: @mount_flags
+
+  @doc false
+  def __umount_flags__, do: @umount_flags
+
+  @typedoc """
+  Target of a `list/1` call — either a pid (reads
+  `/proc/<pid>/mountinfo`) or an explicit path to a mountinfo file.
+  """
+  @type list_target :: {:pid, pos_integer()} | {:path, Path.t()}
+
+  @doc """
+  Returns the BEAM's mount table by parsing `/proc/self/mountinfo`.
+
+  Returns `{:ok, [%Linx.Mount.Entry{}, ...]}` on success or
+  `{:error, posix_atom}` if the file can't be read (extremely
+  unusual on a healthy host).
+  """
+  @spec list() :: {:ok, [Entry.t()]} | {:error, atom()}
+  def list, do: read_and_parse("/proc/self/mountinfo")
+
+  @doc """
+  Returns the mount table for `target`'s mount namespace.
+
+  `target` is `{:pid, n}` (reads `/proc/<n>/mountinfo`) or
+  `{:path, p}` (reads `p` directly — typically used with paths like
+  `/proc/<n>/mountinfo` already constructed).
+
+  Returns `{:ok, [%Linx.Mount.Entry{}, ...]}` or `{:error, posix_atom}`;
+  common failures: `:enoent` (pid no longer exists), `:eacces`
+  (BEAM can't read that pid's `/proc`).
+
+  Note that `list/1` does *not* enter the target's mount namespace
+  via setns — it just reads the target's mountinfo file from the
+  BEAM's namespace, which is sufficient. The mutating verbs (which
+  *do* need setns) are the ones that operate on a separate
+  throwaway thread.
+  """
+  @spec list(list_target()) :: {:ok, [Entry.t()]} | {:error, atom()}
+  def list({:pid, n}) when is_integer(n) and n > 0 do
+    read_and_parse("/proc/#{n}/mountinfo")
+  end
+
+  def list({:path, p}) when is_binary(p), do: read_and_parse(p)
+
+  defp read_and_parse(path) do
+    case File.read(path) do
+      {:ok, data} -> {:ok, parse_mountinfo(data)}
+      {:error, posix} -> {:error, posix}
+    end
+  end
+
+  @doc false
+  # Parses a mountinfo blob into a list of %Linx.Mount.Entry{}.
+  # Malformed lines (shouldn't happen from a healthy kernel) are
+  # silently skipped -- forward-compatible against the kernel adding
+  # new optional-field tags we haven't seen.
+  @spec parse_mountinfo(binary()) :: [Entry.t()]
+  def parse_mountinfo(data) when is_binary(data) do
+    data
+    |> String.split("\n", trim: true)
+    |> Enum.flat_map(&parse_line/1)
+  end
+
+  # Parses one mountinfo line. Returns [entry] on success, [] on a
+  # line we don't recognize.
+  defp parse_line(line) do
+    parts = String.split(line, " ")
+
+    with {:ok, mount_id} <- parse_int(Enum.at(parts, 0)),
+         {:ok, parent_id} <- parse_signed_int(Enum.at(parts, 1)),
+         device when is_binary(device) <- Enum.at(parts, 2),
+         root when is_binary(root) <- Enum.at(parts, 3),
+         mount_point when is_binary(mount_point) <- Enum.at(parts, 4),
+         mount_options when is_binary(mount_options) <- Enum.at(parts, 5),
+         {:ok, propagation, rest} <- parse_optional_fields(Enum.drop(parts, 6)),
+         [fstype, source, super_options | _extras] <- rest do
+      [
+        %Entry{
+          mount_id: mount_id,
+          parent_id: parent_id,
+          device: device,
+          root: unescape(root),
+          mount_point: unescape(mount_point),
+          mount_options: mount_options,
+          propagation: propagation,
+          fstype: fstype,
+          source: unescape(source),
+          super_options: super_options
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  # Reads the optional-fields section (zero or more "tag[:value]"
+  # entries) terminated by a "-" separator. Returns
+  # {:ok, propagation_list, fields_after_separator} or :error.
+  defp parse_optional_fields(parts), do: parse_optional_fields(parts, [])
+
+  defp parse_optional_fields(["-" | rest], acc), do: {:ok, Enum.reverse(acc), rest}
+
+  defp parse_optional_fields([tag | rest], acc) do
+    case parse_propagation(tag) do
+      :skip -> parse_optional_fields(rest, acc)
+      entry -> parse_optional_fields(rest, [entry | acc])
+    end
+  end
+
+  defp parse_optional_fields([], _acc), do: :error
+
+  # One optional-fields entry → tagged value or :skip for an
+  # unrecognized tag (forward-compat).
+  defp parse_propagation("unbindable"), do: :unbindable
+
+  defp parse_propagation(tag) do
+    case String.split(tag, ":", parts: 2) do
+      ["shared", n] -> with {:ok, i} <- parse_int(n), do: {:shared, i}, else: (_ -> :skip)
+      ["master", n] -> with {:ok, i} <- parse_int(n), do: {:master, i}, else: (_ -> :skip)
+      ["propagate_from", n] ->
+        with {:ok, i} <- parse_int(n), do: {:propagate_from, i}, else: (_ -> :skip)
+
+      _ ->
+        :skip
+    end
+  end
+
+  defp parse_int(nil), do: :error
+
+  defp parse_int(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} when n >= 0 -> {:ok, n}
+      _ -> :error
+    end
+  end
+
+  defp parse_signed_int(nil), do: :error
+
+  defp parse_signed_int(s) when is_binary(s) do
+    case Integer.parse(s) do
+      {n, ""} -> {:ok, n}
+      _ -> :error
+    end
+  end
+
+  # Decodes mountinfo's octal-escape format. The kernel escapes
+  # space (\040), tab (\011), newline (\012), and backslash (\134)
+  # in the root, mount_point, and source fields. We handle any
+  # \nnn three-digit octal sequence to stay defensive.
+  @doc false
+  def unescape(s) when is_binary(s), do: unescape(s, <<>>)
+
+  defp unescape(<<>>, acc), do: acc
+
+  defp unescape(
+         <<?\\, a, b, c, rest::binary>>,
+         acc
+       )
+       when a in ?0..?7 and b in ?0..?7 and c in ?0..?7 do
+    byte = (a - ?0) * 64 + (b - ?0) * 8 + (c - ?0)
+    unescape(rest, <<acc::binary, byte>>)
+  end
+
+  defp unescape(<<ch, rest::binary>>, acc), do: unescape(rest, <<acc::binary, ch>>)
+
+  # --- mutating verbs ------------------------------------------------------
+
+  @doc """
+  Mounts `source` at `target` with filesystem type `fstype`.
+
+  ## Options
+
+    * `:flags` — a list of flag atoms (see the table below).
+      Mapped to the OR'd `MS_*` integer the kernel expects.
+    * `:data` — a filesystem-specific options string (e.g.
+      `"size=64M,mode=755"` for tmpfs). Defaults to `""`.
+
+  ## Flag atoms
+
+  | atom | `MS_*` constant |
+  |---|---|
+  | `:ro` | `MS_RDONLY` |
+  | `:nosuid` | `MS_NOSUID` |
+  | `:nodev` | `MS_NODEV` |
+  | `:noexec` | `MS_NOEXEC` |
+  | `:sync` | `MS_SYNCHRONOUS` |
+  | `:remount` | `MS_REMOUNT` (driven by `remount/2` in M2) |
+  | `:mandlock` | `MS_MANDLOCK` |
+  | `:dirsync` | `MS_DIRSYNC` |
+  | `:noatime` | `MS_NOATIME` |
+  | `:nodiratime` | `MS_NODIRATIME` |
+  | `:bind` | `MS_BIND` (driven by `bind/3` in M2) |
+  | `:move` | `MS_MOVE` (driven by `move/2` in M2) |
+  | `:rec` | `MS_REC` — recursive variant |
+  | `:silent` | `MS_SILENT` |
+  | `:private` | `MS_PRIVATE` — propagation |
+  | `:shared` | `MS_SHARED` — propagation |
+  | `:slave` | `MS_SLAVE` — propagation |
+  | `:unbindable` | `MS_UNBINDABLE` — propagation |
+  | `:relatime` | `MS_RELATIME` |
+  | `:strictatime` | `MS_STRICTATIME` |
+  | `:lazytime` | `MS_LAZYTIME` |
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`
+  on failure. Common errnos: `:eperm` (no `CAP_SYS_ADMIN`),
+  `:enoent` (source or target missing), `:einval` (incompatible
+  flags), `:ebusy` (target is busy), `:enodev` (unknown fstype).
+
+  ## Cross-namespace
+
+  The `:in` option chooses which mount namespace to operate on:
+
+    * `:self` (default) — the BEAM's own mount namespace.
+    * `{:pid, n}` — pid `n`'s mount namespace (reads
+      `/proc/<n>/ns/mnt`). Works whether `n` is parked at a
+      `Linx.Process` checkpoint or fully running.
+    * `{:path, p}` — an explicit path to a namespace file.
+
+  ```elixir
+  :ok = Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+  ```
+
+  Cross-namespace failures surface with stage-tagged operations
+  in `%Linx.Mount.Error{operation: :open_ns | :setns | :thread}` —
+  see `Linx.Mount.Error`'s @moduledoc.
+  """
+  @spec mount(String.t(), String.t(), String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
+  def mount(source, target, fstype, opts \\ [])
+      when is_binary(source) and is_binary(target) and is_binary(fstype) and
+             is_list(opts) do
+    with {:ok, flags} <- pack_flags(opts[:flags] || [], @mount_flags),
+         {:ok, ns_path} <- resolve_in(opts[:in] || :self) do
+      data = opts[:data] || ""
+      do_mount(source, target, fstype, flags, data, ns_path)
+    end
+  end
+
+  @doc """
+  Unmounts the filesystem at `target`.
+
+  ## Options
+
+    * `:flags` — a list of flag atoms:
+      * `:force` — `MNT_FORCE`. Try harder when the filesystem is
+        busy (only meaningful for NFS-style network filesystems).
+      * `:detach` — `MNT_DETACH`. Lazy unmount: detach from the
+        namespace immediately, clean up when the last user is
+        done.
+      * `:expire` — `MNT_EXPIRE`. Mark for later auto-unmount.
+      * `:no_follow` — `UMOUNT_NOFOLLOW`. Don't follow symlinks at
+        `target`.
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :umount}}`.
+
+  ## Cross-namespace
+
+  Same `:in` option as `mount/4`. To unmount a path inside a
+  running container:
+
+  ```elixir
+  :ok = Linx.Mount.umount("/proc", in: {:pid, container_pid})
+  ```
+  """
+  @spec umount(String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
+  def umount(target, opts \\ []) when is_binary(target) and is_list(opts) do
+    with {:ok, flags} <- pack_flags(opts[:flags] || [], @umount_flags),
+         {:ok, ns_path} <- resolve_in(opts[:in] || :self) do
+      do_umount(target, flags, ns_path)
+    end
+  end
+
+  defp do_mount(source, target, fstype, flags, data, ns_path) do
+    case Native.mount(source, target, fstype, flags, data, ns_path) do
+      :ok -> :ok
+      {:error, {stage, errno}} -> {:error, build_error(stage, errno, target, ns_path)}
+    end
+  end
+
+  defp do_umount(target, flags, ns_path) do
+    case Native.umount(target, flags, ns_path) do
+      :ok -> :ok
+      {:error, {stage, errno}} -> {:error, build_error(stage, errno, target, ns_path)}
+    end
+  end
+
+  # Translates a NIF error into a %Linx.Mount.Error{}. The `path`
+  # field follows the failed step's natural subject:
+  #
+  #   - :mount / :umount / :pivot_root  -> target path
+  #   - :open_ns / :setns / :thread     -> ns_path (the namespace
+  #                                       acquisition that failed)
+  defp build_error(stage, errno, target, _ns_path)
+       when stage in [:mount, :umount, :pivot_root] do
+    do_build_error(stage, errno, target)
+  end
+
+  defp build_error(stage, errno, _target, ns_path)
+       when stage in [:open_ns, :unshare, :setns, :thread] do
+    do_build_error(stage, errno, ns_path)
+  end
+
+  defp do_build_error(stage, errno, path) when is_atom(errno) do
+    Error.from_posix(errno, path, stage)
+  end
+
+  defp do_build_error(stage, code, path) when is_integer(code) do
+    %Error{path: path, operation: stage, errno: :unknown, code: code}
+  end
+
+  # Resolves the :in option to an ns_path binary the NIF
+  # understands. `:self` (default) returns "" (BEAM namespace);
+  # {:pid, n} resolves to /proc/<n>/ns/mnt; {:path, p} passes p
+  # through.
+  defp resolve_in(:self), do: {:ok, ""}
+
+  defp resolve_in({:pid, n}) when is_integer(n) and n > 0,
+    do: {:ok, "/proc/#{n}/ns/mnt"}
+
+  defp resolve_in({:path, p}) when is_binary(p), do: {:ok, p}
+
+  defp resolve_in(other), do: {:error, {:bad_in, other}}
+
+  # Folds a list of flag atoms into the OR'd integer the kernel
+  # expects. An unknown atom returns {:error, {:bad_flag, atom}} so
+  # the caller gets a clear error rather than a silently-dropped flag.
+  defp pack_flags(flags, table) when is_list(flags) do
+    Enum.reduce_while(flags, {:ok, 0}, fn flag, {:ok, acc} ->
+      case Map.fetch(table, flag) do
+        {:ok, bit} -> {:cont, {:ok, acc ||| bit}}
+        :error -> {:halt, {:error, {:bad_flag, flag}}}
+      end
+    end)
+  end
+
+  defp pack_flags(_, _), do: {:error, {:bad_flag, :flags_must_be_a_list}}
+
+  @doc """
+  Bind-mounts `source` at `target` — makes the contents of `source`
+  visible at `target` as well, like a hardlink for directories.
+
+  Equivalent to `mount/4` with `flags: [:bind | user_flags]` and an
+  empty `fstype`. The kernel ignores `fstype` for bind mounts; the
+  filesystem is whatever already lives at `source`.
+
+  ## Options
+
+    * `:flags` — extra flag atoms to OR with `:bind`. Useful values:
+      * `:rec` — recursive bind, descending into any submounts
+        underneath `source`.
+      * `:ro` — read-only at the target (effective via a follow-up
+        `remount/2` on Linux ≥ 2.6.26; combining `:bind` and `:ro`
+        on the initial call still creates a rw mount because of
+        a kernel quirk).
+    * `:data` — filesystem-specific options string (rare for
+      bind mounts).
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
+  """
+  @spec bind(String.t(), String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
+  def bind(source, target, opts \\ []) when is_binary(source) and is_binary(target) do
+    flags = [:bind | List.wrap(opts[:flags] || [])]
+    mount(source, target, "", forward_opts(opts, flags: flags))
+  end
+
+  @doc """
+  Remounts the filesystem at `target` with new flags.
+
+  Equivalent to `mount/4` with `flags: [:remount | user_flags]` and
+  empty `source` + `fstype`. The kernel knows what's mounted there
+  and applies the new flags in place.
+
+  Typical use: making a bind mount read-only after the fact:
+
+      :ok = Linx.Mount.bind(source, target)
+      :ok = Linx.Mount.remount(target, flags: [:ro, :bind])
+
+  The `:bind` flag is required when remounting a bind mount with
+  new flags — without it, the kernel tries to remount the underlying
+  filesystem instead.
+
+  ## Options
+
+    * `:flags` — flag atoms (`:ro`, `:nosuid`, `:nodev`, etc.) to
+      apply. Reuses the catalog from `mount/4`.
+    * `:data` — filesystem-specific options string.
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
+  """
+  @spec remount(String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
+  def remount(target, opts \\ []) when is_binary(target) do
+    flags = [:remount | List.wrap(opts[:flags] || [])]
+    mount("", target, "", forward_opts(opts, flags: flags))
+  end
+
+  @doc """
+  Atomically relocates an existing mount from `source` to `target`.
+
+  Equivalent to `mount/4` with `flags: [:move]`. The mount table
+  entry stays the same — same filesystem, same inode count — only
+  the mount point changes. Subprocesses with the old path open
+  continue to work via the still-valid fd; new lookups go through
+  the new path.
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
+
+  Common errors: `:einval` (source isn't a mount point, or
+  source/target share a propagation peer group — `move` requires
+  unshared propagation on both ends), `:enoent` (target's parent
+  doesn't exist).
+  """
+  @spec move(String.t(), String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
+  def move(source, target, opts \\ []) when is_binary(source) and is_binary(target) do
+    mount(source, target, "", forward_opts(opts, flags: [:move]))
+  end
+
+  # Merges caller-supplied opts (data, in) with the verb-supplied
+  # flags. The verb owns `:flags`; the caller may pass `:data` and
+  # `:in`. Any other key is silently ignored (forward-compat).
+  defp forward_opts(opts, base) do
+    base
+    |> Keyword.put_new(:data, opts[:data] || "")
+    |> Keyword.put_new(:in, opts[:in] || :self)
+  end
+
+  @doc """
+  Swaps the mount-namespace's root: makes `new_root` the new `/`
+  and stashes the old root at `put_old`.
+
+  Wraps `pivot_root(2)`. After a successful call, processes in the
+  target mount namespace see `new_root`'s contents as `/`; the
+  former root tree is accessible at `put_old`. The standard next
+  step in container init is to `umount("/old_root", flags: [:detach])`
+  to discard the old root entirely.
+
+  ## Options
+
+    * `:in` — the same shape as `mount/4` (`:self` /
+      `{:pid, n}` / `{:path, p}`). Picks which mount namespace's
+      root to swap.
+
+  ## Kernel constraints
+
+  `pivot_root(2)` is one of the pickiest syscalls in Linux. The
+  call returns `:einval` unless **all** of these hold:
+
+    * `new_root` is a directory **and** a mount point. The
+      typical setup is a bind-mount-to-self:
+      `Linx.Mount.bind(new_root, new_root)`.
+    * `put_old` is a directory under `new_root`. By convention:
+      `Path.join(new_root, "old_root")`, created beforehand.
+    * No other filesystem is mounted on `put_old`.
+    * The propagation of `new_root`'s mount and the current root's
+      mount are not both shared. Usually: mark `new_root` private
+      before calling pivot_root.
+
+  See `pivot_root(2)` for the full list.
+
+  ## CWD handling
+
+  pivot_root requires the calling thread's CWD to be inside
+  `new_root`. The NIF runs on a worker thread that `unshare`s its
+  `fs_struct` and `chdir`s into `new_root` before the syscall, so
+  the BEAM's CWD stays at whatever it was. The chdir is a worker-
+  thread concern; the caller doesn't observe it.
+
+  ## Composition
+
+  The headline use case is rootfs swapping inside a freshly-spawned
+  container at the checkpoint, before `proceed/1`:
+
+      {:ok, c} = Linx.Process.spawn(argv: ["/init"], namespaces: [:mount, ...])
+      host_pid = receive do {:linx_process, :ready, p} -> p end
+
+      :ok = Linx.Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
+      :ok = Linx.Mount.mount("", rootfs, "", flags: [:private], in: {:pid, host_pid})
+      :ok = Linx.Mount.pivot_root(rootfs, Path.join(rootfs, "old_root"), in: {:pid, host_pid})
+      :ok = Linx.Mount.umount("/old_root", flags: [:detach], in: {:pid, host_pid})
+
+      :ok = Linx.Process.proceed(c)
+
+  After `proceed/1`, the workload `execve`s `/init` from inside
+  the new rootfs.
+
+  Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :pivot_root | :chdir | :open_ns | :unshare | :setns | :thread}}`.
+  """
+  @spec pivot_root(String.t(), String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_in, term()}}
+  def pivot_root(new_root, put_old, opts \\ [])
+      when is_binary(new_root) and is_binary(put_old) and is_list(opts) do
+    with {:ok, ns_path} <- resolve_in(opts[:in] || :self) do
+      do_pivot_root(new_root, put_old, ns_path)
+    end
+  end
+
+  defp do_pivot_root(new_root, put_old, ns_path) do
+    case Native.pivot_root(new_root, put_old, ns_path) do
+      :ok -> :ok
+      {:error, {stage, errno}} -> {:error, build_pivot_root_error(stage, errno, new_root, ns_path)}
+    end
+  end
+
+  # pivot_root has more failure stages than mount/umount. :pivot_root
+  # and :chdir both fail with new_root as the natural :path subject
+  # (the chdir target IS new_root); namespace-acquisition stages
+  # carry ns_path.
+  defp build_pivot_root_error(stage, errno, new_root, _ns_path)
+       when stage in [:pivot_root, :chdir] do
+    do_build_error(stage, errno, new_root)
+  end
+
+  defp build_pivot_root_error(stage, errno, _new_root, ns_path)
+       when stage in [:open_ns, :unshare, :setns, :thread] do
+    do_build_error(stage, errno, ns_path)
+  end
+end

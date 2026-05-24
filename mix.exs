@@ -15,8 +15,9 @@ defmodule Linx.MixProject do
       #   * :netlink_nif    -- the netlink_socket NIF (Linx.Netlink)
       #   * :linx_process   -- the linx_process Port binary (Linx.Process)
       #   * :linx_tty       -- the linx_tty NIF (Linx.Tty)
+      #   * :linx_mount     -- the linx_mount NIF (Linx.Mount)
       # See lib/mix/tasks/compile.*.ex.
-      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process, :linx_tty],
+      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process, :linx_tty, :linx_mount],
       deps: deps(),
       name: "Linx",
       description: "Linux kernel interfaces for Elixir — netlink, and more.",
@@ -59,7 +60,11 @@ defmodule Linx.MixProject do
         "docs/cgroup/EXAMPLES.md",
         "docs/cgroup/PLAN.md",
         "docs/cgroup/COVERAGE.md",
-        "docs/cgroup/REFERENCES.md"
+        "docs/cgroup/REFERENCES.md",
+        "docs/mount/EXAMPLES.md",
+        "docs/mount/PLAN.md",
+        "docs/mount/COVERAGE.md",
+        "docs/mount/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -87,6 +92,12 @@ defmodule Linx.MixProject do
           "docs/cgroup/COVERAGE.md",
           "docs/cgroup/REFERENCES.md"
         ],
+        "Mount — guides": ["docs/mount/EXAMPLES.md"],
+        "Mount — design": [
+          "docs/mount/PLAN.md",
+          "docs/mount/COVERAGE.md",
+          "docs/mount/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -108,6 +119,12 @@ defmodule Linx.MixProject do
           Linx.Cgroup,
           Linx.Cgroup.Error,
           Linx.Cgroup.Stats
+        ],
+        Mount: [
+          Linx.Mount,
+          Linx.Mount.Entry,
+          Linx.Mount.Error,
+          Linx.Mount.Native
         ],
         "Netlink core": [
           Linx.Netlink,
