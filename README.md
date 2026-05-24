@@ -2,7 +2,7 @@
 
 **Linux kernel interfaces for Elixir.**
 
-A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits, filesystem mounts, user-namespace identity mappings, per-process capability sets — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
+A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits, filesystem mounts, user-namespace identity mappings, per-process capability sets, per-thread seccomp filters — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
 
 Linx is a library of **primitives**, not a runtime. A container engine, a network orchestrator, or an observability tool is a *consumer* of Linx; the runtime concepts (images, supervision policies, request routing) live in those projects.
 
@@ -225,7 +225,39 @@ After `proceed/1`, nginx runs with exactly the one capability it needs to bind a
 
 > **Root only.** `PR_CAPBSET_DROP` and `capset(2)` require `CAP_SETPCAP` in the calling thread's effective set, which in practice means root. Uniquely among Linx subsystems, "rootless" doesn't help here.
 
-The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`, drop processes into cgroups whether or not they're Linx-spawned, configure caps on any session that's at the checkpoint. They compose because they share clean primitives, not because there's a framework holding them together.
+### Going further: lock down the syscall surface
+
+The same checkpoint slot also accepts `Linx.Seccomp.install/2`. Build a cBPF filter from atoms — allow-list (everything not listed gets `:kill_process` by default) or deny-list (everything not listed gets `:allow`, Docker-style) — and install it before the workload's first instruction:
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Seccomp
+
+iex> {:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], no_new_privs: true)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+
+# An allow-list of the syscalls a workload actually uses. Anything
+# else (an attacker pivoting to execve, ptrace, kexec_load, ...)
+# fires :kill_process by default and dies with SIGSYS.
+iex> {:ok, filter} = Seccomp.allow_list(
+...>   ~w(read write openat close fstat brk mmap munmap mprotect
+...>      accept4 bind listen socket connect setsockopt getsockopt
+...>      rt_sigaction rt_sigprocmask rt_sigreturn exit_group)a,
+...>   default: :kill_process
+...> )
+
+iex> :ok = Seccomp.install(c, filter)
+iex> P.proceed(c)
+iex> receive do {:linx_process, :running} -> :ok end
+```
+
+The filter is a `%Linx.Seccomp.Filter{}` value — composable, introspectable, the same shape regardless of whether you built it with `allow_list/2` / `deny_list/2`, the `Linx.Seccomp.Builder` DSL, or `Linx.Seccomp.from_rules/1` (the data-layer seam external policy adapters like Docker `seccomp.json` parsers will use). Kernel rejections of denied syscalls arrive as `{:linx_process, :signaled, 31}` (SIGSYS) for `:kill_process` actions, or just propagate as the appropriate errno to the workload for `{:errno, :eperm}`-style actions.
+
+> **`no_new_privs: true`.** `seccomp(SECCOMP_SET_MODE_FILTER)` needs either `CAP_SYS_ADMIN` or `PR_SET_NO_NEW_PRIVS`. The `no_new_privs:` opt on `spawn/1` sets the latter early in the child; `install/2` also auto-sets it as a fallback if you forgot. So unprivileged callers Just Work.
+
+`Linx.User` + `Linx.Capabilities` + `Linx.Seccomp` together are the security tripod: identity (who is the workload?), privilege bounds (what can it ask the kernel for?), and syscall surface (what can it call at all?). Three orthogonal envelopes, three independent verbs, all sharing the same `Linx.Process` checkpoint.
+
+The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`, drop processes into cgroups whether or not they're Linx-spawned, configure caps and seccomp filters on any session that's at the checkpoint. They compose because they share clean primitives, not because there's a framework holding them together.
 
 ## Subsystems
 
@@ -548,6 +580,75 @@ The verbs are agent-side (the child applies them just before `execve`) — they 
 
 More in [`docs/capabilities/EXAMPLES.md`](docs/capabilities/EXAMPLES.md).
 
+### `Linx.Seccomp` — Linux syscall filtering
+
+The kernel's `seccomp(2)` surface: per-thread cBPF programs that gate every syscall the workload makes. Pure-Elixir cBPF compiler (no `libseccomp` linkage); agent-side install via the same `Linx.Process` checkpoint that `Linx.Capabilities` uses.
+
+```elixir
+iex> alias Linx.Seccomp
+
+iex> Seccomp.supported?()
+true
+iex> Seccomp.arch()
+:x86_64
+```
+
+**Two-layer API.** The sugar layer is `allow_list/2`, `deny_list/2`, and the `Linx.Seccomp.Builder` DSL — for filters constructed in code. The data layer is `from_rules/1` / `to_rules/1` — the seam external consumers like Silo will use to translate JSON profiles (or any other external policy representation) into Linx filters. Linx itself never sees JSON.
+
+```elixir
+# Sugar -- allow-list with kill_process default (the secure shape).
+iex> {:ok, filter} = Seccomp.allow_list(
+...>   ~w(read write openat close exit_group)a,
+...>   default: :kill_process
+...> )
+#Linx.Seccomp.Filter<x86_64 5 syscalls, 11 BPF insns>
+
+# Sugar -- deny-list with EPERM default (the Docker shape).
+iex> {:ok, filter} = Seccomp.deny_list(
+...>   ~w(kexec_load init_module delete_module ptrace mount)a
+...> )
+
+# Data layer -- consumers translate from external policy and call this.
+iex> rules = [
+...>   {:allow, :read}, {:allow, :write},
+...>   {{:errno, :eperm}, :ptrace},
+...>   {:kill_process, :kexec_load}
+...> ]
+iex> {:ok, filter} = Seccomp.from_rules({rules, :allow})
+
+# DSL.
+iex> {:ok, filter} =
+...>   Seccomp.builder()
+...>   |> Linx.Seccomp.Builder.allow(:read)
+...>   |> Linx.Seccomp.Builder.deny(:ptrace, errno: :eperm)
+...>   |> Linx.Seccomp.Builder.build(default: :kill_process)
+```
+
+**Actions.** Each rule (and the default) is one of: `:allow`, `:kill_process`, `:kill_thread`, `:trap`, `:log`, or `{:errno, atom_or_int}`. Mix freely — most realistic filters allow the common syscalls, return EPERM for graceful-degradation cases (ptrace, process_vm_readv), and kill outright for the dangerous ones (kexec_load, init_module).
+
+**Hand-curated syscall table.** `Linx.Seccomp.Syscalls` ships per-arch atom ↔ number maps for `:x86_64` (239 entries) and `:aarch64` (214 entries) — the common workload subset, the Docker deny-list, and the namespace / capability / seccomp / bpf syscalls Linx itself uses. The module-doc-false comment block documents the extension procedure for future contributors.
+
+**Install at the checkpoint** (the headline composition with `Linx.Process`):
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], no_new_privs: true)
+iex> receive do {:linx_process, :ready, _} -> :ok end
+
+iex> {:ok, filter} = Seccomp.allow_list(syscalls_nginx_needs)
+iex> :ok = Seccomp.install(c, filter)
+iex> P.proceed(c)
+```
+
+The filter is installed by the child agent (`apply_seccomp` in `c_src/linx_process.c`) right before `execve(2)` — so even `execve` itself is gated by the filter, which is what makes the contract airtight. `seccomp(SECCOMP_SET_MODE_FILTER)` needs `PR_SET_NO_NEW_PRIVS` (or `CAP_SYS_ADMIN`); pass `no_new_privs: true` to `spawn/1` for the principled posture, or let `install/2` auto-set it for you.
+
+**State-machine errors** mirror `Linx.Capabilities`'s write verbs: `{:error, :not_ready}` / `{:error, :running}` / `{:error, :already_terminated}`. Caller-side build errors are tagged tuples: `{:error, {:unknown_syscall, atom}}`, `{:error, {:bad_action, _}}`, `{:error, {:duplicate_rule, atom}}`, `{:error, {:unsupported_arch, atom}}`. Kernel-level install failures arrive asynchronously as `{:linx_process, :error, errno, :seccomp_install | :seccomp_no_new_privs}` on the owner mailbox.
+
+**`%Linx.Seccomp.Error{operation, errno, code}`** is the struct shape for non-tuple build failures (today just the `:e2big` case for filters that would overflow the 8-bit jump distance — the hand-curated tables are well under the limit, but the check is there for when the table grows).
+
+**Deferred** — per-argument matching (`allow_if(:open, &(...))`), multi-arch filters, `SECCOMP_USER_NOTIF` (userspace decision handlers), and Docker `seccomp.json` parsing (the last belongs in consumers, not Linx).
+
+More in [`docs/seccomp/EXAMPLES.md`](docs/seccomp/EXAMPLES.md).
+
 ### `Linx.Netlink` — netlink sockets, rtnetlink
 
 An `AF_NETLINK` client with the rtnetlink family fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
@@ -609,7 +710,7 @@ Three kinds of top-level module, named for what they organize:
 | Kind | When | Examples |
 |---|---|---|
 | **Mechanism layer** | A coherent transport with shared infrastructure (codec, framing, error handling, …). | `Linx.Netlink` |
-| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup`, `Linx.Mount`, `Linx.User` |
+| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup`, `Linx.Mount`, `Linx.User`, `Linx.Capabilities`, `Linx.Seccomp` |
 | **Value type** | A domain primitive that flows through the mechanisms. Top level. | `Linx.IP`, `Linx.MAC` |
 
 Naming rule of thumb: name a module after a mechanism only when the mechanism has shared shape worth factoring out. Otherwise name it after the kernel subsystem or concept. `Namespace` isn't a subsystem — it's a cross-cutting flag on `clone(2)` — so it doesn't get its own module; the *operations* live where they belong.
@@ -622,8 +723,9 @@ Each subsystem owns its docs under `docs/<subsystem>/` — `EXAMPLES.md` (iex-st
 - **Within `Linx.Cgroup`** — typed setters for less-common controllers (`io.max`, `cpuset.cpus`, `memory.swap.max`), event monitoring (`memory.events`, OOM notifications), `cgroup.kill` for atomic teardown.
 - **Within `Linx.Mount`** — the new mount API (`fsopen` / `fsmount` / `open_tree` / `move_mount` / `mount_setattr`); typed parsing of `mount_options` / `super_options`; `cgroup.kill`-style atomic-unmount-by-mount-id.
 - **Within `Linx.User`** — `newuidmap(1)` / `newgidmap(1)` integration for unprivileged multi-range maps via `/etc/subuid` / `/etc/subgid` (required for true `runc rootless`-parity).
-- **Within `Linx.Capabilities`** — file capabilities (`security.capability` xattrs on binaries; the `setcap(8)` / `getcap(8)` surface), `PR_SET_NO_NEW_PRIVS` (probably under `Linx.Process` rather than here), `SECBIT_*` securebits, per-thread cap reads via `/proc/<pid>/task/<tid>/status`.
-- **New subsystems on the horizon** — `Linx.Seccomp` (syscall filtering, the last leg of the security-isolation tripod alongside `Linx.User` and `Linx.Capabilities`); a first hex release pulling the existing seven subsystems together.
+- **Within `Linx.Capabilities`** — file capabilities (`security.capability` xattrs on binaries; the `setcap(8)` / `getcap(8)` surface), `SECBIT_*` securebits, per-thread cap reads via `/proc/<pid>/task/<tid>/status`.
+- **Within `Linx.Seccomp`** — per-argument matching (`allow_if(:openat, &(&1.flags == :rdonly))` — the S1.5 surface), multi-arch routing for cross-arch workloads, `SECCOMP_USER_NOTIF` for userspace decision handlers, and richer filter introspection.
+- **First hex release** — pulling the existing eight subsystems together; HexDocs hosting; a CHANGELOG settling onto semantic versioning.
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.
 
