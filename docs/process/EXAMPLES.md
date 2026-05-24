@@ -170,6 +170,72 @@ iex> P.wait(child)
 {:ok, {:signaled, 9}}
 ```
 
+## Aborting a parked session
+
+`abort/1` is the alternative to `proceed/1` from the `:ready` state.
+Where `proceed/1` releases the cloned child past the checkpoint so it
+`execve`s the workload, `abort/1` discards the session entirely — the
+child never runs.
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
+iex> receive do {:linx_process, :ready, host_pid} -> host_pid end
+
+# ... host-side setup runs here. Suppose it fails or we decide to
+# cancel: instead of proceed/1, call abort/1.
+iex> P.abort(c)
+:ok
+
+iex> flush()
+{:linx_process, :aborted}
+
+iex> P.wait(c)
+{:ok, :aborted}
+```
+
+`abort/1` emits a distinct terminal event `{:linx_process, :aborted}`
+that joins `:exited` / `:signaled` / `:error` as a fourth outcome.
+`wait/1` returns `{:ok, :aborted}` for aborted sessions.
+
+### Why a separate verb (and not just `signal/2`)
+
+Signals sent before `:running` are *buffered* — they queue in the
+GenServer state and replay once the workload `execve`s. A SIGKILL to
+a parked session never actually kills the parked child; it sits in
+the buffer waiting for an execve that you didn't intend to happen.
+
+`abort/1` operates on the agent's pre-execve state directly: the
+agent closes the child's wakeup pipe so the child sees EOF and
+`_exit`s, reaps it via `waitpid`, then emits `:aborted`. No execve,
+no buffered-signal dance.
+
+### State semantics
+
+| Session state | `abort/1` returns |
+|---|---|
+| Pre-`:ready` | `:ok` — buffered, fires at the checkpoint |
+| `:ready` (parked) | `:ok` — immediate abort |
+| `:running` | `{:error, :running}` — past the line; use `signal/2` |
+| Already terminal | `{:error, :already_terminated}` |
+
+The pre-`:ready` buffering mirrors `signal/2`'s shape — both verbs
+let you express intent before the agent is ready to act on it.
+
+### Use cases
+
+- **Setup-time rollback.** Your container engine starts spawning,
+  discovers a problem during checkpoint setup (cgroup creation
+  failed, a mount errored, network setup raised), and wants to
+  cancel the workload cleanly.
+- **Checkpoint-only verification.** A test that wants to confirm
+  the namespaces were created correctly without actually running
+  anything in them — e.g. the `Linx.Mount` M4 pivot_root test
+  pivots the child's mount namespace, verifies via mountinfo, and
+  aborts.
+- **User-cancellation flow.** A consumer of Linx that's spawning
+  on the user's behalf and the user pressed Cancel before the
+  workload started.
+
 ## Entering an existing process's namespaces
 
 `enter/2` runs a new workload *inside* an existing target's namespaces

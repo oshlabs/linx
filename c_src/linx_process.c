@@ -700,6 +700,8 @@ static int enter_target_namespaces(const struct request *req)
 struct child_args {
 	int c2p_w; /* child writes events here (CLOEXEC) */
 	int p2c_r; /* child reads commands here */
+	int c2p_r; /* parent's read end -- child closes on entry */
+	int p2c_w; /* parent's write end -- child closes on entry */
 	char **argv;
 	char **env;
 	struct stdio_dir stdio[3];
@@ -806,6 +808,18 @@ static int child_fn(void *arg)
 {
 	struct child_args *ca = arg;
 
+	/* Close the parent's ends of our internal pipes. clone(2) gives
+	 * the child the full inherited fd table -- including the parent's
+	 * c2p[0] (read end) and p2c[1] (write end) -- and unless we close
+	 * them here, closing them in the parent leaves the kernel still
+	 * counting one writer (us) on p2c, so the child's read on p2c_r
+	 * would never see EOF if the parent abandons sending 'P'. That
+	 * matters for the :abort path. (The fork() branch in main does
+	 * these closes explicitly before calling child_fn; here we
+	 * centralise them so both paths converge on the same shape.) */
+	if (ca->c2p_r >= 0) close(ca->c2p_r);
+	if (ca->p2c_w >= 0) close(ca->p2c_w);
+
 	/* :ready -- send 'R' + pidns-internal pid (uint32 big-endian). */
 	uint8_t ready[5];
 	ready[0] = 'R';
@@ -874,14 +888,23 @@ static int await_exec_outcome(int c2p_r)
 	return 1;
 }
 
-/* Block on the BEAM control channel until :proceed arrives, handling any
- * pre-proceed commands that are valid during the checkpoint window
- * (currently just {:pty_winsize, _} for callers wanting to seed the
- * workload's PTY size before exec). {:signal, _} and {:pty_in, _} are
- * post-running-only and treated as protocol errors if they show up here.
+/* Block on the BEAM control channel until :proceed (or :abort) arrives,
+ * handling any pre-proceed commands that are valid during the checkpoint
+ * window (currently just {:pty_winsize, _} for callers wanting to seed
+ * the workload's PTY size before exec). {:signal, _} and {:pty_in, _}
+ * are post-running-only and treated as protocol errors if they show up
+ * here.
  *
  * `pty_master` is the agent's master fd in PTY mode (or -1 otherwise);
- * passed in so the winsize handler can apply the ioctl in place. */
+ * passed in so the winsize handler can apply the ioctl in place.
+ *
+ * Returns:
+ *   0   -- :proceed received; caller releases the child past the
+ *          checkpoint by writing 'P' to the unblock pipe.
+ *   1   -- :abort received; caller closes the unblock pipe so the child
+ *          sees EOF and _exits without execve'ing; agent then reaps and
+ *          emits {:status, :aborted, child_pid}.
+ *  -1   -- read/parse error or unknown command. */
 static int await_proceed(int pty_master)
 {
 	for (;;) {
@@ -905,6 +928,8 @@ static int await_proceed(int pty_master)
 				return -1;
 			if (strcmp(atom, "proceed") == 0)
 				return 0;
+			if (strcmp(atom, "abort") == 0)
+				return 1;
 			return -1;
 		}
 
@@ -1264,6 +1289,8 @@ int main(void)
 	struct child_args ca = {
 		.c2p_w = c2p[1],
 		.p2c_r = p2c[0],
+		.c2p_r = c2p[0],
+		.p2c_w = p2c[1],
 		.argv = req.argv,
 		.env = child_env,
 		.pty_master = -1,
@@ -1404,14 +1431,45 @@ int main(void)
 			 ((long)ready_pid[2] << 8) | (long)ready_pid[3];
 	emit_status_int("ready", child_pid);
 
-	/* Wait for :proceed from the BEAM, forward as 'P' to the child.
+	/* Wait for :proceed (or :abort) from the BEAM. On :proceed we write
+	 * 'P' to the unblock pipe and the child execve's; on :abort we
+	 * close the unblock pipe so the child sees EOF and _exits without
+	 * execve'ing, then we reap and emit {:status, :aborted, ...}.
+	 *
 	 * A negative return here is most commonly EOF on fd 3 -- the BEAM
 	 * port closing because its owning GenServer died, which is a routine
 	 * cleanup path (not an error worth a stderr line). */
-	if (await_proceed(pty_master) < 0) {
+	int decision = await_proceed(pty_master);
+	if (decision < 0) {
 		free_request(&req);
 		return 1;
 	}
+
+	if (decision == 1) {
+		/* :abort -- the child is parked reading p2c_r. Closing our
+		 * write end without sending 'P' gives it EOF; child _exits
+		 * 102 (see child_fn: the read_exact branch). */
+		close(p2c[1]);
+		close(c2p[0]);
+
+		int status;
+		if (waitpid(pid, &status, 0) < 0) {
+			fprintf(stderr,
+				"linx_process: waitpid after abort: %s\n",
+				strerror(errno));
+		}
+
+		/* Emit the same shape as :ready -- {:status, :aborted, pid}.
+		 * `child_pid` is the pidns-internal pid the child sent us
+		 * earlier (matches what we delivered with :ready). */
+		emit_status_int("aborted", child_pid);
+
+		if (pty_master >= 0)
+			close(pty_master);
+		free_request(&req);
+		return 0;
+	}
+
 	uint8_t go = 'P';
 	if (write_exact(p2c[1], &go, 1) < 0) {
 		fprintf(stderr, "linx_process: write proceed to child: %s\n",

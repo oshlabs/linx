@@ -149,6 +149,80 @@ defmodule Linx.ProcessTest do
     end
   end
 
+  describe "abort/1" do
+    test "abort/1 on a :ready parked session discards the workload" do
+      # /bin/sleep 60 would normally run for a minute; abort/1 means
+      # it never gets to execve, so we see :aborted in milliseconds,
+      # not :signaled or :exited.
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = P.abort(session)
+
+      assert_receive {:linx_process, :aborted}, 2_000
+
+      # No :running was ever delivered -- the workload never started.
+      refute_receive {:linx_process, :running}, 100
+
+      assert {:ok, :aborted} = P.wait(session)
+    end
+
+    test "abort/1 before :ready is buffered, fires at the checkpoint" do
+      # Race the abort against the agent's :ready emission. The
+      # GenServer buffers the abort and delivers it the moment the
+      # checkpoint is reached -- same shape as signal/2's pre-:running
+      # buffering.
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+
+      # Don't drain :ready -- send abort straight away. The GenServer
+      # receives this call before its handle_info processes the
+      # :ready frame from the port; abort is queued in state.
+      :ok = P.abort(session)
+
+      # Both :ready and :aborted should arrive; :running should not.
+      assert_receive {:linx_process, :ready, _}, 2_000
+      assert_receive {:linx_process, :aborted}, 2_000
+      refute_receive {:linx_process, :running}, 100
+
+      assert {:ok, :aborted} = P.wait(session)
+    end
+
+    test "abort/1 after :running returns {:error, :running}" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # Past the checkpoint -- abort is no longer the right call;
+      # signal/2 is.
+      assert {:error, :running} = P.abort(session)
+
+      # Clean up.
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "abort/1 after the session has terminated returns :already_terminated" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert {:error, :already_terminated} = P.abort(session)
+    end
+
+    test "wait/1 with a timeout sees :aborted as a terminal" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      :ok = P.abort(session)
+
+      # wait/1 should resolve quickly with the :aborted shape, not
+      # block until the (non-existent) workload finishes.
+      assert {:ok, :aborted} = P.wait(session, 2_000)
+    end
+  end
+
   describe "spawn/1 with fresh namespaces" do
     # Creating any namespace other than CLONE_NEWUSER needs CAP_SYS_ADMIN.
     # The :integration tag keeps these out of `mix test` by default; run

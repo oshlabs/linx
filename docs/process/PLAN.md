@@ -1,11 +1,14 @@
 # Linx.Process — implementation plan
 
-> **P0–P4 have shipped** on branch `process-foundations`: the
+> **P0–P5 have shipped**: P0–P4 on branch `process-foundations`, P5
+> (`abort/1`) on branch `process-abort`. P0–P4 covered the
 > Port-based agent, `Linx.Process.spawn/1` with the checkpoint protocol,
 > namespace selection (`:net` verified end-to-end against `Linx.Netlink`),
 > structured pre-exec errors, `proceed/1`, `signal/2` (with pre-running
 > buffering), `wait/1`/`wait/2`, `enter/2` for joining an existing
 > target's namespaces, and `:stdio` plumbing primitives including PTY.
+> P5 added `abort/1` — release a parked session without `execve`'ing,
+> with a distinct `{:linx_process, :aborted}` terminal event.
 
 ## Goal
 
