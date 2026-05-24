@@ -72,11 +72,11 @@ A living doc — update as primitives ship. Status legend:
 
 | Verb | Status | Notes |
 |---|---|---|
-| `mount/4` `:in` | ⬜ | M3 — throwaway-thread setns + mount |
-| `umount/2` `:in` | ⬜ | M3 |
-| `bind/3` `:in` | ⬜ | M3 |
-| `remount/2` `:in` | ⬜ | M3 |
-| `move/2` `:in` | ⬜ | M3 |
+| `mount/4` `:in` | ✅ | M3 — throwaway-thread `unshare(CLONE_FS)` + `setns(CLONE_NEWNS)` + `mount(2)` |
+| `umount/2` `:in` | ✅ | M3 |
+| `bind/3` `:in` | ✅ | M3 |
+| `remount/2` `:in` | ✅ | M3 |
+| `move/2` `:in` | ✅ | M3 — note: source must not be in a shared peer group (kernel constraint) |
 | `pivot_root/3` `:in` | ⬜ | M4 |
 | `list/1` cross-ns (via `{:pid, _}`) | ⬜ | M0 — reads `/proc/<n>/mountinfo`; no setns needed |
 
@@ -84,8 +84,8 @@ A living doc — update as primitives ship. Status legend:
 
 | Pairing | Status | Notes |
 |---|---|---|
-| `Linx.Process` mount-at-checkpoint via `in: {:pid, host_pid}` | ⬜ | M3 — no `Linx.Process` change required |
-| `Linx.Process` mount-post-proceed in a running container | ⬜ | M3 — same shape; setns is lifecycle-agnostic |
+| `Linx.Process` mount-at-checkpoint via `in: {:pid, host_pid}` | ✅ | M3 — no `Linx.Process` change required |
+| `Linx.Process` mount-post-proceed in a running container | ✅ | M3 — same shape; setns is lifecycle-agnostic |
 
 ## Value types
 

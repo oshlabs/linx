@@ -9,11 +9,11 @@ the calling thread to have `CAP_SYS_ADMIN` in the target user
 namespace (root in the simple case). Start with `./sudorun.sh iex
 -S mix`.
 
-> 🚧 **Partial.** M0–M2 (the read side, `mount/4`, `umount/2`,
-> the convenience verbs `bind/3` / `remount/2` / `move/2`, and
-> `%Linx.Mount.Error{}`) ship now. Cross-namespace `:in` (M3) and
-> `pivot_root/3` (M4) land in follow-ups. See `PLAN.md` for the
-> roadmap.
+> 🚧 **Partial.** M0–M3 ship now: the read side, the mutating
+> verbs (`mount/4`, `umount/2`, `bind/3`, `remount/2`, `move/2`),
+> the cross-namespace `:in` option, and `%Linx.Mount.Error{}`.
+> `pivot_root/3` (M4) is the last remaining piece. See `PLAN.md`
+> for the roadmap.
 
 ## Reading the mount table
 
@@ -230,6 +230,139 @@ iex> Linx.Mount.move("#{base}/dst", "#{base}/moved")
 :ok
 ```
 
-## (Will land with M3 — mounting into another namespace via `:in`)
+## Mounting into another namespace
+
+Every mutating verb takes an `:in` option naming the mount
+namespace to operate on:
+
+  * `:self` (default) — the BEAM's own mount namespace.
+  * `{:pid, n}` — pid `n`'s mount namespace. Reads
+    `/proc/<n>/ns/mnt`.
+  * `{:path, p}` — an explicit path to a namespace file
+    (typically `/proc/<n>/ns/mnt` but anywhere works).
+
+The mechanism is a throwaway pthread that does
+`unshare(CLONE_FS)` to detach from the BEAM's shared
+`fs_struct`, then `setns(2)` into the target namespace, then the
+syscall, then exits. The BEAM's own scheduler threads never
+enter the target namespace.
+
+### Headline use case: remount `/proc` inside a container
+
+The "ps shows host processes" caveat in the project README — a
+child spawned with `namespaces: [:mount, :pid]` still sees the
+host's `/proc` because the mount namespace was a *copy* of the
+host's mount table at spawn time. The fix:
+
+```elixir
+iex> {:ok, c} = Linx.Process.spawn(
+...>   argv: ["/bin/bash"],
+...>   namespaces: [:mount, :pid, :uts, :ipc, :user],
+...>   stdio: :pty
+...> )
+iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+
+# Mount a fresh /proc inside the child's own mount namespace.
+# Now `ps` inside the container shows only container processes.
+iex> :ok = Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+
+iex> :ok = Linx.Process.proceed(c)
+iex> :ok = Linx.Tty.attach(:controlling, c)
+```
+
+### Lifecycle-agnostic: hot-mount into a running container
+
+The setns mechanism works against *any* live process whose
+namespace files exist — parked at a checkpoint, fully running,
+sleeping, doesn't matter. So mounts can be added at any point in
+a workload's life:
+
+```elixir
+# Bind a host data volume into a running container, on demand.
+iex> :ok = Linx.Mount.bind("/data/cache", "/cache", in: {:pid, container_pid})
+```
+
+Same pattern works for `umount/2`, `bind/3`, `remount/2`, and
+`move/2`.
+
+### Inspecting another namespace's mount table
+
+`list/1` with `{:pid, n}` doesn't need the setns dance — it just
+reads `/proc/<n>/mountinfo` from the BEAM's namespace, which
+already reflects the target's mount table. Useful for inspecting
+or debugging a container's mounts without touching them:
+
+```elixir
+iex> Linx.Mount.list({:pid, container_pid})
+{:ok, [
+  #Linx.Mount.Entry<ext4 on / (rw,relatime)>,
+  #Linx.Mount.Entry<proc on /proc (rw,relatime)>,
+  #Linx.Mount.Entry<tmpfs on /tmp (rw,nosuid)>,
+  ...
+]}
+```
+
+### Error stages for cross-namespace failures
+
+When `:in` is in play, failures can happen at extra stages
+beyond the target syscall — they surface in
+`%Linx.Mount.Error{operation: ...}`:
+
+  * `:open_ns` — the namespace file doesn't exist (typically
+    `{:pid, n}` where `n` is no longer alive).
+  * `:unshare` — couldn't detach the worker thread's
+    `fs_struct`. Extremely unlikely; the only known cause is
+    process resource limits.
+  * `:setns` — the kernel refused the namespace entry. Most
+    common: lacking `CAP_SYS_ADMIN` in the target user
+    namespace (rootless containers — see "Rootless caveat"
+    below).
+  * `:thread` — couldn't create the worker thread; typically
+    `EAGAIN` from thread-creation pressure.
+
+```elixir
+iex> Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, 9_999_999})
+{:error,
+ %Linx.Mount.Error{
+   path: "/proc/9999999/ns/mnt",
+   operation: :open_ns,
+   errno: :enoent,
+   code: 2
+ }}
+```
+
+The `:path` field on cross-namespace failures is the namespace
+file (not the mount target) — that's the thing that actually
+failed.
+
+### Rootless caveat
+
+`Linx.Process` workloads spawned with the `:user` namespace
+become unprivileged inside their own user namespace. The
+throwaway thread that performs the mount runs as the BEAM's
+identity — which is root on a system-level BEAM, but not on a
+rootless one. If the BEAM is itself unprivileged and the
+container has its own `:user` namespace, `setns(CLONE_NEWNS)`
+into the container's mount namespace requires `CAP_SYS_ADMIN` in
+*that* namespace — which the BEAM doesn't have unless it also
+entered the container's user namespace first.
+
+Practical implication: cross-namespace mounts work cleanly when
+the BEAM is system-level root. Rootless setups need the BEAM to
+participate in the container's user namespace, which is outside
+this subsystem's scope.
+
+### Why the worker thread `unshare`s first
+
+The kernel's mount-namespace setns refuses any thread whose
+`fs_struct` is shared with other threads (returns `EINVAL`).
+Every scheduler thread in the BEAM shares one `fs_struct`, so a
+naked `setns(CLONE_NEWNS)` from a throwaway pthread fails. The
+NIF therefore calls `unshare(CLONE_FS)` on the worker thread
+first — that detaches the thread's filesystem-attrs view from
+the BEAM, satisfying the kernel's check. When the thread exits,
+its private `fs_struct` is discarded; the BEAM's scheduler
+threads are completely unaffected. Same trick that `nsenter(1)`
+uses when it switches mount namespaces.
 
 ## (Will land with M4 — pivot_root)

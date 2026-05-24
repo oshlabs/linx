@@ -44,11 +44,11 @@ defmodule Linx.Mount do
 
   ## Status
 
-  M0–M2 shipped: `list/0`, `list/1`, the mountinfo parser,
-  `mount/4`, `umount/2`, `bind/3`, `remount/2`, `move/2`, plus
-  `%Linx.Mount.Entry{}` and `%Linx.Mount.Error{}`. Cross-namespace
-  `:in` (M3) and `pivot_root/3` (M4) land in follow-ups. See
-  `docs/mount/PLAN.md` for the roadmap.
+  M0–M3 shipped: `list/0`, `list/1`, the mountinfo parser,
+  `mount/4`, `umount/2`, `bind/3`, `remount/2`, `move/2`, the
+  cross-namespace `:in` option, plus `%Linx.Mount.Entry{}` and
+  `%Linx.Mount.Error{}`. `pivot_root/3` (M4) lands in a
+  follow-up. See `docs/mount/PLAN.md` for the roadmap.
   """
 
   import Bitwise, only: [|||: 2]
@@ -302,17 +302,31 @@ defmodule Linx.Mount do
 
   ## Cross-namespace
 
-  M1 only mounts in the BEAM's own mount namespace. The `:in`
-  option for cross-namespace mounts lands in M3.
+  The `:in` option chooses which mount namespace to operate on:
+
+    * `:self` (default) — the BEAM's own mount namespace.
+    * `{:pid, n}` — pid `n`'s mount namespace (reads
+      `/proc/<n>/ns/mnt`). Works whether `n` is parked at a
+      `Linx.Process` checkpoint or fully running.
+    * `{:path, p}` — an explicit path to a namespace file.
+
+  ```elixir
+  :ok = Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+  ```
+
+  Cross-namespace failures surface with stage-tagged operations
+  in `%Linx.Mount.Error{operation: :open_ns | :setns | :thread}` —
+  see `Linx.Mount.Error`'s @moduledoc.
   """
   @spec mount(String.t(), String.t(), String.t(), keyword()) ::
-          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
   def mount(source, target, fstype, opts \\ [])
       when is_binary(source) and is_binary(target) and is_binary(fstype) and
              is_list(opts) do
-    with {:ok, flags} <- pack_flags(opts[:flags] || [], @mount_flags) do
+    with {:ok, flags} <- pack_flags(opts[:flags] || [], @mount_flags),
+         {:ok, ns_path} <- resolve_in(opts[:in] || :self) do
       data = opts[:data] || ""
-      do_mount(source, target, fstype, flags, data)
+      do_mount(source, target, fstype, flags, data, ns_path)
     end
   end
 
@@ -335,40 +349,72 @@ defmodule Linx.Mount do
 
   ## Cross-namespace
 
-  M1 only unmounts in the BEAM's own mount namespace. The `:in`
-  option for cross-namespace unmounts lands in M3.
+  Same `:in` option as `mount/4`. To unmount a path inside a
+  running container:
+
+  ```elixir
+  :ok = Linx.Mount.umount("/proc", in: {:pid, container_pid})
+  ```
   """
   @spec umount(String.t(), keyword()) ::
-          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
   def umount(target, opts \\ []) when is_binary(target) and is_list(opts) do
-    with {:ok, flags} <- pack_flags(opts[:flags] || [], @umount_flags) do
-      do_umount(target, flags)
+    with {:ok, flags} <- pack_flags(opts[:flags] || [], @umount_flags),
+         {:ok, ns_path} <- resolve_in(opts[:in] || :self) do
+      do_umount(target, flags, ns_path)
     end
   end
 
-  defp do_mount(source, target, fstype, flags, data) do
-    case Native.mount(source, target, fstype, flags, data, -1) do
+  defp do_mount(source, target, fstype, flags, data, ns_path) do
+    case Native.mount(source, target, fstype, flags, data, ns_path) do
       :ok -> :ok
-      {:error, posix} when is_atom(posix) ->
-        {:error, Error.from_posix(posix, target, :mount)}
-      {:error, code} when is_integer(code) ->
-        # Unmapped errno -- the atom field carries an `:unknown`
-        # marker; the integer is preserved in `:code`. This is rare
-        # (only odd Linux variants), but it keeps the Error shape
-        # consistent.
-        {:error, %Error{path: target, operation: :mount, errno: :unknown, code: code}}
+      {:error, {stage, errno}} -> {:error, build_error(stage, errno, target, ns_path)}
     end
   end
 
-  defp do_umount(target, flags) do
-    case Native.umount(target, flags, -1) do
+  defp do_umount(target, flags, ns_path) do
+    case Native.umount(target, flags, ns_path) do
       :ok -> :ok
-      {:error, posix} when is_atom(posix) ->
-        {:error, Error.from_posix(posix, target, :umount)}
-      {:error, code} when is_integer(code) ->
-        {:error, %Error{path: target, operation: :umount, errno: :unknown, code: code}}
+      {:error, {stage, errno}} -> {:error, build_error(stage, errno, target, ns_path)}
     end
   end
+
+  # Translates a NIF error into a %Linx.Mount.Error{}. The `path`
+  # field follows the failed step's natural subject:
+  #
+  #   - :mount / :umount / :pivot_root  -> target path
+  #   - :open_ns / :setns / :thread     -> ns_path (the namespace
+  #                                       acquisition that failed)
+  defp build_error(stage, errno, target, _ns_path)
+       when stage in [:mount, :umount, :pivot_root] do
+    do_build_error(stage, errno, target)
+  end
+
+  defp build_error(stage, errno, _target, ns_path)
+       when stage in [:open_ns, :unshare, :setns, :thread] do
+    do_build_error(stage, errno, ns_path)
+  end
+
+  defp do_build_error(stage, errno, path) when is_atom(errno) do
+    Error.from_posix(errno, path, stage)
+  end
+
+  defp do_build_error(stage, code, path) when is_integer(code) do
+    %Error{path: path, operation: stage, errno: :unknown, code: code}
+  end
+
+  # Resolves the :in option to an ns_path binary the NIF
+  # understands. `:self` (default) returns "" (BEAM namespace);
+  # {:pid, n} resolves to /proc/<n>/ns/mnt; {:path, p} passes p
+  # through.
+  defp resolve_in(:self), do: {:ok, ""}
+
+  defp resolve_in({:pid, n}) when is_integer(n) and n > 0,
+    do: {:ok, "/proc/#{n}/ns/mnt"}
+
+  defp resolve_in({:path, p}) when is_binary(p), do: {:ok, p}
+
+  defp resolve_in(other), do: {:error, {:bad_in, other}}
 
   # Folds a list of flag atoms into the OR'd integer the kernel
   # expects. An unknown atom returns {:error, {:bad_flag, atom}} so
@@ -407,10 +453,10 @@ defmodule Linx.Mount do
   Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
   """
   @spec bind(String.t(), String.t(), keyword()) ::
-          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
   def bind(source, target, opts \\ []) when is_binary(source) and is_binary(target) do
     flags = [:bind | List.wrap(opts[:flags] || [])]
-    mount(source, target, "", flags: flags, data: opts[:data] || "")
+    mount(source, target, "", forward_opts(opts, flags: flags))
   end
 
   @doc """
@@ -438,10 +484,10 @@ defmodule Linx.Mount do
   Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
   """
   @spec remount(String.t(), keyword()) ::
-          :ok | {:error, Error.t() | {:bad_flag, atom()}}
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
   def remount(target, opts \\ []) when is_binary(target) do
     flags = [:remount | List.wrap(opts[:flags] || [])]
-    mount("", target, "", flags: flags, data: opts[:data] || "")
+    mount("", target, "", forward_opts(opts, flags: flags))
   end
 
   @doc """
@@ -460,10 +506,19 @@ defmodule Linx.Mount do
   unshared propagation on both ends), `:enoent` (target's parent
   doesn't exist).
   """
-  @spec move(String.t(), String.t()) ::
-          :ok | {:error, Error.t() | {:bad_flag, atom()}}
-  def move(source, target) when is_binary(source) and is_binary(target) do
-    mount(source, target, "", flags: [:move])
+  @spec move(String.t(), String.t(), keyword()) ::
+          :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
+  def move(source, target, opts \\ []) when is_binary(source) and is_binary(target) do
+    mount(source, target, "", forward_opts(opts, flags: [:move]))
+  end
+
+  # Merges caller-supplied opts (data, in) with the verb-supplied
+  # flags. The verb owns `:flags`; the caller may pass `:data` and
+  # `:in`. Any other key is silently ignored (forward-compat).
+  defp forward_opts(opts, base) do
+    base
+    |> Keyword.put_new(:data, opts[:data] || "")
+    |> Keyword.put_new(:in, opts[:in] || :self)
   end
 
   @doc """

@@ -187,6 +187,203 @@ defmodule Linx.MountTest do
     end
   end
 
+  describe ":in option validation (plain)" do
+    test "an invalid :in value returns {:error, {:bad_in, _}}" do
+      assert {:error, {:bad_in, :nope}} =
+               Mount.mount("none", "/mnt", "tmpfs", in: :nope)
+    end
+
+    test "{:pid, n} for a non-existent pid returns an :open_ns error" do
+      # No such pid -> /proc/<n>/ns/mnt doesn't exist.
+      assert {:error, %Error{operation: :open_ns, errno: :enoent, path: path}} =
+               Mount.mount("none", "/mnt", "tmpfs", in: {:pid, 2_147_483_640})
+
+      assert path == "/proc/2147483640/ns/mnt"
+    end
+
+    test "{:path, p} pointing at a missing file returns :open_ns" do
+      assert {:error, %Error{operation: :open_ns, errno: :enoent, path: "/nope/ns/mnt"}} =
+               Mount.mount("none", "/mnt", "tmpfs", in: {:path, "/nope/ns/mnt"})
+    end
+
+    test "umount/2 :in is validated the same way" do
+      assert {:error, {:bad_in, :wrong}} = Mount.umount("/mnt", in: :wrong)
+
+      assert {:error, %Error{operation: :open_ns}} =
+               Mount.umount("/mnt", in: {:pid, 2_147_483_640})
+    end
+
+    test "bind/3 forwards :in cleanly to mount/4" do
+      assert {:error, %Error{operation: :open_ns}} =
+               Mount.bind("/a", "/b", in: {:pid, 2_147_483_640})
+    end
+
+    test "remount/2 forwards :in cleanly to mount/4" do
+      assert {:error, %Error{operation: :open_ns}} =
+               Mount.remount("/mnt", in: {:pid, 2_147_483_640})
+    end
+
+    test "move/3 forwards :in cleanly to mount/4" do
+      assert {:error, %Error{operation: :open_ns}} =
+               Mount.move("/a", "/b", in: {:pid, 2_147_483_640})
+    end
+  end
+
+  describe "M3 integration: cross-namespace via :in" do
+    @describetag :integration
+
+    test "remount /proc inside a child's fresh mount namespace at the checkpoint" do
+      # Spawn a workload in a fresh :mount namespace. The kernel
+      # gives the child a copy of the host's mount table at spawn
+      # time -- /proc inside still maps to the host's /proc.
+      # Mounting a fresh proc on top from the host gives the
+      # workload its own /proc; mountinfo then shows BOTH (the
+      # inherited one shadowed by the new one).
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "5"],
+          namespaces: [:mount]
+        )
+
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+
+      # Snapshot the mount_ids of any /proc entries in the child
+      # before we mount.
+      {:ok, before} = Mount.list({:pid, host_pid})
+      ids_before = before |> Enum.filter(&(&1.mount_point == "/proc")) |> Enum.map(& &1.mount_id)
+      assert length(ids_before) >= 1
+
+      # Mount a fresh proc on top inside the child's mount namespace.
+      assert :ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+
+      # After: there's a /proc mount with an id we didn't see
+      # before. The original inherited /proc is still listed too
+      # (Linux retains shadowed mounts in mountinfo).
+      {:ok, after_mounts} = Mount.list({:pid, host_pid})
+      ids_after = after_mounts |> Enum.filter(&(&1.mount_point == "/proc")) |> Enum.map(& &1.mount_id)
+      new_ids = ids_after -- ids_before
+      assert length(new_ids) >= 1
+
+      # The freshly-added mount has fstype "proc" and source "proc"
+      # (the args we passed).
+      new_entry = Enum.find(after_mounts, &(&1.mount_id in new_ids))
+      assert %Entry{fstype: "proc", source: "proc", mount_point: "/proc"} = new_entry
+
+      # Proceed and let the workload exit naturally.
+      :ok = Linx.Process.proceed(c)
+      assert_receive {:linx_process, :running}, 2_000
+      assert_receive {:linx_process, :exited, _}, 10_000
+    end
+
+    test "mounting into a running container post-proceed (lifecycle-agnostic)" do
+      # Demonstrates that :in works against any live process whose
+      # namespace files exist -- not just at the checkpoint. Spawn,
+      # proceed, *then* mount inside, then watch the mount appear
+      # in the live container's mountinfo.
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "10"],
+          namespaces: [:mount]
+        )
+
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+      :ok = Linx.Process.proceed(c)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # Now the workload is running. Bind /tmp into it at /mnt-hot.
+      # Create the target directory in the container's view by
+      # binding from the host's /tmp first; we need the host's
+      # /mnt-hot to be writable through the bind. Simpler: mount a
+      # fresh tmpfs at a path that already exists in the
+      # container's namespace.
+      assert :ok = Mount.mount("none", "/mnt", "tmpfs", in: {:pid, host_pid})
+
+      {:ok, ct_mounts} = Mount.list({:pid, host_pid})
+      assert Enum.any?(ct_mounts, fn e ->
+               e.mount_point == "/mnt" and e.fstype == "tmpfs"
+             end)
+
+      # The host's view -- mounting inside the container does NOT
+      # affect the host's mount table.
+      {:ok, host_mounts} = Mount.list()
+      host_mnt = Enum.find(host_mounts, &(&1.mount_point == "/mnt"))
+      # If /mnt happens to exist in the host's mount table, it
+      # should be a different mount (different mount_id) than what
+      # we just created in the container.
+      if host_mnt do
+        refute Enum.any?(ct_mounts, fn e ->
+                 e.mount_point == "/mnt" and e.mount_id == host_mnt.mount_id
+               end)
+      end
+
+      Linx.Process.signal(c, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test ":in: {:path, p} with an explicit namespace path works the same" do
+      # Equivalent to {:pid, n} but the caller constructs the path
+      # themselves -- useful for ns files held elsewhere (mount
+      # namespace fds in named-bind storage, etc.).
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "5"],
+          namespaces: [:mount]
+        )
+
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+      :ok = Linx.Process.proceed(c)
+      assert_receive {:linx_process, :running}, 2_000
+
+      ns_path = "/proc/#{host_pid}/ns/mnt"
+
+      assert :ok =
+               Mount.mount("none", "/mnt", "tmpfs", in: {:path, ns_path})
+
+      {:ok, ct_mounts} = Mount.list({:pid, host_pid})
+      assert Enum.any?(ct_mounts, &(&1.mount_point == "/mnt"))
+
+      Linx.Process.signal(c, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "umount/2 with :in unmounts inside the container's namespace" do
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "5"],
+          namespaces: [:mount]
+        )
+
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+      :ok = Linx.Process.proceed(c)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # Snapshot /mnt entries before, so we can identify our
+      # newly-added one by mount_id (the host may already have
+      # /mnt mounted; some distros do).
+      {:ok, before} = Mount.list({:pid, host_pid})
+      mnt_ids_before = before |> Enum.filter(&(&1.mount_point == "/mnt")) |> Enum.map(& &1.mount_id)
+
+      assert :ok = Mount.mount("none", "/mnt", "tmpfs", in: {:pid, host_pid})
+
+      {:ok, with_mnt} = Mount.list({:pid, host_pid})
+      mnt_ids_during = with_mnt |> Enum.filter(&(&1.mount_point == "/mnt")) |> Enum.map(& &1.mount_id)
+      [our_id] = mnt_ids_during -- mnt_ids_before
+      # Sanity: our mount is the tmpfs we just made.
+      our = Enum.find(with_mnt, &(&1.mount_id == our_id))
+      assert %Entry{fstype: "tmpfs", mount_point: "/mnt"} = our
+
+      assert :ok = Mount.umount("/mnt", in: {:pid, host_pid})
+
+      # After umount: our specific mount_id is gone from the list.
+      # Other mounts at /mnt (if any) are unaffected.
+      {:ok, without_mnt} = Mount.list({:pid, host_pid})
+      refute Enum.any?(without_mnt, &(&1.mount_id == our_id))
+
+      Linx.Process.signal(c, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+  end
+
   describe "M2 convenience verbs -- plain shape" do
     # Without root we can't do real binds; verify the plumbing
     # surfaces the structured error from mount/4 through cleanly.
@@ -395,8 +592,10 @@ defmodule Linx.MountTest do
     test "version/0 reflects the running milestone" do
       v = Mount.Native.version() |> List.to_string()
       assert String.starts_with?(v, "linx_mount ")
-      # M1 marker; bumped when the NIF changes shape.
-      assert String.ends_with?(v, "(M1)")
+      # M3 marker; bumped when the NIF changes shape (M1 → M3 added
+      # the cross-namespace setns dance and the {stage, errno}
+      # error shape).
+      assert String.ends_with?(v, "(M3)")
     end
   end
 

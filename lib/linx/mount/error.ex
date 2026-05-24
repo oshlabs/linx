@@ -8,8 +8,21 @@ defmodule Linx.Mount.Error do
     * `:path` — the absolute filesystem path the operation targeted
       (the `target` argument of `mount/4`, the `target` of `umount/2`,
       etc.).
-    * `:operation` — what we were trying to do, as an atom
-      (`:mount`, `:umount`, `:pivot_root`).
+    * `:operation` — what we were trying to do, as an atom:
+      * `:mount`, `:umount`, `:pivot_root` — the target syscall
+        itself failed.
+      * `:open_ns` — couldn't open the target namespace file
+        (target process is gone, BEAM lacks read access).
+      * `:unshare` — couldn't detach the worker thread's
+        `fs_struct` from the BEAM's. Prerequisite for `setns` on
+        a mount namespace; extremely unlikely to fail.
+      * `:setns` — couldn't enter the target namespace (lacks
+        `CAP_SYS_ADMIN` in the right user namespace).
+      * `:thread` — couldn't create the worker thread that does
+        the cross-namespace dance. Rare; typically `EAGAIN` from
+        thread-creation pressure.
+      The last three only appear when a cross-namespace `:in`
+      option was used.
     * `:errno` — the POSIX errno as an atom (`:enoent`, `:eacces`,
       `:ebusy`, `:einval`, `:eperm`, …).
     * `:code` — the matching positive errno integer, or `nil` if we
@@ -34,7 +47,14 @@ defmodule Linx.Mount.Error do
   @enforce_keys [:path, :operation, :errno]
   defexception [:path, :operation, :errno, :code]
 
-  @type operation :: :mount | :umount | :pivot_root
+  @type operation ::
+          :mount
+          | :umount
+          | :pivot_root
+          | :open_ns
+          | :unshare
+          | :setns
+          | :thread
 
   @type t :: %__MODULE__{
           path: Path.t(),
