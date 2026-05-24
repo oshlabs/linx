@@ -2,7 +2,7 @@
 
 **Linux kernel interfaces for Elixir.**
 
-A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
+A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits, filesystem mounts — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
 
 Linx is a library of **primitives**, not a runtime. A container engine, a network orchestrator, or an observability tool is a *consumer* of Linx; the runtime concepts (images, supervision policies, request routing) live in those projects.
 
@@ -64,9 +64,34 @@ iex(4)>
 A few things worth noticing in that session:
 
 - **Rootless.** No `sudo` to start iex. The `:user` namespace gives the BEAM ephemeral privilege inside the new user ns, which is what makes the other namespaces creatable — and inside, we're an unprivileged `nobody`.
-- **`ps` shows host processes.** The `:mount` namespace is fresh, but `/proc` hasn't been remounted inside it, so `ps` reads the host's `/proc` and sees host PIDs. `Linx.Mount` (next subsystem on the roadmap) is what will make a clean `/proc` view possible.
+- **`ps` shows host processes.** The `:mount` namespace is fresh, but `/proc` hasn't been remounted inside it, so `ps` reads the host's `/proc` and sees host PIDs. Fixable in one line with `Linx.Mount` — see "Going further: give the container its own `/proc`" below.
 - **`exit` returns to iex with `{:ok, {:exited, 0}}`.** The session's exit code propagates back as a plain Elixir return value, after `attach/2` restores the local terminal.
 - **No explicit `receive` for the lifecycle events.** The session emits `{:linx_process, :ready, _}` and `:running` into the iex evaluator's mailbox in the background; `attach/2`'s pump only matches on the messages it cares about, so the lifecycle events are just left there for a later `flush()` if you want to look. If you need the host pid (e.g. to configure the child's netns from the outside), `receive` for `:ready` before `proceed/1` — see the next example.
+
+### Going further: give the container its own `/proc`
+
+The caveat from the transcript above — `ps` showing host PIDs even though the child is in a fresh `:mount` namespace — is just the inherited mount table doing its job. Remount `/proc` inside the child's namespace at the checkpoint and `ps` sees only what lives inside:
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Mount
+
+iex> {:ok, c} =
+...>   P.spawn(
+...>     argv: ["/bin/bash"],
+...>     namespaces: [:mount, :pid, :uts, :ipc, :user],
+...>     stdio: :pty
+...>   )
+iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+
+# Mount a fresh /proc inside the child's mount namespace.
+iex> :ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+
+iex> P.proceed(c)
+iex> Linx.Tty.attach(:controlling, c)
+```
+
+Now `ps` inside the attached bash shows only the workload's own processes (PID 1 = bash, plus whatever it spawns). The `:in` option works the same way for `umount/2`, `bind/3`, `remount/2`, `move/2`, and `pivot_root/3` — they all operate on the target namespace via the kernel's setns mechanism.
 
 ### Going further: configure the container's network before bash starts
 
@@ -158,9 +183,10 @@ Every `spawn` returns a session — a GenServer pid that owns the child. The ses
 - `{:linx_process, :running}` — child has `execve`'d
 - `{:linx_process, :exited, code}` — workload exited normally
 - `{:linx_process, :signaled, signum}` — workload was killed by a signal
+- `{:linx_process, :aborted}` — `abort/1` was called from the checkpoint; the workload never ran
 - `{:linx_process, :error, errno, stage}` — pre-exec failure (e.g. `ENOENT` from `:execve`)
 
-The **checkpoint** is what makes the host/child cooperation work: the child blocks between `clone()` and `execve()` so the host side can move netlink interfaces in, write cgroup state, mount things, whatever — *then* `proceed/1` lets the workload exec.
+The **checkpoint** is what makes the host/child cooperation work: the child blocks between `clone()` and `execve()` so the host side can move netlink interfaces in, write cgroup state, mount things, whatever — *then* `proceed/1` lets the workload exec. (Or `abort/1` discards it without execve'ing, for setup-time rollback or test scenarios that just want to verify checkpoint-time setup.)
 
 ```elixir
 iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "30"], namespaces: [:net])
@@ -303,6 +329,44 @@ iex> case Linx.Cgroup.destroy(cg) do
 
 More in [`docs/cgroup/EXAMPLES.md`](docs/cgroup/EXAMPLES.md).
 
+### `Linx.Mount` — filesystem mounts
+
+`mount(2)`, `umount2(2)`, `pivot_root(2)`, and a pure-Elixir parser for `/proc/<pid>/mountinfo`. Plus convenience verbs for the most common shapes — `bind/3`, `remount/2`, `move/3` — and a cross-namespace `:in` option that operates on any process's mount namespace, not just the BEAM's.
+
+```elixir
+iex> alias Linx.Mount
+
+# Read the mount table as %Linx.Mount.Entry{} structs.
+iex> {:ok, mounts} = Mount.list()
+iex> Enum.find(mounts, & &1.mount_point == "/")
+#Linx.Mount.Entry<ext4 on / (rw,relatime)>
+
+# Mount, bind, remount, move, umount -- all with optional flags.
+iex> :ok = Mount.mount("none", "/mnt/scratch", "tmpfs", flags: [:nosuid, :nodev])
+iex> :ok = Mount.bind("/data/cache", "/mnt/scratch/cache")
+iex> :ok = Mount.remount("/mnt/scratch", flags: [:bind, :ro])
+iex> :ok = Mount.umount("/mnt/scratch", flags: [:detach])
+```
+
+**Full flag catalog** — 21 mount flag atoms (`:ro`, `:nosuid`, `:nodev`, `:noexec`, `:bind`, `:rec`, propagation atoms `:private` / `:shared` / `:slave` / `:unbindable`, `:relatime` / `:strictatime` / `:lazytime`, …) and 4 umount flag atoms (`:force`, `:detach`, `:expire`, `:no_follow`), mapped to the kernel's `MS_*` / `MNT_*` / `UMOUNT_*` constants.
+
+**Cross-namespace via `:in`.** Each mutating verb takes `:in :: :self | {:pid, n} | {:path, p}`. Works whether the target is parked at a `Linx.Process` checkpoint or a fully running container — the kernel's setns is lifecycle-agnostic.
+
+```elixir
+# Hot-mount a volume into a running container, no restart needed.
+iex> :ok = Mount.bind("/data/cache", "/cache", in: {:pid, container_pid})
+
+# Or pivot a rootfs at checkpoint, before the workload runs.
+iex> :ok = Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
+iex> :ok = Mount.pivot_root(rootfs, Path.join(rootfs, "old_root"), in: {:pid, host_pid})
+```
+
+The NIF wraps each cross-namespace call with the standard `unshare(CLONE_FS)` + `setns(CLONE_NEWNS)` dance on a throwaway pthread — the BEAM's scheduler threads never enter the target namespace.
+
+**Errors as structs** — `%Linx.Mount.Error{path, operation, errno, code}` with `:operation` distinguishing real-syscall failures (`:mount` / `:umount` / `:pivot_root`) from namespace-acquisition failures (`:open_ns` / `:unshare` / `:setns` / `:thread` / `:chdir`).
+
+More in [`docs/mount/EXAMPLES.md`](docs/mount/EXAMPLES.md).
+
 ### `Linx.Netlink` — netlink sockets, rtnetlink
 
 An `AF_NETLINK` client with the rtnetlink family fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
@@ -364,7 +428,7 @@ Three kinds of top-level module, named for what they organize:
 | Kind | When | Examples |
 |---|---|---|
 | **Mechanism layer** | A coherent transport with shared infrastructure (codec, framing, error handling, …). | `Linx.Netlink` |
-| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup` |
+| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup`, `Linx.Mount` |
 | **Value type** | A domain primitive that flows through the mechanisms. Top level. | `Linx.IP`, `Linx.MAC` |
 
 Naming rule of thumb: name a module after a mechanism only when the mechanism has shared shape worth factoring out. Otherwise name it after the kernel subsystem or concept. `Namespace` isn't a subsystem — it's a cross-cutting flag on `clone(2)` — so it doesn't get its own module; the *operations* live where they belong.
@@ -373,9 +437,10 @@ Each subsystem owns its docs under `docs/<subsystem>/` — `EXAMPLES.md` (iex-st
 
 ## What's next
 
-- **`Linx.Mount`** — `mount(2)`, `pivot_root`, `open_tree`, `mount_setattr`. The piece between cloning a `:mount` namespace and having a useful container rootfs — including the fresh `/proc` that would fix the "ps shows host processes" observation in the headline transcript.
 - **Within `Linx.Netlink`** — a `Connection` GenServer for concurrent in-flight requests; a `Monitor` for multicast event subscription (the `ip monitor` equivalent); the `NETLINK_GENERIC` family and its subsystems (WireGuard, ethtool, …); more link kinds (`bond`, `vxlan`, `tun`/`tap`).
 - **Within `Linx.Cgroup`** — typed setters for less-common controllers (`io.max`, `cpuset.cpus`, `memory.swap.max`), event monitoring (`memory.events`, OOM notifications), `cgroup.kill` for atomic teardown.
+- **Within `Linx.Mount`** — the new mount API (`fsopen` / `fsmount` / `open_tree` / `move_mount` / `mount_setattr`); typed parsing of `mount_options` / `super_options`; `cgroup.kill`-style atomic-unmount-by-mount-id.
+- **New subsystems on the horizon** — `Linx.Seccomp` (syscall filtering), `Linx.Capabilities` (`capset(2)` / file caps), a first hex release pulling the existing five subsystems together.
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.
 
