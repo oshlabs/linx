@@ -55,12 +55,13 @@ defmodule Linx.Cgroup do
 
   ## Status
 
-  C0–C3 shipped: `supported?/0`, `create/1`, `destroy/1`,
-  `add_process/2`, `read/2`, `write/3`, `freeze/1`, `thaw/1`,
-  `set_memory_max/2`, `set_pids_max/2`, `set_cpu_max/2`, `stats/1`,
-  plus the `Linx.Cgroup.Error` and `Linx.Cgroup.Stats` shapes.
-  Controller delegation lands in C4. See `docs/cgroup/PLAN.md` for
-  the roadmap.
+  All foundation milestones shipped (C0–C4): `supported?/0`,
+  `create/1`, `destroy/1`, `add_process/2`, `read/2`, `write/3`,
+  `freeze/1`, `thaw/1`, `set_memory_max/2`, `set_pids_max/2`,
+  `set_cpu_max/2`, `stats/1`, `enable_controllers/2`, plus the
+  `Linx.Cgroup.Error` and `Linx.Cgroup.Stats` shapes. See
+  `docs/cgroup/PLAN.md` for what was built and `COVERAGE.md` for
+  what's deferred.
   """
 
   alias Linx.Cgroup.{Error, Stats}
@@ -263,14 +264,54 @@ defmodule Linx.Cgroup do
       do: write_at(cg, "cpu.max", "#{quota} #{period}", :write)
 
   @doc """
-  Enables controllers (e.g. `[:memory, :pids, :cpu]`) on `cg` by
-  writing `"+memory +pids +cpu"` to `<cg>/cgroup.subtree_control`.
+  Enables controllers on `cg` so its children can use them.
 
-  Lands in C4.
+  Each controller in `controllers` is written individually as
+  `"+<name>"` to `<cg>/cgroup.subtree_control`. Writing
+  controllers one at a time means a single rejected name doesn't
+  lose the controllers that *did* take — the partial state is
+  surfaced to the caller for them to act on.
+
+  Returns:
+
+    * `:ok` — every controller in the list was accepted (or the
+      list was empty).
+    * `{:partial, failures}` — one or more controllers were
+      rejected. `failures` is a non-empty list of
+      `{controller_atom, %Linx.Cgroup.Error{}}` tuples for the
+      ones that failed. Controllers not in the list are not
+      touched. Common failures: the controller is not available
+      in `<cg>/cgroup.controllers` (not delegated from the parent
+      → `EINVAL` / `ENOENT`), or the kernel doesn't recognize the
+      name.
+
+  Accepts standard cgroup v2 controller atoms: `:cpu`, `:cpuset`,
+  `:io`, `:memory`, `:pids`, `:rdma`, `:hugetlb`, `:misc`. The
+  atom is rendered with `to_string/1` so any new controller a
+  future kernel adds is reachable without code changes here.
+
+  ## Why one-at-a-time
+
+  The kernel rejects the *whole* write if any controller in a
+  space-separated `"+a +b +c"` blob is invalid. Writing one at a
+  time lets us tell the caller exactly which controllers landed
+  and which didn't, instead of all-or-nothing.
   """
   @spec enable_controllers(cgroup(), [atom()]) ::
-          :ok | {:partial, list()} | {:error, term()}
-  def enable_controllers(_cg, _controllers), do: {:error, :not_yet_implemented}
+          :ok | {:partial, [{atom(), Error.t()}]}
+  def enable_controllers(cg, controllers)
+      when is_binary(cg) and is_list(controllers) do
+    failures =
+      for name <- controllers,
+          {:error, %Error{} = err} <-
+            [write_at(cg, "cgroup.subtree_control", "+#{name}", :write)],
+          do: {name, err}
+
+    case failures do
+      [] -> :ok
+      _ -> {:partial, failures}
+    end
+  end
 
   @doc """
   Reads a curated snapshot of `cg`'s resource counters as a

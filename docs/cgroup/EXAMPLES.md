@@ -7,10 +7,10 @@ that *changes* the cgroup hierarchy — `create/1`, `add_process/2`,
 `write/3`, `destroy/1` — needs root. Start with `./sudorun.sh iex
 -S mix`.
 
-> 🚧 **Partial.** C1 (lifecycle, raw I/O, errors), C2 (freeze /
-> thaw + typed limits), and C3 (stats) ship now. Controller
-> delegation (C4) lands in a follow-up. See `PLAN.md` for the
-> roadmap.
+> ✅ **All foundation milestones shipped (C0–C4).** Lifecycle, raw
+> I/O, errors, freeze/thaw, typed limits, stats, and controller
+> delegation are all in. See `PLAN.md` for what was built and
+> `COVERAGE.md` for what's deferred.
 
 ## Detecting cgroup v2
 
@@ -321,4 +321,73 @@ iex> Linx.Cgroup.stats("/sys/fs/cgroup/nope")
  }}
 ```
 
-## (more examples will land with C4)
+## Enabling controllers (delegation)
+
+The `memory`, `pids`, and `cpu` controllers (and the rest of cgroup
+v2's catalog) only become available on a *child* cgroup when the
+parent has them in its `cgroup.subtree_control`. `enable_controllers/2`
+is the shorthand for setting that up.
+
+```elixir
+iex> alias Linx.Cgroup
+iex> {:ok, parent} = Cgroup.create("/sys/fs/cgroup/myorg")
+iex> :ok = Cgroup.enable_controllers(parent, [:memory, :pids, :cpu])
+
+iex> {:ok, child} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+iex> :ok = Cgroup.set_memory_max(child, 256 * 1024 * 1024)
+```
+
+Each controller is written individually as `"+<name>"` so a
+rejected entry doesn't lose the ones that already landed:
+
+```elixir
+iex> Cgroup.enable_controllers(parent, [:memory, :nosuch_controller])
+{:partial,
+ [
+   {:nosuch_controller,
+    %Linx.Cgroup.Error{
+      operation: :write,
+      path: "/sys/fs/cgroup/myorg/cgroup.subtree_control",
+      errno: :einval,
+      code: 22
+    }}
+ ]}
+
+# :memory still landed:
+iex> Cgroup.read(parent, "cgroup.subtree_control")
+{:ok, "memory"}
+```
+
+The partial-failure shape — `{:partial, [{name, %Error{}}, …]}` —
+is always returned as a *non-empty* list of the ones that failed.
+The complement (succeeded) is implicit: anything in the input list
+not named in `failures` was accepted. Pattern-match on it:
+
+```elixir
+case Cgroup.enable_controllers(parent, requested) do
+  :ok ->
+    :all_enabled
+
+  {:partial, failures} ->
+    Logger.warning("cgroup: failed to enable #{inspect(failures)}")
+    :degraded
+end
+```
+
+`enable_controllers(cg, [])` is a no-op returning `:ok` — useful
+when the controllers list comes from configuration that might be
+empty.
+
+### What controllers are even available?
+
+A controller can only be enabled in `cgroup.subtree_control` if
+it's listed in `cgroup.controllers` (which inherits from
+the parent's `subtree_control` recursively). Read it to find out:
+
+```elixir
+iex> Cgroup.read(parent, "cgroup.controllers")
+{:ok, "cpuset cpu io memory hugetlb pids rdma misc dmem"}
+```
+
+If a controller you want isn't there, the kernel doesn't have it
+delegated this far down the tree — chase it up to the root.

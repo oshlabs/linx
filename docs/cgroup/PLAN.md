@@ -1,8 +1,13 @@
 # Linx.Cgroup — implementation plan
 
-> **Not yet shipped.** Work lives on branch `cgroup-foundations`.
-> Milestones C0–C4 land independently; each commits + pushes per the
-> Linx-wide "commit per milestone" rule.
+> ✅ **C0–C4 shipped** on branch `cgroup-foundations` — ready to
+> merge to `main`. The full surface is in: `supported?/0`,
+> `create/1`, `destroy/1`, `add_process/2`, `read/2`, `write/3`,
+> `freeze/1`, `thaw/1`, `set_memory_max/2`, `set_pids_max/2`,
+> `set_cpu_max/2`, `stats/1`, `enable_controllers/2`, plus the
+> `Linx.Cgroup.Error` and `Linx.Cgroup.Stats` value types.
+> `COVERAGE.md` is the canonical "what's in / what's deferred"
+> tracker.
 
 ## Goal
 

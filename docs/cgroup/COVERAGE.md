@@ -52,7 +52,7 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `enable_controllers/2` | ⬜ | C4 — `+memory +pids +cpu …` → `cgroup.subtree_control` |
+| `enable_controllers/2` | ✅ | C4 — `+memory +pids +cpu …` → `cgroup.subtree_control` (one write per controller; partial failures surfaced) |
 
 ## Composition with other subsystems
 

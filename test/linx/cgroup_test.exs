@@ -141,6 +141,28 @@ defmodule Linx.CgroupTest do
       assert errno in [:enoent, :eacces]
       assert path == @nope
     end
+
+    test "enable_controllers/2 with an empty list short-circuits to :ok" do
+      # No controllers to enable means no writes attempted, so this
+      # succeeds even against a path that doesn't exist.
+      assert :ok = Cgroup.enable_controllers(@nope, [])
+    end
+
+    test "enable_controllers/2 against a missing cgroup returns {:partial, all failures}" do
+      assert {:partial, failures} =
+               Cgroup.enable_controllers(@nope, [:memory, :pids])
+
+      # Every requested controller failed; each entry is
+      # {controller_atom, %Error{operation: :write}} pointing at the
+      # parent's subtree_control file.
+      assert length(failures) == 2
+
+      assert Enum.all?(failures, fn {name, err} ->
+               name in [:memory, :pids] and
+                 match?(%Error{operation: :write, path: p} when is_binary(p), err) and
+                 String.ends_with?(err.path, "cgroup.subtree_control")
+             end)
+    end
   end
 
   describe "parse_keyed/1 (cpu.stat parsing)" do
@@ -442,6 +464,49 @@ defmodule Linx.CgroupTest do
 
       # Restore -- move BEAM back to root cgroup before destroying.
       :ok = File.write("/sys/fs/cgroup/cgroup.procs", Integer.to_string(beam_pid))
+      assert :ok = Cgroup.destroy(path)
+    end
+  end
+
+  describe "C4 enable_controllers/2 integration" do
+    @moduletag :integration
+
+    setup do
+      path = "/sys/fs/cgroup/linx-test-#{System.unique_integer([:positive])}"
+      on_exit(fn -> _ = File.rmdir(path) end)
+
+      {:ok, ^path} = Cgroup.create(path)
+      {:ok, path: path}
+    end
+
+    test "enabling [:memory, :pids] makes them appear in subtree_control",
+         %{path: path} do
+      assert :ok = Cgroup.enable_controllers(path, [:memory, :pids])
+
+      {:ok, subtree} = Cgroup.read(path, "cgroup.subtree_control")
+      assert String.contains?(subtree, "memory")
+      assert String.contains?(subtree, "pids")
+
+      assert :ok = Cgroup.destroy(path)
+    end
+
+    test "an invalid controller surfaces in {:partial, [{name, %Error{}}]}",
+         %{path: path} do
+      # :memory will succeed; :nosuch_controller will be rejected by
+      # the kernel. The successful write isn't rolled back.
+      assert {:partial, [{:nosuch_controller, %Error{operation: :write}}]} =
+               Cgroup.enable_controllers(path, [:memory, :nosuch_controller])
+
+      # :memory landed despite the bogus sibling.
+      {:ok, subtree} = Cgroup.read(path, "cgroup.subtree_control")
+      assert String.contains?(subtree, "memory")
+
+      assert :ok = Cgroup.destroy(path)
+    end
+
+    test "empty list is a no-op", %{path: path} do
+      assert :ok = Cgroup.enable_controllers(path, [])
+      assert {:ok, _} = Cgroup.read(path, "cgroup.subtree_control")
       assert :ok = Cgroup.destroy(path)
     end
   end
