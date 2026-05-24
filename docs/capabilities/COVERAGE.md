@@ -16,16 +16,17 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `supported?/0` | ⬜ | K0 — true iff `/proc/self/status` has `CapBnd:` |
+| `supported?/0` | ✅ | K0 — true iff `/proc/self/status` has `CapBnd:` |
 
 ## Constants
 
 | Feature | Status | Notes |
 |---|---|---|
-| 41-entry atom ↔ bit table | ⬜ | K0 — kernel capabilities through `:cap_checkpoint_restore` (CAP_LAST_CAP = 40 on recent kernels) |
-| `to_bit/1`, `from_bit/1` | ⬜ | K0 — single-cap conversions |
-| `to_bits/1`, `from_bits/1` | ⬜ | K0 — MapSet ↔ u64 bitmask |
-| `all/0` | ⬜ | K0 — every known cap as a MapSet |
+| 41-entry atom ↔ bit table | ✅ | K0 — kernel capabilities through `:cap_checkpoint_restore` (CAP_LAST_CAP = 40 on kernels ≥ 5.8) |
+| `to_bit/1`, `from_bit/1` | ✅ | K0 — single-cap conversions; `from_bit/1` returns `:unknown` for bits past the table |
+| `to_bits/1`, `from_bits/1` | ✅ | K0 — MapSet ↔ u64 bitmask; `to_bits/1` raises on unknown atoms, `from_bits/1` silently drops unknown bits (forward-compat) |
+| `all/0` | ✅ | K0 — every known cap as a MapSet |
+| `last_cap/0` | ✅ | K0 — the kernel's `CAP_LAST_CAP` value (40) |
 
 ## Read side
 
@@ -56,7 +57,7 @@ A living doc — update as primitives ship. Status legend:
 
 | Module | Status | Notes |
 |---|---|---|
-| `Linx.Capabilities.State` | ⬜ | K0 — `%{effective, permitted, inheritable, bounding, ambient}` (MapSet-valued) |
+| `Linx.Capabilities.State` | ✅ | K0 — `%{effective, permitted, inheritable, bounding, ambient}` (MapSet-valued); compact Inspect rendering |
 | `Linx.Capabilities.Error` | ⬜ | K1 — POSIX-atom errno + path + operation |
 
 ## Error reporting

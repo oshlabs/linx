@@ -151,6 +151,10 @@ defmodule Linx.MixProject do
           Linx.User.Error,
           Linx.User.Map
         ],
+        Capabilities: [
+          Linx.Capabilities,
+          Linx.Capabilities.State
+        ],
         "Netlink core": [
           Linx.Netlink,
           Linx.Netlink.Socket,
