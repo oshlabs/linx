@@ -2,7 +2,7 @@
 
 **Linux kernel interfaces for Elixir.**
 
-A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
+A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
 
 Linx is a library of **primitives**, not a runtime. A container engine, a network orchestrator, or an observability tool is a *consumer* of Linx; the runtime concepts (images, supervision policies, request routing) live in those projects.
 
@@ -103,7 +103,36 @@ iex> P.proceed(c)
 iex> Tty.attach(:controlling, c)
 ```
 
-The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`. They compose because they share clean primitives, not because there's a framework holding them together.
+### Going further: cap resources before the workload runs
+
+The same checkpoint window is where `Linx.Cgroup` slots in. Create a cgroup, set limits, place the child's host pid, then proceed:
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Cgroup
+
+iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], namespaces: [:net, :pid])
+iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+
+# Build the cgroup and apply limits while the workload is parked.
+iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+iex> :ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)   # 256 MiB
+iex> :ok = Cgroup.set_pids_max(cg, 100)
+iex> :ok = Cgroup.set_cpu_max(cg, {50_000, 100_000})       # half a CPU
+iex> :ok = Cgroup.add_process(cg, host_pid)
+
+# Release -- the workload execs already constrained.
+iex> P.proceed(c)
+:ok
+
+# At any point you can read live counters as a struct:
+iex> Cgroup.stats(cg)
+{:ok, #Linx.Cgroup.Stats<cpu=0.4s mem=8MiB pids=3>}
+```
+
+`Linx.Process` itself has no awareness of cgroups; the checkpoint is the only coupling, exactly the way `Linx.Netlink` integration works. Limits are in force from the moment of `execve`.
+
+The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`, drop processes into cgroups whether or not they're Linx-spawned. They compose because they share clean primitives, not because there's a framework holding them together.
 
 ## Subsystems
 
@@ -225,6 +254,55 @@ iex> Tty.attach(:controlling, c)
 
 More in [`docs/tty/EXAMPLES.md`](docs/tty/EXAMPLES.md).
 
+### `Linx.Cgroup` — cgroup v2 primitives
+
+The kernel's resource-control surface, talking to `/sys/fs/cgroup` directly. Pure Elixir file I/O — no NIF, no Port, no `:os.cmd` to `cgcreate`. cgroupfs *is* the API.
+
+```elixir
+iex> alias Linx.Cgroup
+iex> Cgroup.supported?()
+true
+
+iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+iex> :ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
+iex> :ok = Cgroup.add_process(cg, host_pid)
+```
+
+The path is the handle — `create/1` returns `{:ok, path}` and every other verb takes a path. There's no opaque struct or GenServer wrapping a cgroup; cgroupfs already provides the identity. `create/1` is **idempotent** against EEXIST; `destroy/1` succeeds only when the cgroup is empty (the kernel enforces this with `EBUSY`).
+
+**Typed limit setters** for the common controllers:
+
+| Setter | Interface file | Accepted values |
+|---|---|---|
+| `set_memory_max/2` | `memory.max` | int (bytes), `:max` |
+| `set_pids_max/2` | `pids.max` | int (count), `:max` |
+| `set_cpu_max/2` | `cpu.max` | `{quota_us, period_us}`, `:max` |
+
+Plus `freeze/1` / `thaw/1` for `cgroup.freeze` (no controller delegation required — works on every cgroup), `enable_controllers/2` for setting up subtree delegation, and a raw `write/3` / `read/2` escape hatch for any interface file without a typed wrapper.
+
+**Counters as a struct** — `stats/1` returns a `%Linx.Cgroup.Stats{}` with a compact `Inspect`:
+
+```elixir
+iex> Linx.Cgroup.stats(cg)
+{:ok, #Linx.Cgroup.Stats<cpu=12.3s mem=42MiB pids=3>}
+```
+
+Each field is `nil` if its controller isn't delegated to the parent or the kernel is too old to expose it — so the struct works gracefully even on minimal setups.
+
+**Errors as structs** — `%Linx.Cgroup.Error{path, operation, errno, code}` everywhere, never raw `{:error, :enoent}` tuples. Pattern-match on `:errno` and `:operation` for specific failures; the `Exception` impl makes `raise` and `Exception.message/1` work.
+
+```elixir
+iex> case Linx.Cgroup.destroy(cg) do
+...>   :ok -> :destroyed
+...>   {:error, %Linx.Cgroup.Error{errno: :ebusy}} -> :still_has_processes
+...>   {:error, %Linx.Cgroup.Error{errno: :enoent}} -> :already_gone
+...> end
+```
+
+**Composition with `Linx.Process`** happens at the existing checkpoint between `:ready` and `proceed/1`, as in the headline example above. `Linx.Process` has zero awareness of cgroups; cgroupfs is enough.
+
+More in [`docs/cgroup/EXAMPLES.md`](docs/cgroup/EXAMPLES.md).
+
 ### `Linx.Netlink` — netlink sockets, rtnetlink
 
 An `AF_NETLINK` client with the rtnetlink family fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
@@ -286,7 +364,7 @@ Three kinds of top-level module, named for what they organize:
 | Kind | When | Examples |
 |---|---|---|
 | **Mechanism layer** | A coherent transport with shared infrastructure (codec, framing, error handling, …). | `Linx.Netlink` |
-| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty` |
+| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup` |
 | **Value type** | A domain primitive that flows through the mechanisms. Top level. | `Linx.IP`, `Linx.MAC` |
 
 Naming rule of thumb: name a module after a mechanism only when the mechanism has shared shape worth factoring out. Otherwise name it after the kernel subsystem or concept. `Namespace` isn't a subsystem — it's a cross-cutting flag on `clone(2)` — so it doesn't get its own module; the *operations* live where they belong.
@@ -295,9 +373,9 @@ Each subsystem owns its docs under `docs/<subsystem>/` — `EXAMPLES.md` (iex-st
 
 ## What's next
 
-- **`Linx.Mount`** — `mount(2)`, `pivot_root`, `open_tree`, `mount_setattr`. The piece between cloning a `:mount` namespace and having a useful container rootfs.
-- **`Linx.Cgroup`** — cgroup v2 controllers (`memory.max`, `pids.max`, `cpu.max`, freezer, …). Resource limits for spawned workloads.
+- **`Linx.Mount`** — `mount(2)`, `pivot_root`, `open_tree`, `mount_setattr`. The piece between cloning a `:mount` namespace and having a useful container rootfs — including the fresh `/proc` that would fix the "ps shows host processes" observation in the headline transcript.
 - **Within `Linx.Netlink`** — a `Connection` GenServer for concurrent in-flight requests; a `Monitor` for multicast event subscription (the `ip monitor` equivalent); the `NETLINK_GENERIC` family and its subsystems (WireGuard, ethtool, …); more link kinds (`bond`, `vxlan`, `tun`/`tap`).
+- **Within `Linx.Cgroup`** — typed setters for less-common controllers (`io.max`, `cpuset.cpus`, `memory.swap.max`), event monitoring (`memory.events`, OOM notifications), `cgroup.kill` for atomic teardown.
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.
 
