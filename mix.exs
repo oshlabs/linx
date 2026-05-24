@@ -167,6 +167,11 @@ defmodule Linx.MixProject do
           Linx.Capabilities.Error,
           Linx.Capabilities.State
         ],
+        Seccomp: [
+          Linx.Seccomp,
+          Linx.Seccomp.Builder,
+          Linx.Seccomp.Filter
+        ],
         "Netlink core": [
           Linx.Netlink,
           Linx.Netlink.Socket,

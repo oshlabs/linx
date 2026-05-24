@@ -16,33 +16,34 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `supported?/0` | ⬜ | S0 — true iff `/proc/self/status` has `Seccomp:` line |
-| `arch/0` | ⬜ | S0 — returns `:x86_64`, `:aarch64`, or `:unsupported` |
+| `supported?/0` | ✅ | S0 — true iff `/proc/self/status` has `Seccomp:` line |
+| `arch/0` | ✅ | S0 — returns `:x86_64`, `:aarch64`, or `:unsupported`; cached via `:persistent_term` |
 
 ## Syscall table
 
 | Feature | Status | Notes |
 |---|---|---|
-| Hand-curated ~150-syscall table per arch | ⬜ | S0 — see `PLAN.md` "Extending the syscall table" for the procedure |
-| x86_64 support | ⬜ | S0 |
-| aarch64 support | ⬜ | S0 |
-| `to_number/2`, `from_number/2` | ⬜ | S0 — atom ↔ number per arch; `:unknown` for unrecognised numbers (forward-compat) |
-| `all/1` | ⬜ | S0 — every known syscall for the given arch as a MapSet |
+| Hand-curated ~150-syscall table per arch | ✅ | S0 — see `PLAN.md` "Extending the syscall table" for the procedure |
+| x86_64 support | ✅ | S0 — 239 syscalls |
+| aarch64 support | ✅ | S0 — 214 syscalls (asm-generic table; no legacy unsuffixed verbs) |
+| `to_number/2`, `from_number/2` | ✅ | S0 — atom ↔ number per arch; `:unknown` for unrecognised numbers (forward-compat) |
+| `all/1` | ✅ | S0 — every known syscall for the given arch as a MapSet |
+| `known?/2` | ✅ | S0 — convenience predicate for caller-side validation |
 
 ## Constants
 
 | Feature | Status | Notes |
 |---|---|---|
-| BPF opcode primitives | ⬜ | S0 — `bpf_ld`, `bpf_ldx`, `bpf_jmp`, `bpf_ret`, `bpf_jeq`, … |
-| `SECCOMP_RET_*` action constants | ⬜ | S0 — `:allow`, `:errno`, `:kill_process`, `:kill_thread`, `:trap`, `:log` |
-| `action_to_u32/1`, `action_from_u32/1` | ⬜ | S0 — wire-format conversion |
-| `AUDIT_ARCH_*` constants | ⬜ | S0 — x86_64 and aarch64 |
+| BPF opcode primitives | ✅ | S0 — `bpf_ld`, `bpf_ldx`, `bpf_jmp`, `bpf_ret`, `bpf_jeq`, `bpf_jgt`, `bpf_jge`, `bpf_jset`, `bpf_ja`, `bpf_w`/`bpf_h`/`bpf_b`, `bpf_abs`/`bpf_imm`, `bpf_k`/`bpf_x`/`bpf_a` |
+| `SECCOMP_RET_*` action constants | ✅ | S0 — `:allow`, `:errno`, `:kill_process`, `:kill_thread`, `:trap`, `:log` |
+| `action_to_u32/1`, `action_from_u32/1` | ✅ | S0 — wire-format conversion; small POSIX errno table for `:errno` data |
+| `AUDIT_ARCH_*` constants | ✅ | S0 — x86_64 (0xC000003E) and aarch64 (0xC00000B7); `audit_arch/1` helper |
 
 ## Value types
 
 | Module | Status | Notes |
 |---|---|---|
-| `Linx.Seccomp.Filter` | ⬜ | S0 — `%{arch, bpf, rules, summary}`; compact Inspect |
+| `Linx.Seccomp.Filter` | ✅ | S0 — `%{arch, bpf, rules, summary}`; compact Inspect |
 | `Linx.Seccomp.Error` | ⬜ | S1 — `%{operation, errno, code}`; Exception impl |
 
 ## BPF compilation (the risky milestone)
