@@ -212,8 +212,10 @@ static int write_exact(int fd, const void *buf, size_t count)
 }
 
 /* Write one {:packet, 4} frame (4-byte big-endian length + body) to `fd`.
- * Used both for talking to BEAM on CTL_OUT and for the parent-to-child
- * checkpoint command stream on p2c (K2 capability commands). */
+ * Used on all three internal channels that carry ei frames:
+ *   - CTL_OUT (agent -> BEAM): status/error events via emit_*
+ *   - p2c (parent -> child): :proceed sentinel + K2 cap commands
+ *   - c2p (child -> parent): {:ready, _} and {:error, _, _} */
 static int write_frame_fd(int fd, const void *buf, uint32_t len)
 {
 	uint8_t hdr[4] = {
@@ -231,8 +233,11 @@ static int write_frame(const void *buf, uint32_t len)
 }
 
 /* Read one {:packet, 4} frame from `fd` into `buf`. Returns the message
- * length, or -1 on error/EOF. Used both for reading BEAM commands on
- * CTL_IN and for the child-side read of checkpoint commands on p2c. */
+ * length, or -1 on error/EOF (errno == 0 on EOF, per read_exact). Used
+ * on all three internal channels that carry ei frames:
+ *   - CTL_IN (BEAM -> agent): request and post-:running commands
+ *   - p2c (parent -> child, read in the child): :proceed + cap commands
+ *   - c2p (child -> parent, read in the agent): :ready / :error frames */
 static ssize_t read_frame_fd(int fd, uint8_t *buf, size_t cap)
 {
 	uint8_t hdr[4];
@@ -1291,8 +1296,9 @@ struct post_running_cmd {
 };
 
 /* Decode one {:packet, 4} ETF frame from the BEAM (post-:running):
- *   {:signal, n}      -- forward to the workload
- *   {:pty_in, binary} -- write to the PTY master (PTY mode only)
+ *   {:signal, n}                   -- forward to the workload
+ *   {:pty_in, binary}              -- write to the PTY master (PTY mode)
+ *   {:pty_winsize, {r, c, xp, yp}} -- TIOCSWINSZ on the PTY master
  *
  * Returns 0 on success (cmd filled), -1 on parse failure (cmd untouched),
  * -2 on EOF/IO error so the caller can distinguish "BEAM went away". */
@@ -1387,11 +1393,14 @@ static void emit_pty_out(const uint8_t *bytes, size_t n)
 	emit_buff(&x);
 }
 
-/* The post-exec supervise loop: forward {:signal, n} from the BEAM to
- * the workload, reap the workload via SIGCHLD-on-signalfd, and (in PTY
- * mode) shuttle bytes between the BEAM and the PTY master fd. Emits the
- * terminal event ({:status, :exited, _} or {:status, :signaled, _}) and
- * returns when the child is gone.
+/* The post-exec supervise loop. Dispatches three kinds of BEAM commands
+ * on CTL_IN -- {:signal, n} (forward to the workload), {:pty_in, binary}
+ * (write to the PTY master, PTY mode only), and {:pty_winsize, {r, c,
+ * xp, yp}} (TIOCSWINSZ on the master) -- reaps the workload via
+ * SIGCHLD-on-signalfd, and (in PTY mode) forwards bytes the workload
+ * writes to its terminal as {:pty_out, binary} on fd 4. Emits the
+ * terminal event ({:status, :exited, _} or {:status, :signaled, _})
+ * and returns when the child is gone.
  *
  * SIGCHLD is captured via signalfd (set up in main, blocked from normal
  * delivery in the agent's signal mask); the child unblocks SIGCHLD again
@@ -1417,10 +1426,10 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 			return;
 		}
 
-		/* BEAM command on fd 3: {:signal, n} or {:pty_in, bytes}.
-		 * A POLLHUP on fd 3 means the BEAM disappeared -- keep
-		 * going so the child finishes naturally, but stop polling
-		 * that side. */
+		/* BEAM command on fd 3: {:signal, n}, {:pty_in, bytes},
+		 * or {:pty_winsize, {r, c, xp, yp}}. A POLLHUP on fd 3
+		 * means the BEAM disappeared -- keep going so the child
+		 * finishes naturally, but stop polling that side. */
 		if (pfds[0].revents & POLLIN) {
 			struct post_running_cmd cmd = { 0 };
 			int r = read_post_running_command(&cmd);
