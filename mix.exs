@@ -127,7 +127,8 @@ defmodule Linx.MixProject do
           Linx.MAC
         ],
         Process: [
-          Linx.Process
+          Linx.Process,
+          Linx.Process.Info
         ],
         Tty: [
           Linx.Tty,
