@@ -238,11 +238,11 @@ defmodule Linx.MountTest do
       assert_receive {:linx_process, :ready, host_pid}, 2_000
 
       on_exit(fn ->
-        # Best-effort: the session may already be gone (the test
-        # may have run to a terminal event), in which case
-        # signal/2 raises -- swallow.
+        # Best-effort: the session may already be gone (we called
+        # abort/1 in the happy path); signal/2 raises against a
+        # dead GenServer -- swallow.
         try do
-          _ = Linx.Process.signal(c, 9)
+          _ = Linx.Process.abort(c)
         catch
           _, _ -> :ok
         end
@@ -277,14 +277,11 @@ defmodule Linx.MountTest do
 
       assert Enum.any?(after_mounts, &(&1.mount_point == "/old_root"))
 
-      # Proceeding now triggers execve, which fails with ENOENT --
-      # the new (empty) rootfs has no `/bin/sleep`. That failure
-      # itself confirms the pivot took effect: from the agent's
-      # perspective, `/bin/sleep` is no longer reachable, which
-      # is exactly what a pivot to an empty rootfs should do.
-      # A real consumer would have populated the rootfs first.
-      :ok = Linx.Process.proceed(c)
-      assert_receive {:linx_process, :error, 2, :execve}, 5_000
+      # We've verified what we came here to verify (the pivot took
+      # effect in the child's mount table). Discard the session
+      # without running anything in the empty rootfs.
+      :ok = Linx.Process.abort(c)
+      assert_receive {:linx_process, :aborted}, 5_000
     end
   end
 
