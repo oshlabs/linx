@@ -25,27 +25,101 @@ defmodule Linx.Process do
 
     * `{:linx_process, :ready, child_pid}` — the child reached the
       checkpoint. `child_pid` is the child's pid *as the child sees it*
-      (1 inside a fresh PID namespace; otherwise the host pid).
+      (1 inside a fresh PID namespace; otherwise the host pid). Use
+      `host_pid/1` for the host's view.
     * `{:linx_process, :running}` — the child has `execve`'d the
       workload.
     * `{:linx_process, :exited, code}` — the workload exited normally.
     * `{:linx_process, :signaled, signum}` — the workload was killed
       by a signal.
-    * `{:linx_process, :error, errno, stage}` — a pre-exec failure;
-      `stage` is the atom naming the syscall that failed.
+    * `{:linx_process, :aborted}` — `abort/1` succeeded; the workload
+      never reached `execve`.
+    * `{:linx_process, :pty_out, binary}` — PTY mode only; bytes the
+      workload wrote to its terminal.
+    * `{:linx_process, :error, errno, stage}` — a pre-exec failure or
+      a transport-level problem; see the stage table below.
 
   Each session emits exactly one terminal event (`:exited` /
-  `:signaled` / `:error`) and then the GenServer stops with reason
-  `:normal`.
+  `:signaled` / `:aborted` / `:error`) and then no further owner
+  messages follow. The GenServer stays alive so `wait/1` callers
+  blocked on it can still receive the recorded answer; it terminates
+  with the linked `spawn/1` caller.
+
+  ## Error stages
+
+  The `stage` atom in `{:linx_process, :error, errno, stage}` names
+  what failed. The `errno` is a POSIX errno integer (per
+  `linux/asm-generic/errno-base.h`), with two exceptions noted below.
+
+  ### Syscall failures in the agent (pre-clone setup)
+
+    * `:posix_openpt`, `:ptsetup`, `:ptsname`, `:pts_open` — PTY pair
+      creation (PTY mode only).
+    * `:sigprocmask`, `:pipe2`, `:signalfd` — internal pipe and signal
+      plumbing.
+
+  ### Process creation
+
+    * `:clone` — `clone(2)` failed (spawn mode).
+    * `:fork` — `fork(2)` failed (enter mode).
+
+  ### Namespace entry (enter mode only)
+
+    * `:open_ns_<type>` — `/proc/<target>/ns/<type>` couldn't be
+      opened. `<type>` is one of `user mnt uts ipc cgroup net time pid`.
+    * `:setns_<type>` — `setns(2)` failed for that namespace.
+
+  ### Child-side pre-exec failures (post-checkpoint)
+
+    * `:stdio` — `apply_stdio` failed (dup2 onto 0/1/2, AF_UNIX
+      connect for `{:connect_unix, _}`, or the PTY slave's `TIOCSCTTY`).
+    * `:execve` — `execve(2)` returned (i.e. failed).
+    * `:cap_drop_bounding`, `:cap_set_thread`, `:cap_set_ambient` —
+      one of the K2 capability syscalls failed in the child
+      (`Linx.Capabilities`).
+
+  ### Transport (BEAM ↔ agent wire)
+
+    * `:malformed_request` — the agent couldn't parse the
+      `{:spawn, _}` / `{:enter, _}` request. `errno` is `EINVAL` (22).
+    * `:request_too_big` — the request exceeded the agent's 32 KiB
+      buffer. `errno` is `EMSGSIZE` (90).
+    * `:command_too_big` — a post-`:running` command exceeded the
+      buffer; the session is torn down. `errno` is `EMSGSIZE`.
+    * `:ready_frame` — couldn't read the `{:ready, _}` frame from
+      the child (child died early, internal pipe broke). `errno` is
+      the underlying I/O error or `EIO` on EOF.
+    * `:malformed_ready` — got bytes but couldn't decode them as a
+      `{:ready, _}` ei frame. `errno` is `EPROTO` (71).
+    * `:exec_outcome` — couldn't read the post-`:proceed` outcome
+      from the child. `errno` is `EIO`.
+
+  ### Catastrophic agent failure (BEAM-side synthesised)
+
+    * `:agent_died` — the agent process exited without sending any
+      terminal status frame (segfault, OOM-kill, hard `_exit` from
+      an unanticipated path). **The second element is the agent's
+      exit code**, not a POSIX errno; the `:agent_died` stage tag
+      is the signal that interpretation differs. This message is
+      synthesised by the BEAM-side GenServer on
+      `{port, {:exit_status, _}}` when no other terminal has been
+      recorded yet, so the owner never hangs.
 
   ## Status
 
-  P0 (scaffolding), P1 (`spawn/1` with the checkpoint protocol), and P2
-  (`signal/2`, `wait/1`) are shipped; `proceed/1` is wired. `enter/2`,
-  `info/1`, `pty_master/1` are still stubs — see `docs/process/PLAN.md`.
+  P0–P6 shipped: scaffolding, `spawn/1` with the checkpoint protocol,
+  `signal/2` / `wait/1`, `enter/2` (setns + fork into a target's
+  namespaces), PTY mode (`stdio: :pty` + `pty_master/1` /
+  `pty_write/2` / `pty_set_winsize/3`), `abort/1`, `host_pid/1`. The
+  K2 cap commands (`drop_bounding/2` / `set_thread_sets/2` /
+  `set_ambient/2`) live in `Linx.Capabilities` but hook into this
+  module's checkpoint window. `info/1` is still a stub. See
+  `docs/process/PLAN.md` for the roadmap.
   """
 
   use GenServer
+
+  require Logger
 
   # The pid that `spawn/1` and `enter/2` return is the GenServer pid.
   @type t :: pid()
@@ -769,60 +843,120 @@ defmodule Linx.Process do
 
   @impl true
   def handle_info({port, {:data, payload}}, %{port: port} = state) do
-    case :erlang.binary_to_term(payload, [:safe]) do
-      {:status, :spawned, host_pid} ->
-        {:noreply, %{state | host_pid: host_pid}}
+    case safe_decode(payload) do
+      {:ok, frame} ->
+        handle_agent_frame(frame, state)
 
-      {:status, :ready, child_pid} ->
-        send(state.owner, {:linx_process, :ready, child_pid})
-        state = %{state | child_pid: child_pid}
+      :error ->
+        Logger.warning(
+          "Linx.Process: dropped malformed agent frame (#{byte_size(payload)} bytes)"
+        )
 
-        # Fire a buffered abort: an `abort/1` that landed before the
-        # checkpoint is forwarded the moment the agent is parked there.
-        state =
-          if state.pending_abort? do
-            Port.command(state.port, :erlang.term_to_binary(:abort))
-            %{state | pending_abort?: false}
-          else
-            state
-          end
-
-        {:noreply, state}
-
-      {:status, :running} ->
-        send(state.owner, {:linx_process, :running})
-        flush_pending_signals(state)
-        {:noreply, %{state | running?: true, pending_signals: []}}
-
-      {:status, :exited, code} ->
-        send(state.owner, {:linx_process, :exited, code})
-        {:noreply, finalise(state, {:exited, code})}
-
-      {:status, :signaled, signum} ->
-        send(state.owner, {:linx_process, :signaled, signum})
-        {:noreply, finalise(state, {:signaled, signum})}
-
-      {:status, :aborted, _child_pid} ->
-        send(state.owner, {:linx_process, :aborted})
-        {:noreply, finalise(state, :aborted)}
-
-      {:error, errno, stage} ->
-        send(state.owner, {:linx_process, :error, errno, stage})
-        {:noreply, finalise(state, {:error, %{errno: errno, stage: stage}})}
-
-      {:pty_out, bytes} ->
-        send(state.owner, {:linx_process, :pty_out, bytes})
         {:noreply, state}
     end
   end
 
+  # Agent died without ever recording a terminal status (e.g. crashed on
+  # `return 2` for a malformed request, OOM-killed, segfaulted, …).
+  # Synthesise an :agent_died error so the owner and any wait/1 callers
+  # see a clean terminal instead of hanging. The second element of the
+  # 4-tuple is the agent's process exit code, not a POSIX errno; the
+  # :agent_died stage atom is the signal that interpretation differs.
+  def handle_info(
+        {port, {:exit_status, code}},
+        %{port: port, result: nil} = state
+      ) do
+    send(state.owner, {:linx_process, :error, code, :agent_died})
+
+    {:noreply,
+     finalise(%{state | port: nil}, {:error, %{errno: code, stage: :agent_died}})}
+  end
+
   def handle_info({port, {:exit_status, _code}}, %{port: port} = state) do
-    # The agent exited. Don't stop the GenServer yet -- a wait/1 caller
-    # racing the port shutdown should still see the recorded result. The
-    # GenServer is linked to the spawn/1 caller, so it dies with that
-    # process and nothing accumulates; meanwhile, `:result` remains
-    # queryable. An explicit `stop/1` may land later for early cleanup.
+    # Terminal already recorded -- the agent exiting after :exited /
+    # :signaled / :aborted / :error is the normal teardown path. Just
+    # drop the port handle; wait/1 callers already have their answer
+    # from the recorded result.
     {:noreply, %{state | port: nil}}
+  end
+
+  # Catch-all for stray messages: misroutes, late timer refs, monitor
+  # notifications we didn't ask for, etc. Log and drop -- a bare
+  # function_clause crash would take the session down and lose any
+  # already-recorded terminal state.
+  def handle_info(msg, state) do
+    Logger.warning("Linx.Process: ignoring unexpected message: #{inspect(msg)}")
+    {:noreply, state}
+  end
+
+  # Wrap binary_to_term/2 so a malformed payload doesn't crash the
+  # GenServer. With :safe, decoding is bounded; the rescue is for the
+  # truly malformed case where the framing itself is bad.
+  defp safe_decode(payload) do
+    {:ok, :erlang.binary_to_term(payload, [:safe])}
+  rescue
+    _ -> :error
+  end
+
+  # One clause per known agent frame shape. The fallthrough at the bottom
+  # logs and drops, so a future C-side emit that the BEAM hasn't learned
+  # about yet doesn't crash the GenServer.
+
+  defp handle_agent_frame({:status, :spawned, host_pid}, state) do
+    {:noreply, %{state | host_pid: host_pid}}
+  end
+
+  defp handle_agent_frame({:status, :ready, child_pid}, state) do
+    send(state.owner, {:linx_process, :ready, child_pid})
+    state = %{state | child_pid: child_pid}
+
+    # Fire a buffered abort: an `abort/1` that landed before the
+    # checkpoint is forwarded the moment the agent is parked there.
+    state =
+      if state.pending_abort? do
+        Port.command(state.port, :erlang.term_to_binary(:abort))
+        %{state | pending_abort?: false}
+      else
+        state
+      end
+
+    {:noreply, state}
+  end
+
+  defp handle_agent_frame({:status, :running}, state) do
+    send(state.owner, {:linx_process, :running})
+    flush_pending_signals(state)
+    {:noreply, %{state | running?: true, pending_signals: []}}
+  end
+
+  defp handle_agent_frame({:status, :exited, code}, state) do
+    send(state.owner, {:linx_process, :exited, code})
+    {:noreply, finalise(state, {:exited, code})}
+  end
+
+  defp handle_agent_frame({:status, :signaled, signum}, state) do
+    send(state.owner, {:linx_process, :signaled, signum})
+    {:noreply, finalise(state, {:signaled, signum})}
+  end
+
+  defp handle_agent_frame({:status, :aborted, _child_pid}, state) do
+    send(state.owner, {:linx_process, :aborted})
+    {:noreply, finalise(state, :aborted)}
+  end
+
+  defp handle_agent_frame({:error, errno, stage}, state) do
+    send(state.owner, {:linx_process, :error, errno, stage})
+    {:noreply, finalise(state, {:error, %{errno: errno, stage: stage}})}
+  end
+
+  defp handle_agent_frame({:pty_out, bytes}, state) do
+    send(state.owner, {:linx_process, :pty_out, bytes})
+    {:noreply, state}
+  end
+
+  defp handle_agent_frame(other, state) do
+    Logger.warning("Linx.Process: unrecognised agent frame: #{inspect(other)}")
+    {:noreply, state}
   end
 
   # Any waiters still in the queue when the GenServer goes down -- e.g.
