@@ -27,12 +27,18 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `%Linx.Netfilter.Ruleset{}` value type | ⬜ | N1 |
-| `%Table{} / %Chain{} / %Rule{} / %Expr{} / %Verdict{}` | ⬜ | N1 |
-| `%Set{} / %Map{} / %Vmap{} / %Object{} / %Flowtable{}` | ⬜ | N1 (Set/Map basic) → N4 (concat + dynamic) |
-| Tag-as-converged-identity (handle / tag / comment) | ⬜ | N1 |
-| Pipeline DSL (`Ruleset.new/0`, `add_table/3`, `add_chain/4`, …) | ⬜ | N1 — validator-setter functions |
-| Validation (chain hooks, vmap key types, rule expr sequence, set element types) | ⬜ | N1 |
+| `%Linx.Netfilter.Ruleset{}` value type | ✅ | N1 — `%Ruleset{tables}` keyed by `{family, name}` |
+| `%Table{} / %Chain{} / %Rule{} / %Expr{} / %Verdict{}` | ✅ | N1 |
+| `%Set{} / %Map{} / %Vmap{} / %Object{} / %Flowtable{}` | 🟡 | N1 (basic shape + atomic key/data types) → N4 (concat + dynamic + intervals) |
+| Tag-as-converged-identity (handle / tag / comment) | ✅ | N1 — Rule fields, tag uniqueness enforced |
+| Pipeline DSL (`Ruleset.new/0`, `add_table/3`, `add_chain/4`, …) | ✅ | N1 — validator-setter shape + `!` variants for pipeline use |
+| Validation: chain family/hook/type/device + base-vs-regular consistency | ✅ | N1 |
+| Validation: vmap value types are all verdicts | ✅ | N1 — Map normalises verdict-input values |
+| Validation: set element types match key_type (basic shape check) | ✅ | N1 — strict validation in N4 |
+| Validation: rule tag uniqueness within chain | ✅ | N1 — `:duplicate_tag` |
+| Validation: rule expression-sequence type correctness | ⬜ | N2 — needs typed expressions |
+| Custom `Inspect` for Rule / Expr / Verdict | ✅ | N1 — compact rendering |
+| Custom `Inspect` for Set / Map / Table | ⬜ | future — atomic structs render fine by default |
 
 ## Wire encoder / decoder
 
@@ -142,7 +148,10 @@ A living doc — update as primitives ship. Status legend:
 | `Exception` impl with extack message rendering | ✅ | N0 |
 | `from_posix/2..3` with optional netfilter context fields | ✅ | N0 |
 | Decoded `NLMSGERR_ATTR_*` extended-ack attributes populated | ⬜ | N2 — when push/pull are real |
-| `{:bad_chain, _}` / `{:bad_rule, _}` / `{:bad_set_element, _}` / `{:tag_required, _}` | ⬜ | N1 / N5 |
+| `{:bad_table, _}` / `{:bad_chain, _}` / `{:bad_rule, _}` / `{:bad_set, _}` / `{:bad_set_element, _}` / `{:bad_map, _}` / `{:bad_map_element, _}` / `{:bad_object, _}` / `{:bad_flowtable, _}` / `{:bad_verdict, _}` | ✅ | N1 — tagged-tuple validator errors |
+| `{:duplicate_table, _}` / `{:duplicate_chain, _}` / `{:duplicate_set, _}` / `{:duplicate_map, _}` / `{:duplicate_object, _}` / `{:duplicate_flowtable, _}` / `{:duplicate_tag, _}` | ✅ | N1 — uniqueness errors |
+| `{:no_such_table, _}` / `{:no_such_chain, _}` / `{:ambiguous_table_name, _}` | ✅ | N1 — navigation errors |
+| `{:tag_required, _}` for `:reconcile`-mode pushes of untagged rules | ⬜ | N5 |
 
 ## Composition with other subsystems
 

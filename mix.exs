@@ -204,7 +204,18 @@ defmodule Linx.MixProject do
         ],
         Netfilter: [
           Linx.Netfilter,
-          Linx.Netfilter.Error
+          Linx.Netfilter.Error,
+          Linx.Netfilter.Ruleset,
+          Linx.Netfilter.Table,
+          Linx.Netfilter.Chain,
+          Linx.Netfilter.Rule,
+          Linx.Netfilter.Expr,
+          Linx.Netfilter.Verdict,
+          Linx.Netfilter.Set,
+          Linx.Netfilter.Map,
+          Linx.Netfilter.Vmap,
+          Linx.Netfilter.Object,
+          Linx.Netfilter.Flowtable
         ],
         "Netlink core": [
           Linx.Netlink,
