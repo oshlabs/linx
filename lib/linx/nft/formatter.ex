@@ -155,6 +155,16 @@ defmodule Linx.NFT.Formatter do
   defp format_set_value(v) when is_binary(v), do: v
   defp format_set_value(other), do: inspect(other)
 
+  # Like format_set_value/1 but key-type-aware. For :ifname sets,
+  # element strings need to be quoted so the parser reads them
+  # back as `:string` tokens (bare `eth0.10` would lex as
+  # `ident . int` since `.` isn't an identifier char).
+  defp render_set_element({:range, lo, hi}, _kt), do: "#{lo}-#{hi}"
+  defp render_set_element(v, _kt) when is_integer(v), do: Integer.to_string(v)
+  defp render_set_element(v, :ifname) when is_binary(v), do: ~s/"#{v}"/
+  defp render_set_element(v, _kt) when is_binary(v), do: v
+  defp render_set_element(other, _kt), do: inspect(other)
+
   defp format_map_element({key, %Verdict{} = v}), do: "#{format_set_value(key)} : #{format_verdict(v)}"
   defp format_map_element({key, value}), do: "#{format_set_value(key)} : #{format_set_value(value)}"
 
@@ -230,13 +240,13 @@ defmodule Linx.NFT.Formatter do
   defp do_format_exprs(
          [
            %Expr{name: :payload, data: %{base: b, offset: o, len: l}},
-           %Expr{name: :__anon_set, data: %{values: vals, key_type: _kt}}
+           %Expr{name: :__anon_set, data: %{values: vals, key_type: kt}}
            | rest
          ],
          acc
        ) do
     field = payload_field(b, o, l)
-    rendered = vals |> Enum.map(&format_set_value/1) |> Enum.join(", ")
+    rendered = vals |> Enum.map(&render_set_element(&1, kt)) |> Enum.join(", ")
     do_format_exprs(rest, ["#{field} { #{rendered} }" | acc])
   end
 
@@ -251,6 +261,22 @@ defmodule Linx.NFT.Formatter do
        ) do
     rhs = render_meta_value(key, v)
     do_format_exprs(rest, [stmt("meta #{key}", render_op(op), rhs) | acc])
+  end
+
+  # ---- meta + __anon_set — inline-set match on a meta field
+  # (e.g. `iifname { "eth0", "wg0" }`). The set's key_type tells
+  # us whether to render elements as strings-with-quotes (:ifname)
+  # or bare integers (:mark / :inet_proto / etc.). ----
+  defp do_format_exprs(
+         [
+           %Expr{name: :meta, data: %{key: key}},
+           %Expr{name: :__anon_set, data: %{values: vals, key_type: kt}}
+           | rest
+         ],
+         acc
+       ) do
+    rendered = vals |> Enum.map(&render_set_element(&1, kt)) |> Enum.join(", ")
+    do_format_exprs(rest, ["meta #{key} { #{rendered} }" | acc])
   end
 
   defp do_format_exprs(
