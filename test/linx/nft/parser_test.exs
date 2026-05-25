@@ -189,6 +189,40 @@ defmodule Linx.NFT.ParserTest do
              ] = stmts
     end
 
+    test "bare iifname shorthand (no `meta` prefix)" do
+      src = ~s|table inet t { chain c { iifname "lo" accept } }|
+
+      assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
+
+      assert [
+               {:match, {:meta, :iifname, _}, :eq, {:string, "lo", _}, _},
+               {:verdict, :accept, _}
+             ] = stmts
+    end
+
+    test "bare oifname shorthand" do
+      src = ~s|table inet t { chain c { oifname "eth0" accept } }|
+
+      assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
+
+      assert [
+               {:match, {:meta, :oifname, _}, :eq, {:string, "eth0", _}, _},
+               {:verdict, :accept, _}
+             ] = stmts
+    end
+
+    test "bare iifname with inline set" do
+      src = ~s|table inet t { chain c { iifname { "eth0", "wg0" } accept } }|
+
+      assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
+
+      assert [
+               {:match, {:meta, :iifname, _}, :eq,
+                {:set_inline, [{:string, "eth0", _}, {:string, "wg0", _}], _}, _},
+               {:verdict, :accept, _}
+             ] = stmts
+    end
+
     test "meta iif match" do
       src = ~s|table inet t { chain c { meta iif "eth0" accept } }|
 

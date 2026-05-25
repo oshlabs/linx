@@ -90,6 +90,10 @@ defmodule Linx.NFT.Parser do
 
   @match_headers ~w(ip ip6 tcp udp icmp icmpv6 sctp dccp ah esp comp)
   @meta_fields ~w(iif oif iifname oifname mark protocol nfproto l4proto length skuid skgid)
+  # Subset of @meta_fields that nft accepts WITHOUT the `meta`
+  # prefix at rule top level. The user writes `iifname "lo"
+  # accept` and nft treats it as `meta iifname "lo" accept`.
+  @bare_meta_fields ~w(iifname oifname iif oif)
   @ct_fields ~w(state direction mark zone label status helper protocol)
   @verdict_atoms ~w(accept drop continue return queue)
   @policy_atoms ~w(accept drop)
@@ -636,6 +640,13 @@ defmodule Linx.NFT.Parser do
 
   defp parse_stmt([{:at, meta}, {:identifier, name, _} | rest], _state) do
     {{:match, {:set_ref, name, meta}, :membership, nil, meta}, rest}
+  end
+
+  # Bare meta-field shorthand: `iifname "lo" accept` parses the
+  # same as `meta iifname "lo" accept` — nft accepts both.
+  defp parse_stmt([{:identifier, name, meta} | _] = tokens, state)
+       when name in @bare_meta_fields do
+    parse_meta_stmt(tokens, meta, state)
   end
 
   defp parse_stmt([tok | _], state) do
