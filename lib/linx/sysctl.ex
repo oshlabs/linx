@@ -89,14 +89,22 @@ defmodule Linx.Sysctl do
 
   ## Status
 
-  S0 — scaffolding only. `supported?/0` is functional; the host
-  read/write surface lands in S1, subtree walking in S2, and the
-  cross-namespace `:in` option in S3. See `docs/sysctl/PLAN.md`
-  for the roadmap.
+  S0–S1 shipped. `supported?/0`, host-side `read/1`, `read_int/1`,
+  `read_ints/1`, and `write/2` with structured `%Linx.Sysctl.Error{}`
+  results are in. Subtree walking lands in S2 and the cross-namespace
+  `:in` option lands in S3. See `docs/sysctl/PLAN.md` for the
+  roadmap.
   """
 
-  @proc "/proc"
-  @self_ostype Path.join([@proc, "sys", "kernel", "ostype"])
+  alias Linx.Sysctl.Error
+
+  @procsys "/proc/sys"
+  @self_ostype Path.join(@procsys, "kernel/ostype")
+
+  # Dot-form sysctl keys: each `.`-separated segment is one or more
+  # of [A-Za-z0-9_-]; segments can't be empty (rules out leading /
+  # trailing / consecutive dots and the `..` path-traversal case).
+  @key_regex ~r/\A[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\z/
 
   @typedoc """
   A sysctl key in dot form, e.g. `"net.ipv4.ip_forward"` or
@@ -128,55 +136,180 @@ defmodule Linx.Sysctl do
   Reads a sysctl as a trimmed binary.
 
   Returns `{:ok, value}` where `value` is the file's contents with
-  trailing whitespace stripped (the kernel always appends a `\\n`),
-  or `{:error, %Linx.Sysctl.Error{}}` on kernel-level failure.
+  trailing whitespace stripped (the kernel always appends a `\\n`).
 
-  Lands in S1.
+  ## Examples
+
+      iex> Linx.Sysctl.read("kernel.ostype")
+      {:ok, "Linux"}
+
+      iex> Linx.Sysctl.read("net.ipv4.ip_forward")
+      {:ok, "0"}
+
+  ## Errors
+
+    * `{:error, {:bad_key, reason}}` — caller-side input mistake
+      (empty key, illegal characters, leading/trailing/consecutive
+      dots). Caught before any procfs read.
+    * `{:error, %Linx.Sysctl.Error{}}` — kernel-level failure.
+      Common: `:enoent` (no such sysctl on this kernel),
+      `:eacces` (procfs denied the read).
   """
-  @spec read(key()) :: {:ok, binary()} | {:error, term()}
-  def read(_key), do: {:error, :not_yet_implemented}
+  @spec read(key()) ::
+          {:ok, binary()} | {:error, Error.t() | {:bad_key, term()}}
+  def read(key) when is_binary(key) do
+    with {:ok, path} <- resolve_key(key) do
+      case File.read(path) do
+        {:ok, data} -> {:ok, String.trim_trailing(data)}
+        {:error, posix} -> {:error, Error.from_posix(posix, key, path, :read)}
+      end
+    end
+  end
 
   @doc """
   Reads a sysctl and parses it as a single integer.
 
   Convenience for the common case (`net.ipv4.ip_forward`,
-  `vm.swappiness`, every `*_max` / `*_min` knob). Returns
-  `{:error, {:bad_value, reason}}` on non-integer contents.
+  `vm.swappiness`, every `*_max` / `*_min` knob).
 
-  Lands in S1.
+  ## Examples
+
+      iex> Linx.Sysctl.read_int("net.ipv4.ip_forward")
+      {:ok, 0}
+
+      iex> Linx.Sysctl.read_int("kernel.hostname")  # not an integer
+      {:error, {:bad_value, {:not_an_integer, "fry"}}}
   """
-  @spec read_int(key()) :: {:ok, integer()} | {:error, term()}
-  def read_int(_key), do: {:error, :not_yet_implemented}
+  @spec read_int(key()) ::
+          {:ok, integer()} | {:error, Error.t() | {:bad_key, term()} | {:bad_value, term()}}
+  def read_int(key) when is_binary(key) do
+    with {:ok, raw} <- read(key) do
+      case Integer.parse(raw) do
+        {n, ""} -> {:ok, n}
+        _ -> {:error, {:bad_value, {:not_an_integer, raw}}}
+      end
+    end
+  end
 
   @doc """
   Reads a sysctl and parses it as a list of integers, split on
   whitespace.
 
   Convenience for the tuple-shaped knobs: `kernel.printk` is four
-  ints, `net.ipv4.tcp_rmem` / `tcp_wmem` are three each. Returns
-  `{:error, {:bad_value, reason}}` if any token doesn't parse.
+  ints, `net.ipv4.tcp_rmem` / `tcp_wmem` are three each.
 
-  Lands in S1.
+  ## Examples
+
+      iex> Linx.Sysctl.read_ints("kernel.printk")
+      {:ok, [4, 4, 1, 7]}
+
+      iex> Linx.Sysctl.read_ints("net.ipv4.tcp_rmem")
+      {:ok, [4096, 131072, 6291456]}
   """
-  @spec read_ints(key()) :: {:ok, [integer()]} | {:error, term()}
-  def read_ints(_key), do: {:error, :not_yet_implemented}
+  @spec read_ints(key()) ::
+          {:ok, [integer()]} | {:error, Error.t() | {:bad_key, term()} | {:bad_value, term()}}
+  def read_ints(key) when is_binary(key) do
+    with {:ok, raw} <- read(key) do
+      raw
+      |> String.split(~r/\s+/, trim: true)
+      |> Enum.reduce_while({:ok, []}, fn token, {:ok, acc} ->
+        case Integer.parse(token) do
+          {n, ""} -> {:cont, {:ok, [n | acc]}}
+          _ -> {:halt, {:error, {:bad_value, {:not_an_integer, token}}}}
+        end
+      end)
+      |> case do
+        {:ok, ints} -> {:ok, Enum.reverse(ints)}
+        {:error, _} = err -> err
+      end
+    end
+  end
 
   @doc """
   Writes a value to a sysctl.
 
-  `value` may be an integer, a binary, or a list of integers
-  (rendered space-separated for the tuple-shaped knobs). Returns
-  `:ok` or `{:error, %Linx.Sysctl.Error{}}`.
+  `value` may be:
+
+    * an integer — rendered with `Integer.to_string/1`.
+    * a binary — written verbatim. Must not contain `\\n` or `\\0`:
+      the kernel's sysctl parser treats newlines as end-of-input
+      and would silently truncate a multi-line string. We reject
+      these before the write so the failure is loud.
+    * a list of integers — rendered space-separated. For the
+      tuple-shaped knobs like `kernel.printk`, `net.ipv4.tcp_rmem`,
+      `net.ipv4.tcp_wmem`.
+
+  We don't append a trailing `\\n` — the kernel accepts either form.
 
   In S1 this writes to the host's namespace context. In S3 it
   gains an `:in` option (`:self` / `{:pid, n}` / `{:path, p}`) for
   cross-namespace writes against a target process's namespace
   stack — same shape as `Linx.Mount`'s `:in` option.
 
-  Lands in S1.
+  ## Examples
+
+      iex> Linx.Sysctl.write("net.ipv4.ip_forward", 1)
+      :ok
+
+      iex> Linx.Sysctl.write("kernel.printk", [4, 4, 1, 7])
+      :ok
+
+      iex> Linx.Sysctl.write("kernel.hostname", "ct0")
+      :ok
+
+  ## Errors
+
+    * `{:error, {:bad_key, reason}}` — malformed key.
+    * `{:error, {:bad_value, reason}}` — value contains a newline
+      or NUL, or a list element isn't an integer, or the type isn't
+      one of the three supported shapes above.
+    * `{:error, %Linx.Sysctl.Error{}}` — kernel-level failure.
+      Common: `:eacces` / `:eperm` (need root for most knobs),
+      `:enoent` (no such sysctl on this kernel), `:einval` (value
+      out of range or wrong shape for this knob).
   """
-  @spec write(key(), value()) :: :ok | {:error, term()}
-  def write(_key, _value), do: {:error, :not_yet_implemented}
+  @spec write(key(), value()) ::
+          :ok | {:error, Error.t() | {:bad_key, term()} | {:bad_value, term()}}
+  def write(key, value) when is_binary(key) do
+    with {:ok, path} <- resolve_key(key),
+         {:ok, blob} <- render_value(value) do
+      case File.write(path, blob) do
+        :ok -> :ok
+        {:error, posix} -> {:error, Error.from_posix(posix, key, path, :write)}
+      end
+    end
+  end
+
+  # Dot-form key → /proc/sys/.../slash/path. The regex check
+  # rules out anything that could escape /proc/sys/ via traversal,
+  # so the Path.join below is safe.
+  defp resolve_key(key) do
+    if Regex.match?(@key_regex, key) do
+      {:ok, Path.join(@procsys, String.replace(key, ".", "/"))}
+    else
+      {:error, {:bad_key, key}}
+    end
+  end
+
+  defp render_value(int) when is_integer(int), do: {:ok, Integer.to_string(int)}
+
+  defp render_value(bin) when is_binary(bin) do
+    cond do
+      String.contains?(bin, "\n") -> {:error, {:bad_value, {:contains, :newline}}}
+      String.contains?(bin, <<0>>) -> {:error, {:bad_value, {:contains, :nul}}}
+      true -> {:ok, bin}
+    end
+  end
+
+  defp render_value(list) when is_list(list) do
+    if Enum.all?(list, &is_integer/1) do
+      {:ok, Enum.map_join(list, " ", &Integer.to_string/1)}
+    else
+      {:error, {:bad_value, {:not_all_integers, list}}}
+    end
+  end
+
+  defp render_value(other), do: {:error, {:bad_value, {:unsupported_type, other}}}
 
   @doc """
   Walks `/proc/sys/` and returns every readable scalar as a list of

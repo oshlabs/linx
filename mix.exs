@@ -184,7 +184,8 @@ defmodule Linx.MixProject do
           Linx.Seccomp.Filter
         ],
         Sysctl: [
-          Linx.Sysctl
+          Linx.Sysctl,
+          Linx.Sysctl.Error
         ],
         "Netlink core": [
           Linx.Netlink,

@@ -22,17 +22,17 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `read/1` | ⬜ | S1 — trimmed binary; `{:error, %Sysctl.Error{}}` on kernel failure |
-| `read_int/1` | ⬜ | S1 — `read/1` + `Integer.parse/1`; `:bad_value` on non-integer |
-| `read_ints/1` | ⬜ | S1 — split on whitespace, parse each (`kernel.printk`, `tcp_rmem`, …) |
+| `read/1` | ✅ | S1 — trimmed binary; `{:error, %Sysctl.Error{}}` on kernel failure |
+| `read_int/1` | ✅ | S1 — `read/1` + `Integer.parse/1`; `:bad_value` on non-integer |
+| `read_ints/1` | ✅ | S1 — split on whitespace, parse each (`kernel.printk`, `tcp_rmem`, …) |
 
 ## Write side
 
 | Feature | Status | Notes |
 |---|---|---|
-| `write/2` | ⬜ | S1 — accepts integer, binary, list of integers |
-| Key validation (`{:bad_key, reason}`) | ⬜ | S1 — reject empty, `..`, traversal, non-`[A-Za-z0-9_.-]` |
-| Value validation (`{:bad_value, reason}`) | ⬜ | S1 — reject newlines / NUL (kernel would silently truncate) |
+| `write/2` | ✅ | S1 — accepts integer, binary, list of integers |
+| Key validation (`{:bad_key, reason}`) | ✅ | S1 — reject empty, `..`, traversal, non-`[A-Za-z0-9_.-]` |
+| Value validation (`{:bad_value, reason}`) | ✅ | S1 — reject newlines / NUL (kernel would silently truncate) |
 
 ## Subtree walking
 
@@ -56,10 +56,10 @@ A living doc — update as primitives ship. Status legend:
 
 | Mechanism | Status | Notes |
 |---|---|---|
-| `%Linx.Sysctl.Error{key, path, operation, errno, code}` | ⬜ | S1 |
-| `Exception` impl for `raise`-able paths | ⬜ | S1 |
-| `{:bad_key, reason}` / `{:bad_value, reason}` | ⬜ | S1 — distinct from kernel-level errors |
-| Namespace-acquisition errors (`:open_ns`, `:unshare`, `:setns`, `:thread`) | ⬜ | S3 — same shape as `Linx.Mount.Error` |
+| `%Linx.Sysctl.Error{key, path, operation, errno, code}` | ✅ | S1 |
+| `Exception` impl for `raise`-able paths | ✅ | S1 |
+| `{:bad_key, reason}` / `{:bad_value, reason}` | ✅ | S1 — distinct from kernel-level errors |
+| Namespace-acquisition errors (`:open_ns`, `:unshare`, `:setns`, `:thread`) | ⏳ | S3 — operation atoms reserved in `Error.operation/0` today; NIF lands in S3 |
 
 ## Composition with other subsystems
 
