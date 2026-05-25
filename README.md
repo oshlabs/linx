@@ -2,7 +2,7 @@
 
 **Linux kernel interfaces for Elixir.**
 
-A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits, filesystem mounts, user-namespace identity mappings, per-process capability sets, per-thread seccomp filters — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
+A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits, filesystem mounts, user-namespace identity mappings, per-process capability sets, per-thread seccomp filters, kernel-tunable parameters, modern firewalling via nf_tables — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
 
 Linx is a library of **primitives**, not a runtime. A container engine, a network orchestrator, or an observability tool is a *consumer* of Linx; the runtime concepts (images, supervision policies, request routing) live in those projects.
 
@@ -59,6 +59,19 @@ iex> {:ok, ns} = Rtnl.open({:pid, host_pid})
 iex> :ok = Rtnl.Link.set_up(ns, "ct0")
 iex> :ok = Rtnl.Address.add(ns, "ct0", "10.0.0.5", 24)
 iex> :ok = Rtnl.Route.add_default(ns, "10.0.0.1")
+
+# Firewall:  default drop, allow established + ssh; rules vanish when we do.
+iex> {:ok, ct_nfnl} = Linx.Netlink.Nfnl.open({:pid, host_pid})
+iex> :ok = Linx.Netfilter.push(ct_nfnl, ~NFT"""
+...>   table inet guard {
+...>     chain input {
+...>       type filter hook input priority 0
+...>       policy drop
+...>       ct state established accept
+...>       tcp dport 22 accept
+...>     }
+...>   }
+...> """)
 
 # Privilege: only cap_net_bind_service.
 iex> all = Linx.Capabilities.Constants.all()
@@ -177,6 +190,64 @@ iex> :ok = Route.add_default(ns, "10.0.0.1")
 iex> P.proceed(c)
 iex> Tty.attach(:controlling, c)
 ```
+
+### Going further: firewall the container's veth peer from the host
+
+`Linx.Netfilter` writes nf_tables rules over an `nfnetlink`
+socket, with the same `{:pid, n}` lifecycle as `Linx.Netlink`. The
+twist is the **owner flag**: by default, every table created
+through `Linx.Netfilter` is tied to the BEAM-side socket that
+created it — when that socket closes (supervisor shutdown,
+process crash, deploy), the kernel atomically destroys the
+table and all its rules. No leaked iptables-style state across
+restarts; no zombie rules surviving the orchestrator. The
+ruleset itself is built with the `~NFT` sigil — real nft syntax
+parsed at compile time:
+
+```elixir
+iex> import Linx.NFT, only: [sigil_NFT: 2]
+iex> alias Linx.Process, as: P
+iex> alias Linx.Netlink.{Nfnl, Rtnl}
+iex> alias Linx.Netfilter
+
+iex> {:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], namespaces: [:net])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> {:ok, host_pid} = P.host_pid(c)
+
+# Veth pair, peer in the child's netns.
+iex> {:ok, host_rtnl} = Rtnl.open()
+iex> :ok = Rtnl.Link.create_veth(host_rtnl, "ct0a", "ct0b")
+iex> :ok = Rtnl.Link.move_to_netns(host_rtnl, "ct0b", host_pid)
+iex> :ok = Rtnl.Link.set_up(host_rtnl, "ct0a")
+iex> :ok = Rtnl.Address.add(host_rtnl, "ct0a", "10.0.0.1", 24)
+
+# Host-side firewall governing the veth — only TCP/80 + established
+# may reach the container; everything else dropped.
+iex> {:ok, host_nfnl} = Nfnl.open()
+iex> :ok = Netfilter.push(host_nfnl, ~NFT"""
+...>   table inet ct0a_guard {
+...>     chain forward {
+...>       type filter hook forward priority 0
+...>       policy drop
+
+...>       ct state established accept
+...>       oifname "ct0a" tcp dport 80 accept
+...>     }
+...>   }
+...> """)
+
+iex> P.proceed(c)
+```
+
+Now nginx in the container can only see established flows and
+new inbound HTTP — every other packet across the host's `forward`
+hook drops. If the BEAM that opened `host_nfnl` dies — supervisor
+crash, deploy, `:init.stop`, whatever — the `ct0a_guard` table
+goes with it. No rule cleanup script needed.
+
+That's the headline differentiator: **your supervisor owns the
+firewall**. Opt out with `Netfilter.create_table(sock, name,
+persist: true)` for "static policy that survives the BEAM."
 
 ### Going further: cap resources before the workload runs
 
@@ -777,9 +848,9 @@ iex> Sysctl.read_int("net.ipv4.ip_forward")
 
 More in [`docs/sysctl/EXAMPLES.md`](docs/sysctl/EXAMPLES.md).
 
-### `Linx.Netlink` — netlink sockets, rtnetlink
+### `Linx.Netlink` — netlink sockets, rtnetlink, nfnetlink
 
-An `AF_NETLINK` client with the rtnetlink family fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
+An `AF_NETLINK` client with the rtnetlink (link / address / route / neighbour / rule / stats) and nfnetlink (the firewall transport, surfaced separately as `Linx.Netfilter`) families fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
 
 ```elixir
 iex> alias Linx.Netlink.Rtnl
@@ -815,6 +886,73 @@ iex> :ok = Route.add_default(ns, "10.0.0.1")
 
 More in [`docs/netlink/EXAMPLES.md`](docs/netlink/EXAMPLES.md).
 
+### `Linx.Netfilter` — modern firewalling via nf_tables
+
+The kernel's nf_tables surface (the successor to iptables / ip6tables / ebtables / arptables), driven over `NETLINK_NETFILTER`. A `%Linx.Netfilter.Ruleset{}` is plain data — tables containing chains containing rules, plus sets / maps / vmaps / named objects. Four verbs in/out: `build` (pipeline DSL or `~NFT` sigil), `push/2` (write atomically), `pull/1..2` (read kernel state into a value), `diff/2` (compute the minimal patch between two rulesets).
+
+```elixir
+iex> alias Linx.Netfilter
+iex> alias Linx.Netfilter.{Expr, Ruleset, Verdict}
+iex> alias Linx.Netlink.Nfnl
+
+iex> {:ok, sock} = Nfnl.open()
+
+# Pipeline DSL.
+iex> rs =
+...>   Ruleset.new()
+...>   |> Ruleset.add_table!(:inet, "myapp")
+...>   |> Ruleset.add_chain!("myapp", "input",
+...>        type: :filter, hook: :input, priority: 0, policy: :drop)
+...>   |> Ruleset.add_rule!("myapp", "input",
+...>        [Expr.payload(:tcp_dport), Expr.cmp(:eq, <<22::big-16>>),
+...>         Expr.immediate(Verdict.accept())])
+
+iex> :ok = Netfilter.push(sock, rs)
+```
+
+**Three peer authoring surfaces, one value type.** The pipeline DSL above, the `~NFT` sigil, and `Linx.NFT.parse_file/1` all converge on the same `%Ruleset{}` via the same validator-setter functions — sigil-parsed and pipeline-constructed rulesets are interchangeable.
+
+**The `~NFT` sigil** is the headline ergonomic feature. Real nft syntax parsed at compile time, with compile-time error diagnostics keyed off the surrounding `.ex` file's line numbers:
+
+```elixir
+iex> import Linx.NFT, only: [sigil_NFT: 2]
+
+iex> rs = ~NFT"""
+...>   table inet myapp {
+...>     chain input {
+...>       type filter hook input priority 0
+...>       policy drop
+...>
+...>       ct state established accept
+...>       tcp dport 22 accept
+...>       ip saddr 10.0.0.0/8 accept
+...>     }
+...>   }
+...> """
+```
+
+Interpolation works at value positions with runtime type-checking — `~NFT"tcp dport #{port} accept"` accepts an integer and encodes it into the right wire shape; passing a binary at runtime raises `ArgumentError` naming the expected kind. The mechanism mirrors Phoenix HEEx: uppercase sigil, our own tokenizer parses `#{...}` (Elixir doesn't, for uppercase sigils), and the macro dispatches to a runtime-emit path for interpolated bodies, a compile-time literal-`Ruleset` path for static ones. Zero runtime cost when there's no interpolation.
+
+**`:replace` vs `:reconcile`.** `push/2` defaults to `:replace` (tear down and rebuild the named tables — brief disruption to existing connections). `mode: :reconcile` computes the minimal patch between current kernel state and the desired ruleset and emits it as one batch, threading `NFTA_BATCH_GENID` for optimistic-concurrency CAS so Linx coexists cleanly with `nft` CLI / firewalld / kube-proxy / any other writer in the same netns. Per-rule `:tag` atoms double as stable diff identity (so reordering two rules in source doesn't produce spurious delete+create pairs) AND as the NFLOG event identity.
+
+**Owner flag is the default.** `Linx.Netfilter.create_table/2` ties the table's lifetime to the netlink socket — when the supervisor that opened the socket dies, the kernel atomically destroys the table. No leaked rules across restarts; no zombie state surviving crashes. See the "Going further: firewall the container's veth peer" recipe above for the end-to-end shape. Opt out with `persist: true` for static-policy-at-boot scenarios.
+
+**Live monitor.** `Linx.Netfilter.subscribe/1` opens a second `nfnetlink` socket subscribed to `NFNLGRP_NFTABLES` and forwards every successful commit in the netns as a `{:linx_netfilter, :event, %Event{}}` to the owner — including commits from `nft` CLI / firewalld / other writers, with the committer's pid + name attributed automatically. The snapshot-then-tail pattern (capture the gen counter on `pull`, discard any buffered events at or below that gen) is the canonical exactly-once-from-snapshot consumer shape; ENOBUFS arrives as `{:linx_netfilter, :resync_needed}` so the consumer re-syncs from a fresh `pull`.
+
+**Per-packet observability via NFLOG.** `Linx.Netfilter.log_listen/2` opens a third socket on `NFNL_SUBSYS_ULOG` and turns matched packets into `{:linx_netfilter, :log, %Log.Event{}}` messages — `prefix`, `mark`, `indev`/`outdev`, hardware address, decoded packet, timestamp. The `log prefix "ssh-attempt" group 5000 accept` shape on a rule makes BEAM-side intrusion-detection loops trivial. Linx convention: group 5000 for "I don't care which group" callers.
+
+**`mix format` plugin.** `Linx.NFT.Formatter` implements `Mix.Tasks.Format`: `~NFT` sigil bodies and `.nft` files both reflow via the canonical-emit path. Wire it up in `.formatter.exs`:
+
+```elixir
+[plugins: [Linx.NFT.Formatter], inputs: ["{lib,test}/**/*.{ex,exs}", "**/*.nft"]]
+```
+
+**Per-netns isolation, free.** `Linx.Netlink.Nfnl.open({:pid, child_pid})` opens the socket inside the target's netns for its whole life — every push / pull / subscribe through it lands in the child's nftables instance, not the host's. Same value type, same verbs.
+
+**Direct netlink, no externals.** No `nft` binary dependency, no `libnftables` FFI, no subprocess. Linx encodes nf_tables wire format directly via the same codec DSL `Linx.Netlink.Rtnl` uses. Kernel floor is 6.6 LTS; design target is 6.12 LTS.
+
+More in [`docs/netfilter/EXAMPLES.md`](docs/netfilter/EXAMPLES.md) — and `docs/netfilter/TODO.md` is the short list of remaining per-construct extensions (limit / meta-setter / named objects / flowtables / etc.) on the way to feature-parity with `nft`.
+
 ### Value types
 
 - **`Linx.IP`** — IPv4 or IPv6 address. The `~IP` sigil parses at compile time; `Inspect` round-trips back to the sigil. `Linx.IP.Subnet` adds `contains?/2`, `network/1`, `broadcast/1`.
@@ -838,7 +976,7 @@ Three kinds of top-level module, named for what they organize:
 | Kind | When | Examples |
 |---|---|---|
 | **Mechanism layer** | A coherent transport with shared infrastructure (codec, framing, error handling, …). | `Linx.Netlink` |
-| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup`, `Linx.Mount`, `Linx.User`, `Linx.Capabilities`, `Linx.Seccomp`, `Linx.Sysctl` |
+| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup`, `Linx.Mount`, `Linx.User`, `Linx.Capabilities`, `Linx.Seccomp`, `Linx.Sysctl`, `Linx.Netfilter` |
 | **Value type** | A domain primitive that flows through the mechanisms. Top level. | `Linx.IP`, `Linx.MAC` |
 
 Naming rule of thumb: name a module after a mechanism only when the mechanism has shared shape worth factoring out. Otherwise name it after the kernel subsystem or concept. `Namespace` isn't a subsystem — it's a cross-cutting flag on `clone(2)` — so it doesn't get its own module; the *operations* live where they belong.
@@ -854,7 +992,8 @@ Each subsystem owns its docs under `docs/<subsystem>/` — `EXAMPLES.md` (iex-st
 - **Within `Linx.Capabilities`** — file capabilities (`security.capability` xattrs on binaries; the `setcap(8)` / `getcap(8)` surface), `SECBIT_*` securebits, per-thread cap reads via `/proc/<pid>/task/<tid>/status`.
 - **Within `Linx.Seccomp`** — per-argument matching (`allow_if(:openat, &(&1.flags == :rdonly))` — the S1.5 surface), multi-arch routing for cross-arch workloads, `SECCOMP_USER_NOTIF` for userspace decision handlers, and richer filter introspection.
 - **Within `Linx.Sysctl`** — a `sysctl.conf` / `/etc/sysctl.d/*.conf` parser+applier (consumer-side, not in Linx itself); a `with_sysctl/2` transactional helper that snapshots and restores on exit; streaming `list/0..1` for callers that want to walk `/proc/sys/` without materialising the ~1500-entry list.
-- **First hex release** — pulling the existing nine subsystems together; HexDocs hosting; a CHANGELOG settling onto semantic versioning.
+- **Within `Linx.Netfilter`** — the long tail toward full `nft` parity: `limit rate N/period`, meta/ct setters (`meta mark set`, `ct mark set`), named objects (`counter`/`quota`/`limit` blocks at table level), flowtables, concatenated set/map keys (the kube-proxy NAT pattern), NPTv6 (`snat ip6 prefix to`), and `include` / `define` substitution. Each is a small per-construct addition; the full Tier 1–5 backlog lives in [`docs/netfilter/TODO.md`](docs/netfilter/TODO.md).
+- **First hex release** — pulling the existing ten subsystems together; HexDocs hosting; a CHANGELOG settling onto semantic versioning.
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.
 
