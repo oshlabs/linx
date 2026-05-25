@@ -83,7 +83,11 @@ defmodule Linx.MixProject do
         "docs/sysctl/EXAMPLES.md",
         "docs/sysctl/PLAN.md",
         "docs/sysctl/COVERAGE.md",
-        "docs/sysctl/REFERENCES.md"
+        "docs/sysctl/REFERENCES.md",
+        "docs/netfilter/EXAMPLES.md",
+        "docs/netfilter/PLAN.md",
+        "docs/netfilter/COVERAGE.md",
+        "docs/netfilter/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -141,6 +145,12 @@ defmodule Linx.MixProject do
           "docs/sysctl/COVERAGE.md",
           "docs/sysctl/REFERENCES.md"
         ],
+        "Netfilter — guides": ["docs/netfilter/EXAMPLES.md"],
+        "Netfilter — design": [
+          "docs/netfilter/PLAN.md",
+          "docs/netfilter/COVERAGE.md",
+          "docs/netfilter/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -192,6 +202,10 @@ defmodule Linx.MixProject do
           Linx.Sysctl.Error,
           Linx.Sysctl.Native
         ],
+        Netfilter: [
+          Linx.Netfilter,
+          Linx.Netfilter.Error
+        ],
         "Netlink core": [
           Linx.Netlink,
           Linx.Netlink.Socket,
@@ -202,6 +216,10 @@ defmodule Linx.MixProject do
           Linx.Netlink.Constants,
           Linx.Netlink.Codec,
           Linx.Netlink.Error
+        ],
+        nfnetlink: [
+          Linx.Netlink.Nfnl,
+          Linx.Netlink.Nfnl.Codec
         ],
         rtnetlink: [
           Linx.Netlink.Rtnl,
