@@ -16,8 +16,11 @@ defmodule Linx.MixProject do
       #   * :linx_process   -- the linx_process Port binary (Linx.Process)
       #   * :linx_tty       -- the linx_tty NIF (Linx.Tty)
       #   * :linx_mount     -- the linx_mount NIF (Linx.Mount)
+      #   * :linx_sysctl    -- the linx_sysctl NIF (Linx.Sysctl)
       # See lib/mix/tasks/compile.*.ex.
-      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process, :linx_tty, :linx_mount],
+      compilers:
+        Mix.compilers() ++
+          [:netlink_nif, :linx_process, :linx_tty, :linx_mount, :linx_sysctl],
       deps: deps(),
       name: "Linx",
       description: "Linux kernel interfaces for Elixir — netlink, and more.",
@@ -186,7 +189,8 @@ defmodule Linx.MixProject do
         Sysctl: [
           Linx.Sysctl,
           Linx.Sysctl.Entry,
-          Linx.Sysctl.Error
+          Linx.Sysctl.Error,
+          Linx.Sysctl.Native
         ],
         "Netlink core": [
           Linx.Netlink,

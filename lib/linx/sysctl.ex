@@ -22,7 +22,7 @@ defmodule Linx.Sysctl do
       `kernel.hostname`, enable per-netns `net.*` knobs, configure
       `kernel.shm*` IPC limits, before the workload `execve`s.
     * **Container-side, at runtime** — same verbs against a fully
-      running namespace via the `:in` option (lands in S3).
+      running namespace via the `:in` option.
 
   ## procfs is the API
 
@@ -58,11 +58,28 @@ defmodule Linx.Sysctl do
   Trying to traverse `/proc/<pid>/root/proc/sys/...` to "see another
   namespace's value" does **not** work — the kernel resolves the
   value against the *reader's* namespace, not the path. The `:in`
-  option (S3) is the supported way to read or write a non-host
-  value: the NIF enters the target's full namespace stack on a
-  throwaway pthread, performs the file I/O, and exits. Global
-  sysctls return the same value from any namespace regardless of
-  `:in`.
+  option is the supported way to read or write a non-host value:
+  `Linx.Sysctl.Native` opens the target's namespace stack (user,
+  mount, UTS, IPC, net) and `setns(2)`s into all five on a throwaway
+  pthread, then performs the file I/O, then exits. Global sysctls
+  return the same value from any namespace regardless of `:in`.
+
+  ## The `:in` option
+
+  Every verb in this module accepts an `:in` option, mirroring
+  `Linx.Mount`'s shape:
+
+    * `:self` (default) — the BEAM's namespaces. Pure-Elixir file
+      I/O over `/proc/sys/`; no NIF, no thread.
+    * `{:pid, n}` — the namespace stack of pid `n`. Joins
+      `/proc/<n>/ns/{user,mnt,uts,ipc,net}` on a throwaway pthread.
+    * `{:path, p}` — a single explicit nsfd file path (less common;
+      primarily for testing or for callers that already hold a
+      pinned-namespace bind mount).
+
+  `:in` is **lifecycle-agnostic**: it works equally well between
+  `Linx.Process`'s `:ready` event and `proceed/1` (the checkpoint
+  window) and against a fully running container post-`proceed/1`.
 
   ## Composition with `Linx.Process`
 
@@ -84,20 +101,20 @@ defmodule Linx.Sysctl do
   `Linx.Process` has zero awareness of sysctls; the checkpoint
   between `:ready` and `proceed/1` is the only coupling, exactly
   the way `Linx.Netlink` / `Linx.Cgroup` / `Linx.Mount` / `Linx.User`
-  integration works. Cross-namespace verbs also work post-`proceed/1`
-  against any live pid — `:in` is lifecycle-agnostic.
+  integration works.
 
   ## Status
 
-  S0–S2 shipped. `supported?/0`, host-side `read/1`, `read_int/1`,
-  `read_ints/1`, `write/2`, subtree walking via `list/0` / `list/1`
-  returning `[%Linx.Sysctl.Entry{}]`, and structured
-  `%Linx.Sysctl.Error{}` results are in. The cross-namespace `:in`
-  option lands in S3. See `docs/sysctl/PLAN.md` for the roadmap.
+  S0–S3 shipped: `supported?/0`, host-side `read/1..2`,
+  `read_int/1..2`, `read_ints/1..2`, `write/2..3`, subtree walking
+  via `list/0..2`, cross-namespace via the `:in` option, plus the
+  `%Linx.Sysctl.Entry{}` and `%Linx.Sysctl.Error{}` value types.
+  See `docs/sysctl/PLAN.md` for the roadmap.
   """
 
   alias Linx.Sysctl.Entry
   alias Linx.Sysctl.Error
+  alias Linx.Sysctl.Native
 
   @procsys "/proc/sys"
   @self_ostype Path.join(@procsys, "kernel/ostype")
@@ -106,6 +123,12 @@ defmodule Linx.Sysctl do
   # of [A-Za-z0-9_-]; segments can't be empty (rules out leading /
   # trailing / consecutive dots and the `..` path-traversal case).
   @key_regex ~r/\A[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\z/
+
+  # Canonical namespace order for setns. user first so an unprivileged
+  # caller would gain CAP_SYS_ADMIN in the target user ns before
+  # trying to enter mount; for our typical root-BEAM case the order
+  # doesn't matter, but consistency keeps the rootless path open.
+  @ns_kinds ~w(user mnt uts ipc net)
 
   @typedoc """
   A sysctl key in dot form, e.g. `"net.ipv4.ip_forward"` or
@@ -121,6 +144,25 @@ defmodule Linx.Sysctl do
   `net.ipv4.tcp_rmem`, etc.).
   """
   @type value :: integer() | binary() | [integer()]
+
+  @typedoc """
+  Target namespace for an operation:
+
+    * `:self` (default) — the BEAM's namespaces.
+    * `{:pid, n}` — the namespace stack of pid `n`.
+    * `{:path, p}` — an explicit nsfd path.
+  """
+  @type in_target ::
+          :self
+          | {:pid, pos_integer()}
+          | {:path, String.t()}
+
+  @typedoc """
+  Options accepted by every verb in this module.
+
+    * `:in` — target namespace, default `:self`. See `t:in_target/0`.
+  """
+  @type opts :: [in: in_target()]
 
   @doc """
   Returns `true` iff the kernel exposes a `/proc/sys/` tree on this
@@ -139,6 +181,12 @@ defmodule Linx.Sysctl do
   Returns `{:ok, value}` where `value` is the file's contents with
   trailing whitespace stripped (the kernel always appends a `\\n`).
 
+  ## Options
+
+    * `:in` — `:self` (default), `{:pid, n}`, or `{:path, p}`.
+      Routes the read through the target's namespace stack on a
+      throwaway pthread.
+
   ## Examples
 
       iex> Linx.Sysctl.read("kernel.ostype")
@@ -147,23 +195,40 @@ defmodule Linx.Sysctl do
       iex> Linx.Sysctl.read("net.ipv4.ip_forward")
       {:ok, "0"}
 
+      # Read the value the container sees, not the host's:
+      iex> Linx.Sysctl.read("net.ipv4.ip_forward", in: {:pid, container_pid})
+      {:ok, "1"}
+
   ## Errors
 
-    * `{:error, {:bad_key, reason}}` — caller-side input mistake
-      (empty key, illegal characters, leading/trailing/consecutive
-      dots). Caught before any procfs read.
+    * `{:error, {:bad_key, reason}}` — caller-side input mistake.
+    * `{:error, {:bad_in, reason}}` — malformed `:in` value.
     * `{:error, %Linx.Sysctl.Error{}}` — kernel-level failure.
-      Common: `:enoent` (no such sysctl on this kernel),
-      `:eacces` (procfs denied the read).
+      Common: `:enoent` (no such sysctl), `:eacces` (procfs denied
+      the read), or — with `:in: {:pid, _}` — `:open_ns` / `:setns`
+      / `:unshare` / `:thread` from the namespace-acquisition path.
   """
-  @spec read(key()) ::
-          {:ok, binary()} | {:error, Error.t() | {:bad_key, term()}}
-  def read(key) when is_binary(key) do
-    with {:ok, path} <- resolve_key(key) do
-      case File.read(path) do
-        {:ok, data} -> {:ok, String.trim_trailing(data)}
-        {:error, posix} -> {:error, Error.from_posix(posix, key, path, :read)}
-      end
+  @spec read(key(), opts()) ::
+          {:ok, binary()}
+          | {:error, Error.t() | {:bad_key, term()} | {:bad_in, term()}}
+  def read(key, opts \\ []) when is_binary(key) and is_list(opts) do
+    with {:ok, path} <- resolve_key(key),
+         {:ok, target} <- resolve_in(opts) do
+      do_read(key, path, target)
+    end
+  end
+
+  defp do_read(key, path, :self) do
+    case File.read(path) do
+      {:ok, data} -> {:ok, String.trim_trailing(data)}
+      {:error, posix} -> {:error, Error.from_posix(posix, key, path, :read)}
+    end
+  end
+
+  defp do_read(key, path, {:cross, ns_paths}) do
+    case Native.read_in_ns(path, ns_paths) do
+      {:ok, data} -> {:ok, String.trim_trailing(data)}
+      {:error, {stage, errno}} -> {:error, native_error(stage, errno, key, path)}
     end
   end
 
@@ -173,6 +238,8 @@ defmodule Linx.Sysctl do
   Convenience for the common case (`net.ipv4.ip_forward`,
   `vm.swappiness`, every `*_max` / `*_min` knob).
 
+  Accepts the same `:in` option as `read/2`.
+
   ## Examples
 
       iex> Linx.Sysctl.read_int("net.ipv4.ip_forward")
@@ -181,10 +248,11 @@ defmodule Linx.Sysctl do
       iex> Linx.Sysctl.read_int("kernel.hostname")  # not an integer
       {:error, {:bad_value, {:not_an_integer, "fry"}}}
   """
-  @spec read_int(key()) ::
-          {:ok, integer()} | {:error, Error.t() | {:bad_key, term()} | {:bad_value, term()}}
-  def read_int(key) when is_binary(key) do
-    with {:ok, raw} <- read(key) do
+  @spec read_int(key(), opts()) ::
+          {:ok, integer()}
+          | {:error, Error.t() | {:bad_key, term()} | {:bad_in, term()} | {:bad_value, term()}}
+  def read_int(key, opts \\ []) when is_binary(key) and is_list(opts) do
+    with {:ok, raw} <- read(key, opts) do
       case Integer.parse(raw) do
         {n, ""} -> {:ok, n}
         _ -> {:error, {:bad_value, {:not_an_integer, raw}}}
@@ -199,6 +267,8 @@ defmodule Linx.Sysctl do
   Convenience for the tuple-shaped knobs: `kernel.printk` is four
   ints, `net.ipv4.tcp_rmem` / `tcp_wmem` are three each.
 
+  Accepts the same `:in` option as `read/2`.
+
   ## Examples
 
       iex> Linx.Sysctl.read_ints("kernel.printk")
@@ -207,10 +277,11 @@ defmodule Linx.Sysctl do
       iex> Linx.Sysctl.read_ints("net.ipv4.tcp_rmem")
       {:ok, [4096, 131072, 6291456]}
   """
-  @spec read_ints(key()) ::
-          {:ok, [integer()]} | {:error, Error.t() | {:bad_key, term()} | {:bad_value, term()}}
-  def read_ints(key) when is_binary(key) do
-    with {:ok, raw} <- read(key) do
+  @spec read_ints(key(), opts()) ::
+          {:ok, [integer()]}
+          | {:error, Error.t() | {:bad_key, term()} | {:bad_in, term()} | {:bad_value, term()}}
+  def read_ints(key, opts \\ []) when is_binary(key) and is_list(opts) do
+    with {:ok, raw} <- read(key, opts) do
       raw
       |> String.split(~r/\s+/, trim: true)
       |> Enum.reduce_while({:ok, []}, fn token, {:ok, acc} ->
@@ -242,10 +313,11 @@ defmodule Linx.Sysctl do
 
   We don't append a trailing `\\n` — the kernel accepts either form.
 
-  In S1 this writes to the host's namespace context. In S3 it
-  gains an `:in` option (`:self` / `{:pid, n}` / `{:path, p}`) for
-  cross-namespace writes against a target process's namespace
-  stack — same shape as `Linx.Mount`'s `:in` option.
+  ## Options
+
+    * `:in` — `:self` (default), `{:pid, n}`, or `{:path, p}`.
+      With `{:pid, _}`, the write lands in the target's namespace
+      stack via the same setns dance as `read/2`.
 
   ## Examples
 
@@ -255,29 +327,41 @@ defmodule Linx.Sysctl do
       iex> Linx.Sysctl.write("kernel.printk", [4, 4, 1, 7])
       :ok
 
-      iex> Linx.Sysctl.write("kernel.hostname", "ct0")
+      # Set the container's hostname without touching the host's.
+      iex> Linx.Sysctl.write("kernel.hostname", "ct0", in: {:pid, container_pid})
       :ok
 
   ## Errors
 
     * `{:error, {:bad_key, reason}}` — malformed key.
-    * `{:error, {:bad_value, reason}}` — value contains a newline
-      or NUL, or a list element isn't an integer, or the type isn't
-      one of the three supported shapes above.
+    * `{:error, {:bad_value, reason}}` — bad value shape or content.
+    * `{:error, {:bad_in, reason}}` — malformed `:in` value.
     * `{:error, %Linx.Sysctl.Error{}}` — kernel-level failure.
-      Common: `:eacces` / `:eperm` (need root for most knobs),
-      `:enoent` (no such sysctl on this kernel), `:einval` (value
-      out of range or wrong shape for this knob).
+      Common: `:eacces` / `:eperm` (need root), `:enoent` (no such
+      sysctl), `:einval` (value out of range / wrong shape).
   """
-  @spec write(key(), value()) ::
-          :ok | {:error, Error.t() | {:bad_key, term()} | {:bad_value, term()}}
-  def write(key, value) when is_binary(key) do
+  @spec write(key(), value(), opts()) ::
+          :ok
+          | {:error, Error.t() | {:bad_key, term()} | {:bad_in, term()} | {:bad_value, term()}}
+  def write(key, value, opts \\ []) when is_binary(key) and is_list(opts) do
     with {:ok, path} <- resolve_key(key),
-         {:ok, blob} <- render_value(value) do
-      case File.write(path, blob) do
-        :ok -> :ok
-        {:error, posix} -> {:error, Error.from_posix(posix, key, path, :write)}
-      end
+         {:ok, blob} <- render_value(value),
+         {:ok, target} <- resolve_in(opts) do
+      do_write(key, path, blob, target)
+    end
+  end
+
+  defp do_write(key, path, blob, :self) do
+    case File.write(path, blob) do
+      :ok -> :ok
+      {:error, posix} -> {:error, Error.from_posix(posix, key, path, :write)}
+    end
+  end
+
+  defp do_write(key, path, blob, {:cross, ns_paths}) do
+    case Native.write_in_ns(path, blob, ns_paths) do
+      :ok -> :ok
+      {:error, {stage, errno}} -> {:error, native_error(stage, errno, key, path)}
     end
   end
 
@@ -312,6 +396,68 @@ defmodule Linx.Sysctl do
 
   defp render_value(other), do: {:error, {:bad_value, {:unsupported_type, other}}}
 
+  # :in opt -> :self | {:cross, [ns_path_binary]}. For {:pid, _} we
+  # filter out namespaces the target shares with us by comparing
+  # the inode of /proc/<pid>/ns/<kind> against /proc/self/ns/<kind>:
+  # `setns(2)` to a user namespace you're already in returns EINVAL,
+  # so a workload spawned with namespaces: [:net, :uts] (no own user
+  # ns) would fail the setns step on user/mnt/ipc otherwise. Only
+  # cross what actually needs crossing.
+  #
+  # If the target shares all namespaces with us (the filtered list
+  # is empty), short-circuit back to :self -- the operation is then
+  # functionally identical to a host-side call.
+  defp resolve_in(opts) do
+    case Keyword.get(opts, :in, :self) do
+      :self ->
+        {:ok, :self}
+
+      {:pid, n} when is_integer(n) and n > 0 ->
+        case differing_ns_paths_for_pid(n) do
+          [] -> {:ok, :self}
+          paths -> {:ok, {:cross, paths}}
+        end
+
+      {:path, p} when is_binary(p) ->
+        {:ok, {:cross, [p]}}
+
+      other ->
+        {:error, {:bad_in, other}}
+    end
+  end
+
+  defp differing_ns_paths_for_pid(pid) do
+    for k <- @ns_kinds, namespace_differs?(pid, k) do
+      "/proc/#{pid}/ns/#{k}"
+    end
+  end
+
+  # Each /proc/<pid>/ns/<kind> entry is a special file whose stat
+  # inode uniquely identifies the namespace; two processes in the
+  # same namespace see the same inode. If we can't stat one side
+  # (target pid is gone, etc.) we include the path anyway and let
+  # the NIF surface the resulting open_ns error.
+  defp namespace_differs?(pid, kind) do
+    target = File.stat("/proc/#{pid}/ns/#{kind}")
+    mine = File.stat("/proc/self/ns/#{kind}")
+
+    case {target, mine} do
+      {{:ok, t}, {:ok, m}} -> t.inode != m.inode
+      _ -> true
+    end
+  end
+
+  # Convert a {stage, errno_atom_or_int} from the NIF into an
+  # %Error{}. Posix atoms map straight through; the rare unmapped
+  # integer becomes errno: :unknown with the int preserved in :code.
+  defp native_error(stage, errno, key, path) when is_atom(errno) do
+    Error.from_posix(errno, key, path, stage)
+  end
+
+  defp native_error(stage, errno_int, key, path) when is_integer(errno_int) do
+    %Error{key: key, path: path, operation: stage, errno: :unknown, code: errno_int}
+  end
+
   @doc """
   Walks `/proc/sys/` and returns every readable scalar as a list of
   `%Linx.Sysctl.Entry{}` structs, sorted by key.
@@ -321,6 +467,11 @@ defmodule Linx.Sysctl do
   skipped — the returned list is "everything I could see", not
   "everything that exists". On a typical Linux host expect ~1500
   entries.
+
+  See `list/1` for the prefix-or-options variant, and `list/2` for
+  the explicit prefix-plus-options form. Walking another process's
+  namespace stack is `list(in: {:pid, n})` or
+  `list("net.ipv4", in: {:pid, n})`.
 
   ## Examples
 
@@ -336,21 +487,22 @@ defmodule Linx.Sysctl do
   the procfs path side-channel.
   """
   @spec list() :: {:ok, [Entry.t()]} | {:error, term()}
-  def list, do: {:ok, @procsys |> walk() |> Enum.sort_by(& &1.key)}
+  def list, do: do_list(@procsys, :self)
 
   @doc """
-  Walks a subtree of `/proc/sys/` named by a dot-form key prefix.
+  Either `list(prefix)` to walk a subtree of `/proc/sys/`, or
+  `list(opts)` to walk all of `/proc/sys/` with options.
+
+  Dispatch is by argument type: a binary is a dot-form prefix,
+  a keyword list is an options list.
+
+  ## list(prefix) — subtree walk
 
   `list("net.ipv4")` returns every readable scalar under
-  `/proc/sys/net/ipv4/`, sorted by key. The trailing `*` is
-  implicit; globs are not accepted.
-
-  If the prefix names a leaf rather than a subtree (e.g.
-  `list("kernel.ostype")`), the result is a single-element list
-  containing that entry — convenient if a caller doesn't know in
-  advance whether a given dot-form name is a directory or a file.
-
-  ## Examples
+  `/proc/sys/net/ipv4/`, sorted by key. The trailing `*` is implicit;
+  globs are not accepted. If the prefix names a leaf rather than a
+  subtree (e.g. `list("kernel.ostype")`), the result is a
+  single-element list containing that entry.
 
       iex> {:ok, net} = Linx.Sysctl.list("net.ipv4")
       iex> Enum.all?(net, &String.starts_with?(&1.key, "net.ipv4."))
@@ -359,43 +511,119 @@ defmodule Linx.Sysctl do
       iex> Linx.Sysctl.list("kernel.ostype")  # leaf, not subtree
       {:ok, [#Linx.Sysctl.Entry<kernel.ostype = "Linux">]}
 
-      iex> Linx.Sysctl.list("linx.does.not.exist")
-      {:error,
-       %Linx.Sysctl.Error{
-         key: "linx.does.not.exist",
-         path: "/proc/sys/linx/does/not/exist",
-         operation: :list,
-         errno: :enoent,
-         code: 2
-       }}
+  ## list(opts) — full walk with options
+
+  `list(in: {:pid, n})` walks all of `/proc/sys/` in the target's
+  namespace stack. Equivalent to `list("/", in: {:pid, n})` if such
+  a "root prefix" were allowed.
+
+      iex> Linx.Sysctl.list(in: {:pid, container_pid})
+      {:ok, [...]}
   """
-  @spec list(key()) ::
-          {:ok, [Entry.t()]} | {:error, Error.t() | {:bad_key, term()}}
-  def list(prefix) when is_binary(prefix) do
-    with {:ok, path} <- resolve_key(prefix) do
-      cond do
-        File.dir?(path) ->
-          {:ok, path |> walk() |> Enum.sort_by(& &1.key)}
-
-        File.regular?(path) ->
-          case File.read(path) do
-            {:ok, data} ->
-              {:ok, [%Entry{key: prefix, value: String.trim_trailing(data)}]}
-
-            {:error, posix} ->
-              {:error, Error.from_posix(posix, prefix, path, :list)}
-          end
-
-        true ->
-          {:error, Error.from_posix(:enoent, prefix, path, :list)}
-      end
+  @spec list(key() | opts()) ::
+          {:ok, [Entry.t()]}
+          | {:error, Error.t() | {:bad_key, term()} | {:bad_in, term()}}
+  def list(arg) when is_list(arg) do
+    with {:ok, target} <- resolve_in(arg) do
+      do_list(@procsys, target)
     end
   end
 
-  # Recursive walker. Skips unreadable directories and unreadable
-  # files silently per the PLAN ("everything I could see"). Builds
-  # an unsorted list of %Entry{}; callers Enum.sort_by it at the
-  # top level.
+  def list(prefix) when is_binary(prefix), do: list(prefix, [])
+
+  @doc """
+  Walks the subtree of `/proc/sys/` named by `prefix` with options.
+
+  Same prefix semantics as `list/1` (subtree → walk, leaf → single
+  entry); same `:in` option as the other verbs.
+
+  ## Examples
+
+      # Read every net.ipv4 knob the container sees.
+      iex> Linx.Sysctl.list("net.ipv4", in: {:pid, container_pid})
+      {:ok, [...]}
+
+      # The container's view of its own hostname (a single-leaf prefix).
+      iex> Linx.Sysctl.list("kernel.hostname", in: {:pid, container_pid})
+      {:ok, [#Linx.Sysctl.Entry<kernel.hostname = "ct0">]}
+  """
+  @spec list(key(), opts()) ::
+          {:ok, [Entry.t()]}
+          | {:error, Error.t() | {:bad_key, term()} | {:bad_in, term()}}
+  def list(prefix, opts) when is_binary(prefix) and is_list(opts) do
+    with {:ok, path} <- resolve_key(prefix),
+         {:ok, target} <- resolve_in(opts) do
+      do_list_with_prefix(prefix, path, target)
+    end
+  end
+
+  defp do_list(root, :self) do
+    {:ok, root |> walk() |> Enum.sort_by(& &1.key)}
+  end
+
+  defp do_list(root, {:cross, ns_paths}) do
+    case Native.list_in_ns(root, ns_paths) do
+      {:ok, raw_entries} ->
+        {:ok,
+         raw_entries
+         |> Enum.map(fn {path, value} ->
+           %Entry{key: path_to_key(path), value: String.trim_trailing(value)}
+         end)
+         |> Enum.sort_by(& &1.key)}
+
+      {:error, {stage, errno}} ->
+        {:error, native_error(stage, errno, "", root)}
+    end
+  end
+
+  defp do_list_with_prefix(prefix, path, :self) do
+    cond do
+      File.dir?(path) ->
+        {:ok, path |> walk() |> Enum.sort_by(& &1.key)}
+
+      File.regular?(path) ->
+        case File.read(path) do
+          {:ok, data} ->
+            {:ok, [%Entry{key: prefix, value: String.trim_trailing(data)}]}
+
+          {:error, posix} ->
+            {:error, Error.from_posix(posix, prefix, path, :list)}
+        end
+
+      true ->
+        {:error, Error.from_posix(:enoent, prefix, path, :list)}
+    end
+  end
+
+  defp do_list_with_prefix(prefix, path, {:cross, ns_paths}) do
+    case Native.list_in_ns(path, ns_paths) do
+      {:ok, raw_entries} ->
+        {:ok,
+         raw_entries
+         |> Enum.map(fn {p, value} ->
+           %Entry{key: path_to_key(p), value: String.trim_trailing(value)}
+         end)
+         |> Enum.sort_by(& &1.key)}
+
+      {:error, {:list, :enotdir}} ->
+        # Prefix names a leaf in the target ns. Fall back to a single
+        # read so callers see the same shape as the :self path.
+        case Native.read_in_ns(path, ns_paths) do
+          {:ok, data} ->
+            {:ok, [%Entry{key: prefix, value: String.trim_trailing(data)}]}
+
+          {:error, {stage, errno}} ->
+            {:error, native_error(stage, errno, prefix, path)}
+        end
+
+      {:error, {stage, errno}} ->
+        {:error, native_error(stage, errno, prefix, path)}
+    end
+  end
+
+  # Recursive walker for the :self path. Skips unreadable directories
+  # and unreadable files silently per the PLAN ("everything I could
+  # see"). Builds an unsorted list of %Entry{}; callers sort_by it.
   defp walk(root), do: walk(root, [])
 
   defp walk(root, acc) do

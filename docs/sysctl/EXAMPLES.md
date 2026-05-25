@@ -11,11 +11,11 @@ user *inside* their own namespace — e.g. as `root` inside a
 container's user ns — but writes from the BEAM to the host's
 namespace still need real root.
 
-> 🟢 **S0–S2 shipped.** `supported?/0`, `read/1`, `read_int/1`,
-> `read_ints/1`, `write/2`, `list/0`, `list/1`, plus the
+> 🟢 **S0–S3 shipped.** `supported?/0`, host-side reads/writes,
+> subtree walking, the full cross-namespace `:in` option, plus the
 > `%Linx.Sysctl.Entry{}` and `%Linx.Sysctl.Error{}` value types
-> are in. The cross-namespace `:in` option lands in S3. See
-> `PLAN.md` for the roadmap and `COVERAGE.md` for what's in / out.
+> are in. See `PLAN.md` for the roadmap and `COVERAGE.md` for the
+> per-feature status.
 
 ## Detecting sysctl support
 
@@ -286,4 +286,197 @@ could in principle resolve to two different files). The value
 field is always faithful; consumers that need to act on a specific
 file by interface name should keep the procfs path side-channel.
 
-## (Will land with S3 — cross-namespace via `:in`)
+## Cross-namespace reads and writes (the `:in` option)
+
+Every verb takes an `:in` option, mirroring `Linx.Mount`:
+
+| `:in` value | What it targets |
+|---|---|
+| `:self` (default) | the BEAM's namespaces — pure Elixir, no NIF |
+| `{:pid, n}` | the namespace stack of pid `n` (user + mount + UTS + IPC + net) |
+| `{:path, p}` | a single explicit nsfd file path |
+
+For `{:pid, n}`, `Linx.Sysctl` stats each `/proc/<n>/ns/<kind>`
+against `/proc/self/ns/<kind>` and skips any namespace the target
+shares with us. (`setns(2)` to a user namespace you're already in
+returns `EINVAL`, so a workload spawned with only `[:net, :uts]`
+namespaces would otherwise fail the dance.) If the target shares
+*every* namespace with the BEAM, the operation short-circuits back
+to the host path.
+
+### Reading the value the container sees
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Sysctl
+
+iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net, :uts])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> {:ok, host_pid} = P.host_pid(c)
+iex> P.proceed(c)
+
+# Each side reads its own namespace's value, independently:
+iex> Sysctl.read_int("net.ipv4.ip_forward")
+{:ok, 0}                                              # host
+
+iex> Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
+{:ok, 0}                                              # container
+
+iex> Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+:ok
+
+iex> Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
+{:ok, 1}                                              # container now 1...
+
+iex> Sysctl.read_int("net.ipv4.ip_forward")
+{:ok, 0}                                              # ...but host unchanged
+```
+
+The setns-on-a-throwaway-pthread dance ensures the BEAM's own
+scheduler threads never enter the target namespace; the thread that
+performs the I/O is destroyed as soon as it returns.
+
+### Setting the container's hostname
+
+```elixir
+iex> Sysctl.write("kernel.hostname", "web-01", in: {:pid, host_pid})
+:ok
+
+iex> Sysctl.read("kernel.hostname", in: {:pid, host_pid})
+{:ok, "web-01"}
+
+iex> Sysctl.read("kernel.hostname")
+{:ok, "fry"}                                         # host's hostname is untouched
+```
+
+`kernel.hostname` is per-UTS-namespace; same idea for
+`kernel.domainname` (NIS), the various `kernel.shm*`/`kernel.msg*`
+IPC limits, and every `net.*` knob.
+
+### Listing a subtree the container sees
+
+`list/2` (with a prefix) and `list/1` (with `:in` opts) both work
+cross-namespace:
+
+```elixir
+# All net.ipv4.* knobs the container sees -- some, like
+# ip_forward, can differ from the host's values.
+iex> {:ok, net} = Sysctl.list("net.ipv4", in: {:pid, host_pid})
+iex> length(net)
+156
+
+iex> Enum.find(net, & &1.key == "net.ipv4.ip_forward")
+#Linx.Sysctl.Entry<net.ipv4.ip_forward = "1">
+
+# A leaf prefix returns a single-element list, same as the host path.
+iex> Sysctl.list("kernel.hostname", in: {:pid, host_pid})
+{:ok, [#Linx.Sysctl.Entry<kernel.hostname = "web-01">]}
+```
+
+### Composing at the `Linx.Process` checkpoint
+
+`:in` is **lifecycle-agnostic** — it works equally well between
+`:ready` and `proceed/1` (the canonical "configure the container
+before its first instruction" window) and against a fully-running
+container post-`proceed/1`.
+
+```elixir
+iex> alias Linx.{Process, Sysctl}
+iex> alias Linx.Netlink.Rtnl
+
+iex> {:ok, c} =
+...>   Process.spawn(
+...>     argv: ["/usr/sbin/nginx"],
+...>     namespaces: [:net, :uts]
+...>   )
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> {:ok, host_pid} = Process.host_pid(c)
+
+# Configure the container's network and sysctls together, all at
+# the checkpoint, before nginx ever starts:
+iex> {:ok, ns} = Rtnl.open({:pid, host_pid})
+iex> :ok = Rtnl.Link.set_up(ns, "lo")
+iex> :ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+iex> :ok = Sysctl.write("net.ipv4.tcp_rmem", [4096, 262_144, 16_777_216],
+...>                    in: {:pid, host_pid})
+iex> :ok = Sysctl.write("kernel.hostname", "ct-web-01", in: {:pid, host_pid})
+
+iex> Process.proceed(c)
+```
+
+`Linx.Process` has zero knowledge of `Linx.Sysctl`; the only
+coupling is the shared `:ready ↔ proceed/1` window, exactly the
+way every other subsystem ties in.
+
+### Errors that only show up cross-namespace
+
+The `%Linx.Sysctl.Error{}` struct gains four additional `:operation`
+values from the namespace-acquisition path:
+
+| `:operation` | When |
+|---|---|
+| `:open_ns` | couldn't open `/proc/<pid>/ns/<kind>` (target pid is gone, BEAM lacks read access) |
+| `:unshare` | `unshare(CLONE_FS)` failed (vanishingly rare) |
+| `:setns` | `setns(2)` failed (typically `:eperm` for an unprivileged BEAM targeting a child's own user ns) |
+| `:thread` | couldn't create the worker pthread |
+
+```elixir
+iex> Sysctl.write("kernel.hostname", "x", in: {:pid, 9_999_999})
+{:error,
+ %Linx.Sysctl.Error{
+   key: "kernel.hostname",
+   path: "/proc/sys/kernel/hostname",
+   operation: :open_ns,
+   errno: :enoent,
+   code: 2
+ }}
+```
+
+Pattern-match on `:operation` to tell namespace-acquisition
+failures apart from real read/write failures:
+
+```elixir
+case Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, container_pid}) do
+  :ok ->
+    :ok
+
+  {:error, %Sysctl.Error{operation: :open_ns, errno: :enoent}} ->
+    :container_gone
+
+  {:error, %Sysctl.Error{operation: :setns, errno: :eperm}} ->
+    :no_perm_for_target_ns           # rootless BEAM, container has its own user ns
+
+  {:error, %Sysctl.Error{operation: :write, errno: errno}} ->
+    {:write_failed, errno}            # the actual procfs write failed
+end
+```
+
+### Rootless caveat
+
+If the BEAM is unprivileged and the target container has its own
+`:user` namespace, `setns(2)` to the user ns will return `EPERM` —
+the kernel requires `CAP_SYS_ADMIN` in the *parent* user ns to
+enter a child user ns. Same constraint that affects `Linx.Mount`
+cross-namespace ops; same fix when one is needed (have the workload
+itself perform the sysctl write inside its own user ns, where it
+has full caps).
+
+For the common Linx case (BEAM as system root, container's user ns
+is the host's), this isn't a concern.
+
+### `{:path, p}` — bypass the per-pid filter
+
+`{:path, p}` takes a single namespace file path directly, without
+the inode comparison `{:pid, n}` does:
+
+```elixir
+# Pin a network namespace bind-mount, then use it from many
+# operations without holding a process open:
+iex> System.cmd("ip", ["netns", "add", "blue"])
+iex> Sysctl.write("net.ipv4.ip_forward", 1, in: {:path, "/var/run/netns/blue"})
+:ok
+```
+
+This is the right shape for `ip netns`-style named namespaces and
+for callers that have already opened a pinned-namespace file via
+some other path. Most callers will use `{:pid, n}` instead.

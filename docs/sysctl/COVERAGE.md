@@ -46,11 +46,11 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `:in :: :self` (default) | ⏳ | S3 — pure-Elixir host path |
-| `:in :: {:pid, n}` | ⬜ | S3 — NIF, setns onto target's full ns stack on a throwaway pthread |
-| `:in :: {:path, p}` | ⬜ | S3 — explicit nsfd path; mirrors `Linx.Mount` |
-| `Linx.Sysctl.Native` (NIF) | ⬜ | S3 — `c_src/linx_sysctl.c` |
-| `compile.linx_sysctl` task | ⬜ | S3 |
+| `:in :: :self` (default) | ✅ | S3 — pure-Elixir host path |
+| `:in :: {:pid, n}` | ✅ | S3 — NIF, setns onto target's namespace stack on a throwaway pthread; same-namespace fds skipped via inode comparison so the EINVAL trap from setns'ing into your own ns doesn't fire |
+| `:in :: {:path, p}` | ✅ | S3 — explicit nsfd path; mirrors `Linx.Mount`. No same-ns filter — caller is on their own |
+| `Linx.Sysctl.Native` (NIF) | ✅ | S3 — `c_src/linx_sysctl.c` (~430 lines); exposes `read_in_ns/2`, `write_in_ns/3`, `list_in_ns/2`, `version/0` |
+| `compile.linx_sysctl` task | ✅ | S3 — sibling of `compile.linx_mount` |
 
 ## Error reporting
 
@@ -59,13 +59,14 @@ A living doc — update as primitives ship. Status legend:
 | `%Linx.Sysctl.Error{key, path, operation, errno, code}` | ✅ | S1 |
 | `Exception` impl for `raise`-able paths | ✅ | S1 |
 | `{:bad_key, reason}` / `{:bad_value, reason}` | ✅ | S1 — distinct from kernel-level errors |
-| Namespace-acquisition errors (`:open_ns`, `:unshare`, `:setns`, `:thread`) | ⏳ | S3 — operation atoms reserved in `Error.operation/0` today; NIF lands in S3 |
+| Namespace-acquisition errors (`:open_ns`, `:unshare`, `:setns`, `:thread`) | ✅ | S3 — surfaced as `%Linx.Sysctl.Error{operation: stage}` so consumers can distinguish setns failures from the actual I/O failure |
+| `{:bad_in, reason}` for malformed `:in` values | ✅ | S3 — caught before any NIF call |
 
 ## Composition with other subsystems
 
 | Pairing | Status | Notes |
 |---|---|---|
-| `Linx.Process` checkpoint via `:in: {:pid, host_pid}` | ⬜ | S3 — same lifecycle-agnostic shape as `Linx.Mount` |
+| `Linx.Process` checkpoint via `:in: {:pid, host_pid}` | ✅ | S3 — same lifecycle-agnostic shape as `Linx.Mount`. Works between `:ready` and `proceed/1` and post-`proceed/1` |
 
 ## Deferred — not in `Linx.Sysctl` itself
 

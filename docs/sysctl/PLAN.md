@@ -1,11 +1,12 @@
 # Linx.Sysctl — implementation plan
 
-> 🟡 **Not yet started.** Planning doc only; nothing on disk under
-> `lib/linx/sysctl*` or `c_src/linx_sysctl.c` yet. Sequencing is
-> S0 (scaffolding) → S1 (host read/write + Error) → S2 (subtree
-> walking + value types) → S3 (cross-namespace via `:in`, NIF).
-> Each lands as its own commit; `COVERAGE.md` becomes the canonical
-> "what's in / what's deferred" tracker as the surface ships.
+> ✅ **S0–S3 shipped** on branch `sysctl-foundations` — ready to
+> merge to `main`. The full surface is in: `supported?/0`,
+> `read/1..2`, `read_int/1..2`, `read_ints/1..2`, `write/2..3`,
+> `list/0..2`, the cross-namespace `:in` option, plus the
+> `%Linx.Sysctl.Entry{}`, `%Linx.Sysctl.Error{}`, and
+> `Linx.Sysctl.Native` modules. `COVERAGE.md` is the canonical
+> "what's in / what's deferred" tracker.
 
 ## Goal
 

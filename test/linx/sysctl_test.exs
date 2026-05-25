@@ -299,4 +299,185 @@ defmodule Linx.SysctlTest do
       refute Enum.any?(net, &String.starts_with?(&1.key, "net.core."))
     end
   end
+
+  describe ":in option validation (plain)" do
+    test "rejects an unknown :in value as {:bad_in, _}" do
+      assert {:error, {:bad_in, :nope}} = Sysctl.read("kernel.ostype", in: :nope)
+      assert {:error, {:bad_in, {:host, 1}}} = Sysctl.read("kernel.ostype", in: {:host, 1})
+    end
+
+    test "rejects {:pid, n} with non-positive integer" do
+      assert {:error, {:bad_in, {:pid, 0}}} = Sysctl.read("kernel.ostype", in: {:pid, 0})
+      assert {:error, {:bad_in, {:pid, -5}}} = Sysctl.read("kernel.ostype", in: {:pid, -5})
+    end
+
+    test "rejects {:path, p} with non-binary path" do
+      assert {:error, {:bad_in, {:path, :nope}}} =
+               Sysctl.read("kernel.ostype", in: {:path, :nope})
+    end
+  end
+
+  describe "S3 integration — cross-namespace read/write via :in" do
+    @describetag :integration
+
+    # Spawn a /bin/sleep workload with its own :net + :uts namespaces,
+    # proceed, then route reads/writes through {:pid, host_pid}. The
+    # host's view of every knob must stay unchanged.
+
+    setup do
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "60"],
+          namespaces: [:net, :uts]
+        )
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+      {:ok, host_pid} = Linx.Process.host_pid(c)
+      assert :ok = Linx.Process.proceed(c)
+
+      on_exit(fn ->
+        # signal might race with the GenServer already exiting after
+        # the test; tolerate both a clean :ok and an exit-on-call.
+        if Process.alive?(c) do
+          try do
+            _ = Linx.Process.signal(c, 15)
+          catch
+            :exit, _ -> :ok
+          end
+        end
+      end)
+
+      {:ok, c: c, host_pid: host_pid}
+    end
+
+    test "writes to a container's netns don't leak to the host", %{host_pid: host_pid} do
+      host_before = read_int_or_skip("net.ipv4.ip_forward")
+
+      # Container's view starts at whatever the kernel defaults the
+      # netns's ip_forward to (typically 0 on a fresh netns). Flip it
+      # to the opposite of the host's value so we'd notice any leakage.
+      flipped = 1 - host_before
+
+      assert :ok =
+               Sysctl.write("net.ipv4.ip_forward", flipped, in: {:pid, host_pid})
+
+      assert {:ok, ^flipped} =
+               Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
+
+      # The host's value must not have moved.
+      assert {:ok, ^host_before} = Sysctl.read_int("net.ipv4.ip_forward")
+    end
+
+    test "writes to a container's UTS ns don't leak to the host", %{host_pid: host_pid} do
+      host_before = elem(Sysctl.read("kernel.hostname"), 1)
+      container_hostname = "linx-test-#{System.unique_integer([:positive])}"
+
+      assert :ok =
+               Sysctl.write("kernel.hostname", container_hostname, in: {:pid, host_pid})
+
+      assert {:ok, ^container_hostname} =
+               Sysctl.read("kernel.hostname", in: {:pid, host_pid})
+
+      assert {:ok, ^host_before} = Sysctl.read("kernel.hostname")
+    end
+
+    test "read_ints/2 works cross-namespace too", %{host_pid: host_pid} do
+      # kernel.printk is global (not netns-scoped), so the container
+      # reads the same value the host does -- but the read path still
+      # goes through the setns dance and the NIF, exercising the full
+      # cross-namespace plumbing.
+      assert {:ok, host_printk} = Sysctl.read_ints("kernel.printk")
+      assert {:ok, ^host_printk} = Sysctl.read_ints("kernel.printk", in: {:pid, host_pid})
+      assert length(host_printk) == 4
+    end
+
+    test "list/2 with a prefix returns entries from the target namespace",
+         %{host_pid: host_pid} do
+      assert {:ok, net} = Sysctl.list("net.ipv4", in: {:pid, host_pid})
+      assert length(net) > 10
+      assert Enum.all?(net, &String.starts_with?(&1.key, "net.ipv4."))
+    end
+
+    test "list/2 on a leaf prefix returns a single-element list cross-ns",
+         %{host_pid: host_pid} do
+      assert {:ok, [%Entry{key: "kernel.hostname", value: _}]} =
+               Sysctl.list("kernel.hostname", in: {:pid, host_pid})
+    end
+
+    test "writing to a nonexistent pid returns :open_ns :enoent" do
+      # Pick a pid that's effectively guaranteed not to exist.
+      dead = 9_999_999
+
+      assert {:error, %Error{} = err} =
+               Sysctl.write("kernel.hostname", "x", in: {:pid, dead})
+
+      assert err.operation == :open_ns
+      assert err.errno == :enoent
+    end
+  end
+
+  describe "S3 integration — cross-namespace operations at the checkpoint" do
+    @describetag :integration
+
+    # Same :in plumbing, but between :ready and proceed/1 -- the
+    # workload hasn't execve'd yet. This is the typical "configure
+    # the container before its first instruction" composition.
+
+    test "set hostname at the checkpoint; workload sees it after execve" do
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "60"],
+          namespaces: [:net, :uts]
+        )
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+      {:ok, host_pid} = Linx.Process.host_pid(c)
+
+      container_hostname = "ckpt-#{System.unique_integer([:positive])}"
+
+      # Write into the parked child's UTS ns BEFORE proceed/1.
+      assert :ok =
+               Sysctl.write("kernel.hostname", container_hostname, in: {:pid, host_pid})
+
+      # Read it back through the same :in to confirm it landed.
+      assert {:ok, ^container_hostname} =
+               Sysctl.read("kernel.hostname", in: {:pid, host_pid})
+
+      assert :ok = Linx.Process.proceed(c)
+      assert :ok = Linx.Process.signal(c, 15)
+      assert_receive {:linx_process, :signaled, _}, 5_000
+    end
+
+    test "enable ip_forward at the checkpoint" do
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sleep", "60"],
+          namespaces: [:net]
+        )
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+      {:ok, host_pid} = Linx.Process.host_pid(c)
+
+      # Fresh netns starts with ip_forward = 0. Flip it to 1 at the
+      # checkpoint.
+      assert :ok =
+               Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+
+      assert {:ok, 1} =
+               Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
+
+      assert :ok = Linx.Process.proceed(c)
+      assert :ok = Linx.Process.signal(c, 15)
+      assert_receive {:linx_process, :signaled, _}, 5_000
+    end
+  end
+
+  # --- helpers ---
+
+  defp read_int_or_skip(key) do
+    case Sysctl.read_int(key) do
+      {:ok, n} -> n
+      _ -> ExUnit.AssertionError |> raise(message: "couldn't read #{key} on the host")
+    end
+  end
 end
