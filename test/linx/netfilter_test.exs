@@ -178,32 +178,12 @@ defmodule Linx.NetfilterTest do
   end
 
   describe "N1-N7 stubs" do
-    # Every not-yet-shipped verb returns {:error, :not_yet_implemented}
-    # so the surface is visible in ExDoc + IDE completion immediately.
-    # The real implementations land in the milestones listed in each
-    # function's @doc.
-
-    setup do
-      {:ok, sock} = Nfnl.open()
-      on_exit(fn -> Socket.close(sock) end)
-      {:ok, sock: sock}
-    end
-
-    test "create_table/3", %{sock: sock} do
-      assert {:error, :not_yet_implemented} = Netfilter.create_table(sock, "test")
-    end
-
-    test "push/3", %{sock: sock} do
-      assert {:error, :not_yet_implemented} = Netfilter.push(sock, %{})
-    end
-
-    test "pull/1", %{sock: sock} do
-      assert {:error, :not_yet_implemented} = Netfilter.pull(sock)
-    end
-
-    test "pull/2", %{sock: sock} do
-      assert {:error, :not_yet_implemented} = Netfilter.pull(sock, {:inet, "test"})
-    end
+    # The verbs that haven't shipped yet still return
+    # {:error, :not_yet_implemented} so the surface is visible in
+    # ExDoc + IDE completion. create_table/3, push/3, pull/1, pull/2
+    # all shipped in N2 — see test/linx/netfilter/integration_test.exs
+    # for end-to-end coverage. diff/dry_run/subscribe/log_listen
+    # land in N5, N5, N6, N7 respectively.
 
     test "diff/2" do
       assert {:error, :not_yet_implemented} = Netfilter.diff(%{}, %{})

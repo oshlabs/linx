@@ -141,7 +141,99 @@ Ruleset.add_rule(ruleset, "myapp", "input", [:drop], tag: :allow_all)
 # => {:error, {:bad_rule, {:duplicate_tag, :allow_all}}}
 ```
 
-## (Will land with N2 — minimal expressions + push :replace)
+## Creating a table (N2)
+
+Owner-flag is the default: when the socket closes, the kernel
+atomically destroys the table.
+
+```elixir
+{:ok, sock} = Linx.Netlink.Nfnl.open()
+{:ok, ruleset} = Linx.Netfilter.create_table(sock, "myapp", family: :inet)
+
+# The returned ruleset has just the one table — chains and rules
+# can be added with the pipeline DSL, then `push/2`-ed back.
+```
+
+Opt out of owner cleanup with `persist: true`:
+
+```elixir
+{:ok, ruleset} = Linx.Netfilter.create_table(sock, "myapp", persist: true)
+# Table survives socket close; clean up with `nft delete table` or
+# (when N2 ships destroy verbs in Linx itself) a future helper.
+```
+
+## Pushing a complete ruleset (`push/2 :replace`)
+
+Build the ruleset with the pipeline DSL (N1), then push it as one
+atomic batch. The kernel sees `DESTROYTABLE` (silent if missing)
+then `NEWTABLE` + all chains + all rules — old state for the named
+table is replaced cleanly.
+
+```elixir
+alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+ruleset =
+  Ruleset.new()
+  |> Ruleset.add_table!(:inet, "myapp", flags: [:owner])
+  |> Ruleset.add_chain!("myapp", "input",
+       type: :filter, hook: :input, priority: 0, policy: :drop)
+  |> Ruleset.add_chain!("myapp", "ssh_in")
+  |> Ruleset.add_rule!("myapp", "input",
+       Rule.build!([
+         Expr.ct(:state),
+         Expr.bitwise(<<6::big-32>>, <<0::big-32>>),  # mask: established | related
+         Expr.cmp(:neq, <<0::big-32>>),
+         Verdict.accept()
+       ], tag: :ct_established))
+  |> Ruleset.add_rule!("myapp", "input",
+       Rule.build!([
+         Expr.payload(:tcp_dport),
+         Expr.cmp(:eq, <<22::big-16>>),
+         Verdict.jump("ssh_in")
+       ], tag: :try_ssh))
+  |> Ruleset.add_rule!("myapp", "ssh_in", [Verdict.accept()])
+
+:ok = Linx.Netfilter.push(sock, ruleset)
+```
+
+## Pulling a ruleset back
+
+```elixir
+# Pull the whole netns:
+{:ok, %Ruleset{} = current} = Linx.Netfilter.pull(sock)
+Ruleset.tables(current)
+# => [{:inet, "myapp", %Table{...}}, ...]
+
+# Pull just one table by {family, name}:
+{:ok, %Ruleset{}} = Linx.Netfilter.pull(sock, {:inet, "myapp"})
+
+# Nonexistent table:
+{:error, %Linx.Netfilter.Error{errno: :enoent}} =
+  Linx.Netfilter.pull(sock, {:inet, "ghost"})
+```
+
+Rules round-trip through `pull/2` with their expressions decoded
+back into `%Expr{}` shape — `Expr.payload(:tcp_dport)` becomes
+`%Expr{name: :payload, data: %{base: :transport, offset: 2, len: 2, dreg: 1}}`
+after the wire trip. Kernel-assigned handles populate `:handle`.
+
+## Owner-flag cleanup
+
+```elixir
+{:ok, sock} = Linx.Netlink.Nfnl.open()
+{:ok, _} = Linx.Netfilter.create_table(sock, "ephemeral")
+# … push chains and rules into it …
+
+Linx.Netlink.Socket.close(sock)
+# Kernel atomically destroys the table and everything inside it.
+# No manual cleanup, no leaked rules.
+```
+
+Same shape as every Linx subsystem: BEAM owns the resource;
+BEAM crash → kernel reaps it. The unique Linx shape that no other
+firewall manager exposes naturally.
+
+## (Will land with N3 — NAT chains + NAT expressions)
 
 ## (Will land with N3 — NAT chains + NAT expressions)
 

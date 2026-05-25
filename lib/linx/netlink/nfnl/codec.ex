@@ -126,7 +126,9 @@ defmodule Linx.Netlink.Nfnl.Codec do
   def nfproto(:unspec), do: @nfproto_unspec
   def nfproto(:inet), do: @nfproto_inet
   def nfproto(:ipv4), do: @nfproto_ipv4
+  def nfproto(:ip), do: @nfproto_ipv4
   def nfproto(:ipv6), do: @nfproto_ipv6
+  def nfproto(:ip6), do: @nfproto_ipv6
   def nfproto(:arp), do: @nfproto_arp
   def nfproto(:bridge), do: @nfproto_bridge
   def nfproto(:netdev), do: @nfproto_netdev

@@ -215,7 +215,10 @@ defmodule Linx.MixProject do
           Linx.Netfilter.Map,
           Linx.Netfilter.Vmap,
           Linx.Netfilter.Object,
-          Linx.Netfilter.Flowtable
+          Linx.Netfilter.Flowtable,
+          Linx.Netfilter.Encoder,
+          Linx.Netfilter.Decoder,
+          Linx.Netfilter.Wire
         ],
         "Netlink core": [
           Linx.Netlink,

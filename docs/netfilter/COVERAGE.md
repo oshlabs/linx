@@ -44,28 +44,31 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| Encoder: Ruleset → batched nfnetlink messages (`:replace`) | ⬜ | N2 |
-| Decoder: nfnetlink messages → Ruleset | ⬜ | N2 (basic) → N4 (sets/elements) |
-| `push/2 :replace` mode | ⬜ | N2 |
-| `pull/1` (whole netns) | ⬜ | N2 |
-| `pull/2` (scoped to one table) | ⬜ | N2 |
-| `create_table/2` with `owner: true` default | ⬜ | N2 |
-| `persist: true` opt-out | ⬜ | N2 — feature-detected on 6.9+ |
+| Encoder: Ruleset → batched nfnetlink messages (`:replace`) | ✅ | N2 — `Linx.Netfilter.Encoder.to_batch/2` |
+| Decoder: nfnetlink messages → Ruleset | ✅ | N2 (tables / chains / rules + N2 expressions) → N4 (sets/elements) |
+| `push/2 :replace` mode | ✅ | N2 — DESTROYTABLE+NEWTABLE+NEWCHAIN+NEWRULE in one batch |
+| `pull/1` (whole netns) | ✅ | N2 — three dumps (GETTABLE, GETCHAIN, GETRULE), assembled |
+| `pull/2` (scoped to one table) | ✅ | N2 — GETTABLE single + filtered chains/rules |
+| `create_table/3` with `owner: true` default | ✅ | N2 — `:owner` flag set by default; `persist: true` opts out |
+| `persist: true` opt-out | ✅ | N2 — swaps to `:persist` flag (6.9+) or empty flags |
+| `Linx.Netlink.Nfnl.batch/2` — batched request engine | ✅ | N2 — BATCH_BEGIN + N inner + BATCH_END; per-msg ACK tracking |
+| Big-endian integer helpers (`Wire.u32_be/1`, `u64_be/1`, `s32_be/1`) | ✅ | N2 — nftables wire-format quirk |
 
 ## Minimal expression encoder
 
 | Feature | Status | Notes |
 |---|---|---|
-| `Expr.immediate/2` (constants + verdicts) | ⬜ | N2 |
-| `Expr.payload/3` (IP/TCP/UDP header field extraction) | ⬜ | N2 |
-| `Expr.meta/2` (iif, oif, mark, iifname, oifname) | ⬜ | N2 / N3 |
-| `Expr.cmp/3` (eq, neq, lt, le, gt, ge) | ⬜ | N2 |
-| `Expr.bitwise/3` (AND with mask — required for CIDR) | ⬜ | N2 |
-| `Expr.ct/2` (state matching) | ⬜ | N2 (state only) |
-| `Expr.lookup/2` (set / map / vmap) | ⬜ | N2 (set ref) → N4 (anon + dynset) |
-| `Expr.reject/2` (icmp / tcp-reset / icmpx) | ⬜ | N2 |
-| `Expr.counter/1` | ⬜ | N2 |
-| Verdicts (`:accept`, `:drop`, `:continue`, `:return`, `{:jump, _}`, `{:goto, _}`) | ⬜ | N2 |
+| `Expr.immediate/1` (verdict load into reg 0) | ✅ | N2 |
+| `Expr.immediate/1` constant load into value register | 🟡 | N2 — encoder supports it (`%{value, dreg}`), no high-level constructor yet |
+| `Expr.payload/3` + `Expr.payload/2` (named aliases: `:tcp_dport`, `:ip_saddr`, etc.) | ✅ | N2 — base/offset/len + 10 named aliases |
+| `Expr.meta/2` (iif, oif, mark, iifname, oifname, nfproto, l4proto, …) | ✅ | N2 — 14 meta keys |
+| `Expr.cmp/3` (eq, neq, lt, lte, gt, gte) | ✅ | N2 |
+| `Expr.bitwise/3` (AND with mask + XOR) | ✅ | N2 |
+| `Expr.ct/2` (state, direction, status, mark, secmark) | ✅ | N2 — state via `Wire.ct_state_bits/1` |
+| `Expr.lookup/2` (set / map / vmap) | 🟡 | N2 — set-ref shape; anonymous + dynset land with N4 |
+| `Expr.reject/2` (icmp_unreach / tcp_reset / icmpx_unreach) | ✅ | N2 — default code 3 (port-unreach) for icmp types |
+| `Expr.counter/1` | ✅ | N2 — `%{packets, bytes}` round-trips on pull |
+| Verdicts (`:accept`, `:drop`, `:continue`, `:return`, `{:jump, _}`, `{:goto, _}`, `{:queue, _}`) | ✅ | N2 — full set, jump/goto carries chain name |
 
 ## NAT
 

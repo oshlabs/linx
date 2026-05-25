@@ -850,8 +850,10 @@ rendering for Rule and Expr; `:bad_chain` / `:bad_rule` /
   creation order; wraps in BATCH_BEGIN/END; uses `DESTROY*` to
   clean up existing tables of the same name before creating
   fresh ones.
-- `Linx.Netfilter.Decoder.from_msgs/1` — `[nfnetlink_msg] →
-  Ruleset`. Drives the response to `pull/1`.
+- `Linx.Netfilter.Decoder.from_msgs/3` — `(tables, chains, rules)
+  → Ruleset`, where each input is the per-entity list from one
+  GET* dump. Assembles a `%Ruleset{}`, attaching chains to tables
+  and rules to chains by name. Drives the response to `pull/1..2`.
 - `Linx.Netfilter.push/2` with `mode: :replace` (default).
 - `Linx.Netfilter.pull/1` for the whole netns; `pull/2` scoped
   to one table by `{family, name}`.

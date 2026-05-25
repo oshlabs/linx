@@ -134,8 +134,13 @@ defmodule Linx.Netfilter do
     * [`Documentation/networking/netlink_spec/nftables`](https://docs.kernel.org/networking/netlink_spec/nftables.html)
   """
 
-  alias Linx.Netfilter.Error
-  alias Linx.Netlink.{Nfnl, Socket}
+  import Linx.Netlink.Constants
+  import Linx.Netfilter.Wire, only: [nft_msg_getchain: 0, nft_msg_getrule: 0]
+
+  alias Linx.Netfilter.{Decoder, Encoder, Error, Ruleset, Table}
+  alias Linx.Netlink.{Message, Nfnl, Request, Socket}
+  alias Linx.Netlink.Nfnl.Codec, as: NfnlCodec
+  alias Linx.Netlink.Error, as: NetlinkError
 
   @doc """
   Returns `true` iff the kernel supports nfnetlink (i.e., a
@@ -169,41 +174,217 @@ defmodule Linx.Netfilter do
   @doc """
   Creates a new table in the kernel's nftables instance.
 
-  Lands in N2.
+  ## Options
+
+    * `:family` — `:ip` | `:ip6` | `:inet` | `:arp` | `:bridge` |
+      `:netdev`. Default: `:inet` (the firewall sweet spot — one
+      table covers both IPv4 and IPv6).
+    * `:persist` — `true` to disable the owner flag, leaving the
+      table behind when the socket closes. Default `false` (table
+      auto-destroys with the socket; see *Owner flag is the default*
+      in the moduledoc).
+
+  Returns `{:ok, %Ruleset{}}` — the ruleset has just this one
+  table, ready for chains / rules to be added with the
+  `Linx.Netfilter.Ruleset` pipeline DSL and then pushed back with
+  `push/2`.
+
+  Wire-level failures come back as `{:error, %Linx.Netfilter.Error{}}`
+  with the operation set to `:create_table` and the kernel's
+  errno / extended-ack message attached. `EEXIST` means the table
+  was already present (pass through `Ruleset.pull/2` first if you
+  want a "create-or-fetch" pattern).
   """
   @spec create_table(Socket.t(), String.t(), keyword()) ::
-          {:ok, term()} | {:error, Error.t() | term()}
-  def create_table(_sock, _name, _opts \\ []),
-    do: {:error, :not_yet_implemented}
+          {:ok, Ruleset.t()} | {:error, Error.t() | term()}
+  def create_table(%Socket{} = sock, name, opts \\ []) when is_binary(name) and is_list(opts) do
+    family = Keyword.get(opts, :family, :inet)
+    persist? = Keyword.get(opts, :persist, false)
+    flags = if persist?, do: [:persist], else: [:owner]
+
+    with {:ok, table} <- Table.new(family, name, flags: flags) do
+      msg = Encoder.table(table)
+
+      case Nfnl.batch(sock, [msg]) do
+        :ok ->
+          {:ok,
+           %Ruleset{tables: %{{family, name} => table}}}
+
+        {:error, {_batch_seq, %NetlinkError{} = err}} ->
+          {:error,
+           Error.from_posix(err.errno, :create_table,
+             subsys: :nftables,
+             msg_type: 0x00,
+             message: err.message
+           )}
+
+        {:error, other} ->
+          {:error, other}
+      end
+    end
+  end
 
   @doc """
-  Pushes a Ruleset to the kernel atomically.
+  Pushes a Ruleset to the kernel atomically as one batched
+  transaction.
 
-  Modes: `:replace` (default) rebuilds the named tables; `:reconcile`
-  computes the minimal diff against current kernel state and emits
-  it as one batch with `NFTA_BATCH_GENID` for optimistic concurrency.
+  Modes:
 
-  Lands in N2 (`:replace`) and N5 (`:reconcile`).
+    * `:replace` (default, N2) — for each table in `ruleset`, the
+      kernel sees `DESTROYTABLE` (silent-if-missing, 6.3+) then
+      `NEWTABLE` plus all its chains and rules. Other tables in
+      the netns are untouched.
+    * `:reconcile` (N5) — minimal-diff push with `NFTA_BATCH_GENID`
+      CAS for cooperative concurrency.
+
+  Returns `:ok` on success, or `{:error, %Linx.Netfilter.Error{}}`
+  carrying the first inner-message rejection (with `:batch_seq`
+  pointing at the offending message position).
   """
-  @spec push(Socket.t(), term(), keyword()) ::
+  @spec push(Socket.t(), Ruleset.t(), keyword()) ::
           :ok | {:error, Error.t() | term()}
-  def push(_sock, _ruleset, _opts \\ []),
-    do: {:error, :not_yet_implemented}
+  def push(%Socket{} = sock, %Ruleset{} = ruleset, opts \\ []) do
+    case Keyword.get(opts, :mode, :replace) do
+      :replace ->
+        msgs = Encoder.to_batch(ruleset)
+
+        case Nfnl.batch(sock, msgs) do
+          :ok ->
+            :ok
+
+          {:error, {batch_seq, %NetlinkError{} = err}} ->
+            {:error,
+             Error.from_posix(err.errno, :push,
+               subsys: :nftables,
+               batch_seq: batch_seq,
+               message: err.message
+             )}
+
+          {:error, other} ->
+            {:error, other}
+        end
+
+      :reconcile ->
+        {:error, :not_yet_implemented}
+
+      other ->
+        {:error, {:unknown_push_mode, other}}
+    end
+  end
 
   @doc """
   Pulls the kernel's nftables state into a Ruleset value.
 
-  With no second arg, pulls the whole netns. With a `{family, name}`
-  scope, pulls one table.
+  No-arg form dumps the entire netns — every table, every chain,
+  every rule the caller can see. Use `pull/2` for a scoped dump
+  (one table by `(family, name)`).
 
-  Lands in N2.
+  Implementation: three sequential dumps (`GETTABLE`, `GETCHAIN`,
+  `GETRULE`), then `Linx.Netfilter.Decoder.from_msgs/3` assembles
+  them into the Ruleset. Dumps are not atomic across types — if a
+  table is created between the table dump and the rule dump, its
+  rules will be silently dropped during assembly. N5's `:reconcile`
+  mode adds `NFTA_BATCH_GENID` for atomicity.
   """
-  @spec pull(Socket.t()) :: {:ok, term()} | {:error, Error.t() | term()}
-  def pull(_sock), do: {:error, :not_yet_implemented}
+  @spec pull(Socket.t()) :: {:ok, Ruleset.t()} | {:error, Error.t() | term()}
+  def pull(%Socket{} = sock) do
+    with {:ok, tables} <- dump_tables(sock, :unspec),
+         {:ok, chains} <- dump_chains(sock, :unspec),
+         {:ok, rules} <- dump_rules(sock, :unspec) do
+      {:ok, Decoder.from_msgs(tables, chains, rules)}
+    end
+  end
 
+  @doc """
+  Pulls a single table (and its chains, rules) by `{family, name}`.
+
+  Returns `{:ok, %Ruleset{}}` containing just that table, or
+  `{:error, %Linx.Netfilter.Error{errno: :enoent}}` if the table
+  doesn't exist.
+  """
   @spec pull(Socket.t(), {atom(), String.t()}) ::
-          {:ok, term()} | {:error, Error.t() | term()}
-  def pull(_sock, _scope), do: {:error, :not_yet_implemented}
+          {:ok, Ruleset.t()} | {:error, Error.t() | term()}
+  def pull(%Socket{} = sock, {family, name}) when is_atom(family) and is_binary(name) do
+    with {:ok, [table]} <- get_table(sock, family, name),
+         {:ok, chains} <- dump_chains(sock, family),
+         {:ok, rules} <- dump_rules(sock, family) do
+      # Filter chains + rules to just this table.
+      chains = Enum.filter(chains, fn {_, c} -> c.table == name end)
+      rules = Enum.filter(rules, fn {_, t, _, _} -> t == name end)
+
+      {:ok, Decoder.from_msgs([table], chains, rules)}
+    end
+  end
+
+  # ----- internals -----
+
+  defp dump_tables(sock, family) do
+    msg = Encoder.gettable_dump(family)
+    talk_dump(sock, msg, &Decoder.table/1, :pull)
+  end
+
+  defp dump_chains(sock, family) do
+    msg = %Message{
+      type: NfnlCodec.nlmsg_type(NfnlCodec.subsys_nftables(), nft_msg_getchain()),
+      flags: nlm_f_dump(),
+      payload: NfnlCodec.encode_nfgenmsg(family, 0)
+    }
+
+    talk_dump(sock, msg, &Decoder.chain/1, :pull)
+  end
+
+  defp dump_rules(sock, family) do
+    msg = %Message{
+      type: NfnlCodec.nlmsg_type(NfnlCodec.subsys_nftables(), nft_msg_getrule()),
+      flags: nlm_f_dump(),
+      payload: NfnlCodec.encode_nfgenmsg(family, 0)
+    }
+
+    talk_dump(sock, msg, &Decoder.rule/1, :pull)
+  end
+
+  defp get_table(sock, family, name) do
+    msg = Encoder.gettable(family, name)
+
+    case Request.talk(sock, msg.type, msg.flags, msg.payload) do
+      {:ok, [%Message{payload: body} | _]} ->
+        {:ok, [Decoder.table(body)]}
+
+      {:ok, []} ->
+        {:error,
+         Error.from_posix(:enoent, :pull,
+           subsys: :nftables,
+           message: "no such table"
+         )}
+
+      {:error, %NetlinkError{} = err} ->
+        {:error,
+         Error.from_posix(err.errno, :pull,
+           subsys: :nftables,
+           message: err.message
+         )}
+
+      {:error, other} ->
+        {:error, other}
+    end
+  end
+
+  defp talk_dump(sock, %Message{} = msg, decode_fun, op) do
+    case Request.talk(sock, msg.type, msg.flags, msg.payload) do
+      {:ok, messages} ->
+        {:ok, Enum.map(messages, fn m -> decode_fun.(m.payload) end)}
+
+      {:error, %NetlinkError{} = err} ->
+        {:error,
+         Error.from_posix(err.errno, op,
+           subsys: :nftables,
+           message: err.message
+         )}
+
+      {:error, other} ->
+        {:error, other}
+    end
+  end
 
   @doc """
   Computes a Patch (the minimal sequence of ops) between two
