@@ -232,6 +232,8 @@ defmodule Linx.MixProject do
           Linx.NFT.Tokenizer,
           Linx.NFT.Parser,
           Linx.NFT.Compiler,
+          Linx.NFT.RuntimeCompiler,
+          Linx.NFT.Runtime,
           Linx.NFT.Formatter
         ],
         "Netlink core": [

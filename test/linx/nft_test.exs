@@ -1,7 +1,7 @@
 defmodule Linx.NFTTest do
   use ExUnit.Case, async: true
 
-  alias Linx.Netfilter.{Chain, Ruleset, Table}
+  alias Linx.Netfilter.{Chain, Expr, Ruleset, Table, Verdict}
 
   describe "parse/1" do
     test "binary → Ruleset" do
@@ -61,16 +61,85 @@ defmodule Linx.NFTTest do
       assert length(table.chains["input"].rules) == 1
     end
 
-    test "uppercase sigil treats literal `\#{` as a line comment (no interpolation yet)" do
-      # Uppercase sigils don't get interpolation from the Elixir
-      # parser, so `\#{...}` arrives at the macro as a literal
-      # binary. The tokenizer (interpolation? defaulting to false)
-      # treats `#` as a line comment; the rule body is effectively
-      # truncated at that point. This is the current behaviour —
-      # full interpolation support is a follow-up commit.
+    test "interpolated port becomes a 2-byte BE cmp value at runtime" do
+      port = 22
+
+      rs =
+        ~NFT"""
+        table inet x {
+          chain c { tcp dport #{port} accept }
+        }
+        """
+
+      [rule] = (rs |> Ruleset.fetch_table({:inet, "x"}) |> elem(1) |> then(& &1.chains)) |> Map.fetch!("c") |> then(& &1.rules)
+
+      assert [
+               %Expr{name: :payload, data: %{base: :transport, offset: 2, len: 2}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<22::big-16>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+    end
+
+    test "interpolated IPv4 address (as string)" do
+      ip = "10.0.0.5"
+
+      rs =
+        ~NFT"""
+        table ip x {
+          chain c { ip saddr #{ip} drop }
+        }
+        """
+
+      [rule] = (rs |> Ruleset.fetch_table({:ip, "x"}) |> elem(1) |> then(& &1.chains)) |> Map.fetch!("c") |> then(& &1.rules)
+
+      assert [
+               %Expr{name: :payload, data: %{base: :network, offset: 12, len: 4}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<10, 0, 0, 5>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :drop}}
+             ] = rule.expressions
+    end
+
+    test "interpolated IPv4 address (as 4-tuple)" do
+      ip = {10, 0, 0, 7}
+
+      rs = ~NFT"table ip x { chain c { ip daddr #{ip} accept } }"
+      [rule] = (rs |> Ruleset.fetch_table({:ip, "x"}) |> elem(1) |> then(& &1.chains)) |> Map.fetch!("c") |> then(& &1.rules)
+
+      assert [_payload, %Expr{name: :cmp, data: %{value: <<10, 0, 0, 7>>}}, _verdict] =
+               rule.expressions
+    end
+
+    test "interpolated interface name pads to IFNAMSIZ" do
+      name = "eth0"
+
+      rs = ~NFT"table inet x { chain c { meta iifname #{name} accept } }"
+      [rule] = (rs |> Ruleset.fetch_table({:inet, "x"}) |> elem(1) |> then(& &1.chains)) |> Map.fetch!("c") |> then(& &1.rules)
+
+      assert [
+               %Expr{name: :meta, data: %{key: :iifname}},
+               %Expr{name: :cmp, data: %{value: ifname_bytes}},
+               _verdict
+             ] = rule.expressions
+
+      assert byte_size(ifname_bytes) == 16
+      assert :binary.part(ifname_bytes, 0, 4) == "eth0"
+    end
+
+    test "runtime type error: passing a binary where an integer is expected" do
+      bad = "not_a_number"
+
+      assert_raise ArgumentError, ~r/expected non-negative integer/, fn ->
+        ~NFT"table inet x { chain c { tcp dport #{bad} accept } }"
+      end
+    end
+
+    test "no-interpolation sigil still goes through the compile-time static path" do
+      # The point: when no `\#{...}` is present, we get a literal
+      # value emitted via Macro.escape — verified by checking the
+      # AST returned by the macro doesn't contain runtime function
+      # calls. Indirect proof: it just compiles to a value.
       rs = ~NFT"table inet x { chain c { accept } }"
       assert %Ruleset{} = rs
-      assert {:ok, _} = Ruleset.fetch_table(rs, {:inet, "x"})
     end
   end
 

@@ -58,17 +58,41 @@ defmodule Linx.NFT do
   fields, `dup`/`fwd`, ipsec contexts) lands as later
   per-construct additions.
 
-  ## Interpolation status
+  ## Interpolation
 
-  Sigil-time Elixir interpolation (`\#{port}` inside a `~NFT`
-  body) is recognised by the tokenizer but is **not yet wired up**
-  in this milestone: `~NFT` accepts only literal binaries today
-  and raises `CompileError` if any interpolation is present. The
-  full type-aware compile-time-checked interpolation flow lands
-  as a follow-up commit on top of N8d.
+  `~NFT` is an uppercase sigil, so Elixir's parser leaves
+  `\#{...}` alone and the macro receives the literal binary —
+  the same pattern Phoenix HEEx uses for `~H`. Our own
+  `Linx.NFT.Tokenizer` recognises `\#{...}` as an interpolation
+  marker (its `:interpolation?` mode is enabled by the sigil
+  always), captures the raw Elixir source between the braces,
+  and emits an `:elixir_expr` token at that position.
+
+  When any `:elixir_expr` tokens are present, the macro switches
+  to `Linx.NFT.RuntimeCompiler`, which emits Elixir code that
+  builds the Ruleset at runtime. At each interpolation position,
+  the emitted code calls into `Linx.NFT.Runtime` with the field
+  kind the surrounding nft syntax expects (`{:int, _}`, `:ipv4`,
+  `:ipv6`, `:ifname`) — that's where the **runtime type check**
+  happens. Pass an integer where a port is expected and you get a
+  `<<port::big-16>>` bytestring; pass a binary where it shouldn't
+  be and you get a runtime `ArgumentError` naming the kind.
+
+  Supported interpolation positions today:
+
+    * Match RHS — `tcp dport \#{port}`, `ip saddr \#{addr}`,
+      `meta iifname \#{name}`.
+
+  Interpolations in keyword positions (table name, chain name,
+  family, hook, …) raise a `ParseError` — they'd require
+  per-validator wiring that hasn't landed yet.
+
+  Sigil bodies with NO interpolations stay on the compile-time
+  static path — the `%Ruleset{}` is computed at macro-expansion
+  time and emitted as a literal value.
   """
 
-  alias Linx.NFT.{Compiler, Formatter, ParseError, Parser, Tokenizer}
+  alias Linx.NFT.{Compiler, Formatter, ParseError, Parser, RuntimeCompiler, Tokenizer}
   alias Linx.Netfilter.Ruleset
 
   @doc """
@@ -120,9 +144,13 @@ defmodule Linx.NFT do
   def format(%Ruleset{} = rs), do: Formatter.format(rs)
 
   @doc """
-  The `~NFT` sigil. Compiles inline nft syntax to a
-  `%Linx.Netfilter.Ruleset{}` at compile time, raising
-  `Linx.NFT.ParseError` on syntax or compile errors.
+  The `~NFT` sigil. Parses inline nft syntax at compile time and
+  returns a `%Linx.Netfilter.Ruleset{}`. Bodies with `\#{...}`
+  interpolations are compiled to runtime-evaluating code; bodies
+  without interpolations are compiled to a literal value.
+
+  Raises `Linx.NFT.ParseError` at compile time on syntax or
+  compile errors.
 
   ## Examples
 
@@ -131,36 +159,51 @@ defmodule Linx.NFT do
       iex> rs.tables |> map_size()
       1
 
-  Modifierless. Interpolation (`\#{...}`) inside the sigil body
-  raises `CompileError` for now — wiring runtime-evaluated
-  bindings into the AST is a follow-up.
+  Modifierless.
   """
   defmacro sigil_NFT({:<<>>, _meta, [literal]}, _modifiers) when is_binary(literal) do
     file = __CALLER__.file
     line = __CALLER__.line
 
-    case parse_sigil(literal, file, line) do
-      {:ok, rs} -> Macro.escape(rs)
+    case tokenize_with_interp(literal, file, line) do
+      {:ok, tokens} ->
+        if has_interpolation?(tokens) do
+          emit_runtime(tokens, literal, file)
+        else
+          emit_static(tokens, literal, file)
+        end
+
+      {:error, %ParseError{} = err} ->
+        raise err
+    end
+  end
+
+  defp tokenize_with_interp(source, file, line) do
+    Tokenizer.tokenize(source, file: file, line: line, interpolation?: true)
+  end
+
+  defp has_interpolation?(tokens) do
+    Enum.any?(tokens, fn
+      {:elixir_expr, _, _} -> true
+      _ -> false
+    end)
+  end
+
+  defp emit_static(tokens, source, file) do
+    with {:ok, ast} <- Parser.parse(tokens, file: file, source: source),
+         {:ok, rs} <- Compiler.compile(ast, file: file, source: source) do
+      Macro.escape(rs)
+    else
       {:error, %ParseError{} = err} -> raise err
     end
   end
 
-  defmacro sigil_NFT({:<<>>, meta, _parts}, _modifiers) do
-    line = Keyword.get(meta, :line, __CALLER__.line)
-
-    raise CompileError,
-      file: __CALLER__.file,
-      line: line,
-      description:
-        "~NFT does not yet support Elixir interpolation inside the sigil body — " <>
-          "use the pipeline DSL (Linx.Netfilter.Ruleset.add_*!) for now"
-  end
-
-  defp parse_sigil(source, file, line) do
-    with {:ok, tokens} <- Tokenizer.tokenize(source, file: file, line: line),
-         {:ok, ast} <- Parser.parse(tokens, file: file, source: source),
-         {:ok, rs} <- Compiler.compile(ast, file: file, source: source) do
-      {:ok, rs}
+  defp emit_runtime(tokens, source, file) do
+    with {:ok, ast} <- Parser.parse(tokens, file: file, source: source),
+         {:ok, quoted} <- RuntimeCompiler.emit(ast, file: file, source: source) do
+      quoted
+    else
+      {:error, %ParseError{} = err} -> raise err
     end
   end
 end

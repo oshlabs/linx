@@ -690,6 +690,43 @@ line numbers:
 |              ^
 ```
 
+### Elixir interpolation
+
+`~NFT` is uppercase, so Elixir's parser leaves `#{...}` alone —
+our own tokenizer recognises it (same pattern Phoenix HEEx uses
+for `~H`). When the sigil body contains any interpolations, the
+sigil builds the Ruleset **at runtime**, evaluating each
+expression in the caller's scope and encoding it for the field
+kind the surrounding syntax expects (`{:int, _}` / `:ipv4` /
+`:ipv6` / `:ifname`):
+
+```elixir
+def per_port_rule(port, allowed_addr) do
+  ~NFT"""
+  table inet myapp {
+    chain input {
+      type filter hook input priority 0
+      policy drop
+
+      ip saddr #{allowed_addr} tcp dport #{port} accept
+    }
+  }
+  """
+end
+```
+
+`port` must be a non-negative integer (encoded `<<n::big-16>>`).
+`allowed_addr` accepts an IPv4 string, a 4-tuple, a 4-byte
+binary, or a `%Linx.IP{family: :inet}`. Type mismatches raise
+`ArgumentError` at runtime — the interpolation is type-checked
+at the value position, not stringified blindly.
+
+Bodies with **no** interpolations skip the runtime path entirely
+and are compiled to a literal `%Ruleset{}` at macro-expansion
+time. Interpolations in keyword positions (table names, chain
+names, families, hooks, …) raise a `ParseError` for now — they'd
+require per-validator wiring.
+
 ## File mode — Linx.NFT.parse_file/1
 
 Same parser/compiler, file input. Useful for importing an
