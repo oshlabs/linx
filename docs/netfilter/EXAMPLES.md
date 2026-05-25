@@ -646,6 +646,102 @@ the consumer, the kernel drops events and the listener emits
 `{:linx_netfilter, :resync_needed}` to the owner. Default
 `SO_RCVBUF` is 4 MiB; tune with `:rcvbuf`.
 
-## (Will land with N8 — `~NFT` sigil + Conf parser)
+## ~NFT sigil — inline nft syntax
+
+The `~NFT` sigil parses nft syntax at compile time and produces
+the same `%Linx.Netfilter.Ruleset{}` value the pipeline DSL
+builds. Both authoring surfaces converge on the same value via
+the same validator-setter functions — they're interchangeable.
+
+```elixir
+import Linx.NFT
+
+ruleset =
+  ~NFT"""
+  table inet appliance {
+    chain input {
+      type filter hook input priority 0
+      policy drop
+
+      ct state established accept
+      tcp dport 22 log prefix "ssh-attempt" group 5000 accept
+      ip saddr 10.0.0.0/8 accept
+    }
+
+    chain forward {
+      type filter hook forward priority 0
+      policy drop
+    }
+  }
+  """
+
+{:ok, nfnl} = Linx.Netlink.Nfnl.open()
+:ok = Linx.Netfilter.push(nfnl, ruleset)
+```
+
+Compile errors raise `Linx.NFT.ParseError` **at compile time**
+with a caret diagnostic keyed off the surrounding `.ex` file's
+line numbers:
+
+```
+** (Linx.NFT.ParseError) lib/myapp/firewall.ex:42:14: unexpected character '?'
+|
+|     tcp dport ? accept
+|              ^
+```
+
+## File mode — Linx.NFT.parse_file/1
+
+Same parser/compiler, file input. Useful for importing an
+existing `nftables.conf` into Elixir as a value to inspect,
+edit, or push:
+
+```elixir
+{:ok, ruleset} = Linx.NFT.parse_file("/etc/nftables.conf")
+
+# Tweak: drop the SSH allow rule, swap in something stricter.
+edited =
+  ruleset
+  |> Ruleset.delete_rule!(...)
+  |> Ruleset.add_rule!(...)
+
+# Push the edited version back atomically.
+:ok = Linx.Netfilter.push(nfnl, edited, mode: :reconcile)
+```
+
+`parse_file/1` returns `{:error, posix}` for missing/unreadable
+files and `{:error, %Linx.NFT.ParseError{}}` (with `file:` set
+to the path) for syntax/compile errors.
+
+## Canonical emit — Linx.NFT.format/1
+
+`format/1` walks a Ruleset and emits canonical nft source —
+useful for diffing, golden-test fixtures, or writing the result
+of a programmatic edit back to disk:
+
+```elixir
+ruleset =
+  Ruleset.new()
+  |> Ruleset.add_table!(:inet, "myapp")
+  |> Ruleset.add_chain!("myapp", "input",
+       type: :filter, hook: :input, priority: 0, policy: :drop)
+  |> Ruleset.add_rule!("myapp", "input",
+       [Expr.payload(:tcp_dport), Expr.cmp(:eq, <<22::big-16>>),
+        Expr.immediate(Verdict.accept())])
+
+IO.puts Linx.NFT.format(ruleset)
+# table inet myapp {
+#   chain input {
+#     type filter hook input priority 0
+#     policy drop
+#
+#     tcp dport 22 accept
+#   }
+# }
+```
+
+Round-trip is structurally identical for the supported slice —
+`parse(format(rs)) == {:ok, rs}`. Trivia (original comments,
+blank lines, ordering) isn't preserved; that's a v2 enhancement.
 
 ## (Will land with N9 — `mix format` plugin)

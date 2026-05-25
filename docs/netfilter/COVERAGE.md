@@ -151,11 +151,11 @@ A living doc — update as primitives ship. Status legend:
 | `Linx.NFT.Parser` (handwritten token-stream recursive descent) | ✅ | N8b — tables (all families), chains (base headers + named/integer priorities), rules (matches on `tcp/udp/ip/ip6/icmp/icmpv6 + field`, `meta`, `ct`; verdicts; `counter`/`log`/`limit`/`dnat`/`snat`/`masquerade`/`redirect`; `meta mark set`), named sets/maps/vmaps with `type`/`flags`/`timeout`/`elements`, objects (`counter`/`quota`/`limit`), flowtables, `include`/`define` at top-level. AST carries file:line:column on every node |
 | `Linx.NFT.Compiler` (AST → validator-setter calls → `%Ruleset{}`) | 🟡 | N8c — tables, chains (base headers with named-alias priorities resolved via `Wire.priority_int/2`), rules (verdicts; payload/meta/ct matches against integer/address/CIDR/set_ref/inline-set; counter/log/reject/dnat/snat/masquerade/redirect), sets (declarations + simple element types), maps/vmaps (declarations). Deferred with clean ParseError: limit, meta-set/ct-set, named objects, flowtables, includes, concatenated set/map keys |
 | `Linx.NFT.ParseError` (file:line:column + code_snippet) | ✅ | N8a — Elixir-compiler-style caret rendering via `code_snippet/2`; `raise_syntax_error!/2` helper |
-| `sigil_NFT/2` | ⬜ | N8 — `~NFT"table inet ... { ... }"` |
-| `parse/1` / `parse_file/1` | ⬜ | N8 — same parser, different entry |
-| `format/1` (canonical emit) | ⬜ | N8 — Inspect.Algebra; no trivia preservation |
-| Compile-time type-aware Elixir interpolation | ⬜ | N8 |
-| ~85% grammar subset (tables, chains, common matches, common statements, basic sets/maps, NAT) | ⬜ | N8 |
+| `sigil_NFT/2` | ✅ | N8d — `~NFT"table inet ... { ... }"` compile-time → `%Ruleset{}` literal; raises `ParseError` at compile time on bad syntax with `__CALLER__.file:line` |
+| `Linx.NFT.parse/1` / `parse_file/1` | ✅ | N8d — same Tokenizer/Parser/Compiler pipeline as the sigil; `parse_file/1` carries the file path into error messages and returns `{:error, posix}` for missing files |
+| `Linx.NFT.format/1` (canonical emit) | 🟡 | N8d — `Linx.NFT.Formatter` walks the Ruleset and emits canonical nft syntax for everything the compiler supports. Round-trip (`parse → format → parse`) is structurally identical for the supported slice. Unknown expression shapes emit `# <unsupported expression: NAME>` in-line so the output stays valid nft. Trivia (comments / blank lines / original ordering) is not preserved |
+| Compile-time type-aware Elixir interpolation | ⬜ | follow-up — uppercase `~NFT` sigils don't get Elixir interpolation; will require either a lowercase variant or an explicit binding mechanism |
+| ~85% grammar subset (tables, chains, common matches, common statements, basic sets/maps, NAT) | 🟡 | reached for the compiler-supported slice; long-tail constructs (`limit`, `meta`-set, named objects, flowtables, includes, concat keys) ship as per-construct follow-ups |
 | `mix format` plugin (`Linx.NFT.Formatter`) | ⬜ | N9 |
 
 ## Error reporting
