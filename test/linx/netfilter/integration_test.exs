@@ -37,6 +37,22 @@ defmodule Linx.Netfilter.IntegrationTest do
     end
   end
 
+  defp drain_log_events(timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_drain_log([], deadline)
+  end
+
+  defp do_drain_log(acc, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:linx_netfilter, :log, event} -> do_drain_log([event | acc], deadline)
+      {:linx_netfilter, :resync_needed} -> do_drain_log(acc, deadline)
+    after
+      remaining -> Enum.reverse(acc)
+    end
+  end
+
   describe "create_table/3 — minimal happy path" do
     test "creates an :inet table and returns a single-table ruleset" do
       {:ok, sock} = Nfnl.open()
@@ -1233,6 +1249,124 @@ defmodule Linx.Netfilter.IntegrationTest do
       assert :ok = Netfilter.unsubscribe(monitor)
       Process.sleep(20)
       refute Process.alive?(monitor)
+    end
+
+    test "log_listen + Expr.log → owner receives :log event with the prefix" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+      group = 5000 + :erlang.unique_integer([:positive, :monotonic])
+      group = rem(group, 65_000) + 1000
+
+      {:ok, listener} =
+        Netfilter.log_listen(self(),
+          group: group,
+          copy_mode: {:packet, 256}
+        )
+
+      on_exit(fn -> if Process.alive?(listener), do: Netfilter.unlog_listen(listener) end)
+
+      # Give the listener time to send all its config (BIND + PF_BIND
+      # + MODE) before we install the rule.
+      Process.sleep(100)
+
+      table_name = unique_name("nflog")
+
+      # ip protocol icmp log prefix "linx-test" group <group> accept
+      # NFLOG runs in the rule even though the verdict is :accept.
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: -200,
+          policy: :accept
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:ip_protocol),
+            Expr.cmp(:eq, <<1::8>>),
+            Expr.log(group: group, prefix: "linx-test"),
+            Verdict.accept()
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      # Generate ICMP traffic on lo
+      {_out, _exit} = System.cmd("ping", ["-c", "2", "-W", "1", "127.0.0.1"],
+        stderr_to_stdout: true)
+
+      events = drain_log_events(1_000)
+
+      assert length(events) >= 1
+      [first | _] = events
+      assert first.prefix == "linx-test"
+      assert first.group == group
+
+      # In copy_mode {:packet, 256}, payload should be present.
+      assert is_binary(first.payload) and byte_size(first.payload) > 0
+    end
+
+    test "log_listen with bare metadata copy_mode omits payload" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+      group = 6000 + :erlang.unique_integer([:positive, :monotonic])
+      group = rem(group, 65_000) + 1000
+
+      {:ok, listener} = Netfilter.log_listen(self(), group: group, copy_mode: :meta)
+      on_exit(fn -> if Process.alive?(listener), do: Netfilter.unlog_listen(listener) end)
+
+      Process.sleep(100)
+
+      table_name = unique_name("nflog_meta")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: -200,
+          policy: :accept
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:ip_protocol),
+            Expr.cmp(:eq, <<1::8>>),
+            Expr.log(group: group, prefix: "meta-only"),
+            Verdict.accept()
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+      # Let the rule install fully before generating traffic
+      Process.sleep(50)
+      System.cmd("ping", ["-c", "2", "-W", "1", "127.0.0.1"], stderr_to_stdout: true)
+
+      events = drain_log_events(1_500)
+      assert Enum.any?(events, &(&1.prefix == "meta-only"))
+
+      # In :meta mode the kernel does NOT include NFULA_PAYLOAD.
+      meta_event = Enum.find(events, &(&1.prefix == "meta-only"))
+      assert is_nil(meta_event.payload)
+    end
+
+    test "unlog_listen stops the listener" do
+      group = 7000 + :erlang.unique_integer([:positive, :monotonic])
+      group = rem(group, 65_000) + 1000
+
+      {:ok, listener} = Netfilter.log_listen(self(), group: group)
+      assert Process.alive?(listener)
+      assert :ok = Netfilter.unlog_listen(listener)
+      Process.sleep(20)
+      refute Process.alive?(listener)
     end
 
     test "jump verdict to a regular chain" do

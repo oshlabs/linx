@@ -226,7 +226,7 @@ defmodule Linx.Netfilter.Monitor do
     if event.gen_id > state.min_gen do
       # Drain buffered entity events with this gen's metadata, then
       # forward the NEW_GEN itself.
-      for entity_event <- Enum.reverse(state.pending) do
+      for %Event{} = entity_event <- Enum.reverse(state.pending) do
         enriched = %Event{
           entity_event
           | gen_id: event.gen_id,

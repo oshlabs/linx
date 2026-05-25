@@ -570,9 +570,81 @@ end
 Default `SO_RCVBUF` is 4 MiB; pass `:rcvbuf` to `subscribe/2` to
 raise it further if your environment is heavily churned.
 
-## (Will land with N7 — NFLOG via NFNL_SUBSYS_ULOG)
+## NFLOG (N7) — per-packet observability
 
-## (Will land with N7 — NFLOG via NFNL_SUBSYS_ULOG)
+Subscribe to a NFLOG group via `log_listen/2`, then push rules
+with `Expr.log/1` that route matching packets to that group. The
+listener decodes each `NFULNL_MSG_PACKET` into a `%Log.Event{}`
+with prefix, mark, timestamp, indev/outdev, hwaddr, payload, and
+more.
+
+```elixir
+alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+# Open the listener. Linx convention: use group 5000 unless you
+# have a reason to pick something else.
+{:ok, listener} =
+  Linx.Netfilter.log_listen(self(),
+    group: 5000,
+    copy_mode: {:packet, 256},
+    flags: [:seq])
+
+# A rule that logs and accepts every inbound packet.
+ruleset =
+  Ruleset.new()
+  |> Ruleset.add_table!(:inet, "audit", flags: [:owner])
+  |> Ruleset.add_chain!("audit", "input",
+       type: :filter, hook: :input, priority: -200, policy: :accept)
+  |> Ruleset.add_rule!("audit", "input",
+       Rule.build!([
+         Expr.log(group: 5000, prefix: "inbound"),
+         Verdict.accept()
+       ]))
+
+:ok = Linx.Netfilter.push(sock, ruleset)
+
+# Now any packet on the input chain triggers an event:
+receive do
+  {:linx_netfilter, :log, %{prefix: "inbound", payload: bytes, hwaddr: mac}} ->
+    IO.puts("Saw #{byte_size(bytes)} bytes from #{inspect(mac)}")
+end
+
+:ok = Linx.Netfilter.unlog_listen(listener)
+```
+
+## Copy modes
+
+  * `:none` — only the metadata attributes; no payload, no
+    hwaddr. Cheapest.
+  * `:meta` (default) — metadata including hwaddr but no packet
+    payload.
+  * `:packet` — full packet up to the kernel default snaplen.
+  * `{:packet, snaplen}` — packet truncated to `snaplen` bytes.
+
+For audit-only use cases, `:meta` is plenty and avoids the data
+copy. For decoding the payload yourself (TCP headers, etc.),
+`{:packet, snaplen}` lets you control the bandwidth.
+
+## Multi-group routing
+
+Each `log_listen/2` call binds one group. Multiple listeners on
+different groups route disjoint event streams to different
+owners:
+
+```elixir
+{:ok, audit} = Linx.Netfilter.log_listen(self(), group: 5001, copy_mode: :meta)
+{:ok, debug} = Linx.Netfilter.log_listen(debug_pid, group: 5002, copy_mode: {:packet, 1500})
+```
+
+A rule with `Expr.log(group: 5001)` flows to `audit`; one with
+`group: 5002` flows to `debug`.
+
+## ENOBUFS
+
+Same shape as the Monitor: if the multicast firehose outpaces
+the consumer, the kernel drops events and the listener emits
+`{:linx_netfilter, :resync_needed}` to the owner. Default
+`SO_RCVBUF` is 4 MiB; tune with `:rcvbuf`.
 
 ## (Will land with N8 — `~NFT` sigil + Conf parser)
 

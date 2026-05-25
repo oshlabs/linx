@@ -220,6 +220,8 @@ defmodule Linx.MixProject do
           Linx.Netfilter.Diff,
           Linx.Netfilter.Event,
           Linx.Netfilter.Monitor,
+          Linx.Netfilter.Log,
+          Linx.Netfilter.Log.Event,
           Linx.Netfilter.Encoder,
           Linx.Netfilter.Decoder,
           Linx.Netfilter.Wire

@@ -534,6 +534,41 @@ defmodule Linx.Netfilter.Expr do
   end
 
   @doc """
+  Log expression — emits a per-packet event to the NFLOG
+  subsystem (`NFNL_SUBSYS_ULOG`) on the named group. Combine with
+  `Linx.Netfilter.log_listen/2` for in-BEAM packet observability.
+
+  Options (all optional):
+
+    * `:group` — NFLOG group (1..65535). Defaults to `5000` (the
+      Linx convention for "I don't care which group").
+    * `:prefix` — string label that shows up in `Event.prefix`;
+      useful for tagging rules ("blocked", "audit", …). Max 127
+      bytes.
+    * `:snaplen` — bytes of packet payload to copy (overrides the
+      consumer's copy_mode/snaplen if set on the rule). 0 = no
+      packet data.
+    * `:qthreshold` — kernel-side queue threshold; packets are
+      batched into multipart netlink messages up to this count.
+    * `:flags` — `:tcp_seq` / `:tcp_opt` / `:ip_opt` / `:uid` /
+      `:macdecode` (NF_LOG_*). Most callers want them set at the
+      Log listener side via `:flags` there instead.
+  """
+  @spec log(keyword()) :: t()
+  def log(opts \\ []) when is_list(opts) do
+    %__MODULE__{
+      name: :log,
+      data: %{
+        group: Keyword.get(opts, :group, 5000),
+        prefix: Keyword.get(opts, :prefix),
+        snaplen: Keyword.get(opts, :snaplen),
+        qthreshold: Keyword.get(opts, :qthreshold),
+        flags: Keyword.get(opts, :flags, [])
+      }
+    }
+  end
+
+  @doc """
   Redirect expression — DNAT to the local machine, optionally
   changing the destination port. The kernel uses the input
   interface's address as the new destination, which makes this

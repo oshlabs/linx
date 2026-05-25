@@ -1082,6 +1082,44 @@ defmodule Linx.Netfilter.Encoder do
     end)
   end
 
+  defp encode_expr_data(:log, %{
+         group: group,
+         prefix: prefix,
+         snaplen: snaplen,
+         qthreshold: qthreshold,
+         flags: flags
+       }) do
+    []
+    |> maybe_add(not is_nil(group), fn ->
+      {nfta_log_group(), <<group::big-unsigned-16>>}
+    end)
+    |> maybe_add(not is_nil(prefix), fn ->
+      {nfta_log_prefix(), [prefix, 0]}
+    end)
+    |> maybe_add(not is_nil(snaplen), fn ->
+      {nfta_log_snaplen(), Wire.u32_be(snaplen)}
+    end)
+    |> maybe_add(not is_nil(qthreshold), fn ->
+      {nfta_log_qthreshold(), <<qthreshold::big-unsigned-16>>}
+    end)
+    |> maybe_add(flags != [] and flags != nil, fn ->
+      {nfta_log_flags(), Wire.u32_be(encode_log_flags(flags))}
+    end)
+  end
+
+  defp encode_log_flags(flags) do
+    import Bitwise
+
+    Enum.reduce(flags, 0, fn
+      :tcp_seq, acc -> acc ||| 0x01
+      :tcp_opt, acc -> acc ||| 0x02
+      :ip_opt, acc -> acc ||| 0x04
+      :uid, acc -> acc ||| 0x08
+      :macdecode, acc -> acc ||| 0x20
+      _, acc -> acc
+    end)
+  end
+
   defp encode_expr_data(:redir, %{
          flags: flags,
          reg_proto_min: reg_proto_min,

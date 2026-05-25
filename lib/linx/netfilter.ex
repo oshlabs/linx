@@ -640,11 +640,45 @@ defmodule Linx.Netfilter do
   def unsubscribe(monitor) when is_pid(monitor), do: Linx.Netfilter.Monitor.stop(monitor)
 
   @doc """
-  Opens an NFLOG listener bound to `group`. The owner receives
-  `{:linx_netfilter, :log, %Log.Event{}}` per logged packet.
+  Opens an NFLOG listener bound to `:group`. The owner receives
+  `{:linx_netfilter, :log, %Linx.Netfilter.Log.Event{}}` per
+  logged packet.
 
-  Lands in N7.
+  Required option:
+
+    * `:group` — NFLOG group (1..65535) the rule's
+      `Linx.Netfilter.Expr.log/1` directs packets to. Linx
+      convention: use `5000` if you don't care which group.
+
+  Optional:
+
+    * `:netns` — namespace; default `:host`.
+    * `:copy_mode` — `:none` | `:meta` | `:packet` |
+      `{:packet, snaplen}`. Default `:meta` (header info only,
+      no payload).
+    * `:qthresh` — kernel-side queue threshold; default `1`.
+    * `:timeout_ms` — kernel-side batching timeout; default `0`
+      (no time-based batching).
+    * `:flags` — `[:seq, :seq_global, :conntrack]`.
+    * `:families` — protocol families to bind; default
+      `[:ipv4, :ipv6]`.
+    * `:rcvbuf` — `SO_RCVBUF` bytes; default 4 MiB.
+
+  Returns `{:ok, listener_pid}`. Close with `unlog_listen/1`.
+
+  See `Linx.Netfilter.Log` for the GenServer's full surface and
+  `Linx.Netfilter.Log.Event` for the packet-event shape.
   """
-  @spec log_listen(pid(), keyword()) :: {:ok, reference()} | {:error, term()}
-  def log_listen(_owner_pid, _opts \\ []), do: {:error, :not_yet_implemented}
+  @spec log_listen(pid(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def log_listen(owner_pid \\ self(), opts \\ [])
+      when is_pid(owner_pid) and is_list(opts) do
+    Linx.Netfilter.Log.start_link([owner: owner_pid] ++ opts)
+  end
+
+  @doc """
+  Stops a Log listener returned by `log_listen/2`. The kernel-side
+  group binding is dropped before the socket is closed.
+  """
+  @spec unlog_listen(pid()) :: :ok
+  def unlog_listen(listener) when is_pid(listener), do: Linx.Netfilter.Log.stop(listener)
 end

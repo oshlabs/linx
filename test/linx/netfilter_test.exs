@@ -177,15 +177,11 @@ defmodule Linx.NetfilterTest do
     end
   end
 
-  describe "N1-N7 stubs" do
-    # create_table/3, push/3, pull/1, pull/2 shipped in N2. diff/2 +
-    # dry_run/2 shipped in N5. subscribe/1 shipped in N6.
-    # log_listen/2 lands in N7.
-
-    test "log_listen/2" do
-      assert {:error, :not_yet_implemented} = Netfilter.log_listen(self(), group: 5000)
-    end
-  end
+  # N0 shipped scaffolding; N1 value types; N2 push/pull;
+  # N3 NAT; N4 sets/maps/vmaps; N5 diff/:reconcile;
+  # N6 subscribe (monitor); N7 log_listen (NFLOG).
+  # All verbs are real now — integration coverage lives in
+  # test/linx/netfilter/integration_test.exs.
 
   describe "N0 integration — Linx.Netlink.Nfnl.Codec.get_gen/1 round-trip" do
     @describetag :integration

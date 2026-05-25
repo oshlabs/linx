@@ -776,6 +776,95 @@ defmodule Linx.Netfilter.Wire do
   end
 
   # ===========================================================
+  # NFLOG (`NFNL_SUBSYS_ULOG`) constants
+  # ===========================================================
+
+  # NFULNL message types (low byte of nlmsghdr.type when subsys=4)
+  defmacro nfulnl_msg_packet, do: 0
+  defmacro nfulnl_msg_config, do: 1
+
+  # NFULNL_CFG_CMD_*
+  defmacro nfulnl_cfg_cmd_none, do: 0
+  defmacro nfulnl_cfg_cmd_bind, do: 1
+  defmacro nfulnl_cfg_cmd_unbind, do: 2
+  defmacro nfulnl_cfg_cmd_pf_bind, do: 3
+  defmacro nfulnl_cfg_cmd_pf_unbind, do: 4
+
+  # NFULNL_COPY_*
+  defmacro nfulnl_copy_none, do: 0
+  defmacro nfulnl_copy_meta, do: 1
+  defmacro nfulnl_copy_packet, do: 2
+
+  # NFULNL_CFG_F_* (u16, big-endian on the wire)
+  defmacro nfulnl_cfg_f_seq, do: 0x1
+  defmacro nfulnl_cfg_f_seq_global, do: 0x2
+  defmacro nfulnl_cfg_f_conntrack, do: 0x4
+
+  # NFULA_CFG_* attributes (in NFULNL_MSG_CONFIG body)
+  defmacro nfula_cfg_cmd, do: 1
+  defmacro nfula_cfg_mode, do: 2
+  defmacro nfula_cfg_nlbufsiz, do: 3
+  defmacro nfula_cfg_timeout, do: 4
+  defmacro nfula_cfg_qthresh, do: 5
+  defmacro nfula_cfg_flags, do: 6
+
+  # NFULA_* attributes (in NFULNL_MSG_PACKET body)
+  defmacro nfula_packet_hdr, do: 1
+  defmacro nfula_mark, do: 2
+  defmacro nfula_timestamp, do: 3
+  defmacro nfula_ifindex_indev, do: 4
+  defmacro nfula_ifindex_outdev, do: 5
+  defmacro nfula_ifindex_physindev, do: 6
+  defmacro nfula_ifindex_physoutdev, do: 7
+  defmacro nfula_hwaddr, do: 8
+  defmacro nfula_payload, do: 9
+  defmacro nfula_prefix, do: 10
+  defmacro nfula_uid, do: 11
+  defmacro nfula_seq, do: 12
+  defmacro nfula_seq_global, do: 13
+  defmacro nfula_gid, do: 14
+  defmacro nfula_hwtype, do: 15
+  defmacro nfula_hwheader, do: 16
+  defmacro nfula_hwlen, do: 17
+  defmacro nfula_ct, do: 18
+  defmacro nfula_ct_info, do: 19
+  defmacro nfula_vlan, do: 20
+  defmacro nfula_l2hdr, do: 21
+
+  # NFTA_LOG_* — attributes of the nft `log` expression
+  defmacro nfta_log_group, do: 1
+  defmacro nfta_log_prefix, do: 2
+  defmacro nfta_log_snaplen, do: 3
+  defmacro nfta_log_qthreshold, do: 4
+  defmacro nfta_log_level, do: 5
+  defmacro nfta_log_flags, do: 6
+
+  @doc """
+  Maps a NFLOG copy-mode atom to the kernel's u8 value:
+  `:none` → 0, `:meta` → 1, `:packet` → 2.
+  """
+  @spec copy_mode_int(atom() | {:packet, non_neg_integer()}) :: 0..2
+  def copy_mode_int(:none), do: 0
+  def copy_mode_int(:meta), do: 1
+  def copy_mode_int(:packet), do: 2
+  def copy_mode_int({:packet, _snaplen}), do: 2
+
+  @doc """
+  Maps a NFLOG-config-flags list to the u16 bitmask (BE on wire).
+  """
+  @spec nfulnl_cfg_flags_int([atom()]) :: non_neg_integer()
+  def nfulnl_cfg_flags_int(flags) when is_list(flags) do
+    import Bitwise
+
+    Enum.reduce(flags, 0, fn
+      :seq, acc -> acc ||| 0x1
+      :seq_global, acc -> acc ||| 0x2
+      :conntrack, acc -> acc ||| 0x4
+      _, acc -> acc
+    end)
+  end
+
+  # ===========================================================
   # NAT flags (NF_NAT_RANGE_*)
   # ===========================================================
 

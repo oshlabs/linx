@@ -131,12 +131,17 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `Linx.Netfilter.Log` GenServer | ⬜ | N7 |
-| `log_listen/2` API (group, copy_mode, qthresh, timeout, flags, families) | ⬜ | N7 |
-| Per-group CFG_CMD_BIND / PF_BIND | ⬜ | N7 |
-| `%Log.Event{}` decoder (every NFULA_* attribute) | ⬜ | N7 |
-| Per-protocol payload decode (`%Packet.{IPv4,IPv6,TCP,UDP,ICMP}{}`) | ⬜ | N7 |
-| Linx-default group `5000` convention | ⬜ | N7 |
+| `Linx.Netfilter.Log` GenServer | ✅ | N7 — short-timeout polling loop, ENOBUFS → `:resync_needed` |
+| `Linx.Netfilter.log_listen/2` + `unlog_listen/1` | ✅ | N7 — group/copy_mode/qthresh/timeout/flags/families/rcvbuf |
+| Per-group CFG_CMD_BIND + CFG_CMD_PF_BIND | ✅ | N7 — `:families` defaults to `[:ipv4, :ipv6]`; UNBIND on stop |
+| CFG_MODE (copy_mode + snaplen) | ✅ | N7 — `:none` / `:meta` / `:packet` / `{:packet, snaplen}` |
+| CFG_FLAGS (`:seq`, `:seq_global`, `:conntrack`) | ✅ | N7 |
+| CFG_QTHRESH (batching threshold) | ✅ | N7 — sent only when `> 1` |
+| CFG_TIMEOUT (kernel-side time batching) | ✅ | N7 — converted from ms to kernel's 100ms units |
+| `Linx.Netfilter.Expr.log/1` (`NFTA_LOG_*`) | ✅ | N7 — group/prefix/snaplen/qthreshold/flags |
+| `%Log.Event{}` decoder (NFULA_* attributes) | ✅ | N7 — packet_hdr / mark / timestamp / iif/oif (incl. phys) / hwaddr / payload / prefix / uid/gid / seq / seq_global |
+| Per-protocol payload decode (`%Packet.{IPv4,IPv6,TCP,UDP,ICMP}{}`) | ⬜ | future — raw payload bytes available now; structured decode is a small additive layer |
+| Linx convention: group 5000 default | ✅ | N7 — documented in `Linx.Netfilter.Log` and the moduledoc of `Expr.log/1` |
 
 ## `~NFT` sigil + Conf parser
 
