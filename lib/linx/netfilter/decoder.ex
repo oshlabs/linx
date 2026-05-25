@@ -152,15 +152,51 @@ defmodule Linx.Netfilter.Decoder do
         nil -> []
       end
 
+    {tag, comment} = decode_rule_userdata(get_binary(attrs, nfta_rule_userdata()))
+
     rule = %Rule{
       expressions: expressions,
       chain: chain_name,
       handle: handle,
-      tag: nil,
-      comment: nil
+      tag: tag,
+      comment: comment
     }
 
     {family, table_name, chain_name, rule}
+  end
+
+  # Mirror of the encoder's TLV format. See encoder.ex for the
+  # type-byte allocations.
+  @udata_rule_comment 0
+  @udata_rule_linx_tag 16
+
+  defp decode_rule_userdata(nil), do: {nil, nil}
+  defp decode_rule_userdata(<<>>), do: {nil, nil}
+
+  defp decode_rule_userdata(bin) do
+    bin
+    |> walk_udata({nil, nil})
+  end
+
+  defp walk_udata(<<>>, acc), do: acc
+
+  defp walk_udata(<<type::8, len::8, rest::binary>>, {tag, comment}) do
+    case rest do
+      <<value::binary-size(len), more::binary>> ->
+        str = String.trim_trailing(value, <<0>>)
+
+        new_acc =
+          case type do
+            @udata_rule_linx_tag -> {String.to_atom(str), comment}
+            @udata_rule_comment -> {tag, str}
+            _ -> {tag, comment}
+          end
+
+        walk_udata(more, new_acc)
+
+      _ ->
+        {tag, comment}
+    end
   end
 
   defp decode_expressions(binary) do

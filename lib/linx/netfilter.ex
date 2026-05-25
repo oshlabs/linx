@@ -256,28 +256,81 @@ defmodule Linx.Netfilter do
     case Keyword.get(opts, :mode, :replace) do
       :replace ->
         msgs = Encoder.to_batch(ruleset)
-
-        case Nfnl.batch(sock, msgs) do
-          :ok ->
-            :ok
-
-          {:error, {batch_seq, %NetlinkError{} = err}} ->
-            {:error,
-             Error.from_posix(err.errno, :push,
-               subsys: :nftables,
-               batch_seq: batch_seq,
-               message: err.message
-             )}
-
-          {:error, other} ->
-            {:error, other}
-        end
+        send_batch(sock, msgs, [])
 
       :reconcile ->
-        {:error, :not_yet_implemented}
+        push_reconcile(sock, ruleset, opts)
 
       other ->
         {:error, {:unknown_push_mode, other}}
+    end
+  end
+
+  defp send_batch(sock, msgs, batch_opts) do
+    case Nfnl.batch(sock, msgs, :nftables, batch_opts) do
+      :ok ->
+        :ok
+
+      {:error, {batch_seq, %NetlinkError{} = err}} ->
+        {:error,
+         Error.from_posix(err.errno, :push,
+           subsys: :nftables,
+           batch_seq: batch_seq,
+           message: err.message
+         )}
+
+      {:error, other} ->
+        {:error, other}
+    end
+  end
+
+  # ----- :reconcile -----
+
+  defp push_reconcile(sock, ruleset, opts) do
+    case Linx.Netfilter.Diff.validate_for_reconcile(ruleset) do
+      :ok ->
+        max_retries = Keyword.get(opts, :retries, 3)
+        do_reconcile(sock, ruleset, max_retries, max_retries)
+
+      {:error, {:tag_required, _}} = err ->
+        err
+    end
+  end
+
+  defp do_reconcile(sock, ruleset, retries_left, total_retries) do
+    with {:ok, current} <- pull(sock),
+         {:ok, gen} <- Linx.Netlink.Nfnl.Codec.get_gen(sock) do
+      patch = Linx.Netfilter.Diff.diff(current, ruleset)
+
+      if Linx.Netfilter.Patch.empty?(patch) do
+        :ok
+      else
+        msgs = Encoder.from_patch(patch)
+
+        case send_batch(sock, msgs, genid: gen.id) do
+          :ok ->
+            :ok
+
+          {:error, %Error{errno: :erestart}} when retries_left > 0 ->
+            # Concurrent commit between our pull and our push — back
+            # off briefly, then re-pull and re-diff against the
+            # newer kernel state.
+            backoff_ms = (total_retries - retries_left + 1) * 10
+            Process.sleep(backoff_ms)
+            do_reconcile(sock, ruleset, retries_left - 1, total_retries)
+
+          {:error, %Error{errno: :erestart} = err} ->
+            {:error,
+             %Error{
+               err
+               | message: "concurrent modification, retries exhausted",
+                 ruleset_gen: gen.id
+             }}
+
+          {:error, _} = err ->
+            err
+        end
+      end
     end
   end
 
@@ -474,19 +527,37 @@ defmodule Linx.Netfilter do
   end
 
   @doc """
-  Computes a Patch (the minimal sequence of ops) between two
-  Rulesets. Identity rules: name for tables/chains/sets/objects,
-  tag-or-position for rules within a chain, element value for set
-  elements.
+  Computes the minimum-mutation `%Linx.Netfilter.Patch{}` between
+  two Rulesets — the operations that turn `from` into `to`.
 
-  Lands in N5. `dry_run/2` is an alias.
+  Identity rules:
+
+    * Tables / chains / sets / maps — `name` (within the relevant
+      scope: tables within family, the rest within their table).
+    * Rules within a chain — `:tag` when set, positional index
+      otherwise. Mixed-tag chains fall back to a full rebuild.
+    * Set elements — the element value itself.
+
+  Rule attribute changes use `NLM_F_REPLACE` over the
+  kernel-assigned handle carried by `from`'s rule (so you must
+  diff against a Ruleset *pulled* from the kernel, not against a
+  freshly-built one — otherwise handles are nil).
+
+  Patches are topologically sorted: deletes before creates of
+  their dependencies (see `Linx.Netfilter.Patch`).
+
+  See `Linx.Netfilter.Diff` for the underlying implementation.
   """
-  @spec diff(term(), term()) :: {:ok, term()} | {:error, term()}
-  def diff(_from, _to), do: {:error, :not_yet_implemented}
+  @spec diff(Ruleset.t(), Ruleset.t()) :: Linx.Netfilter.Patch.t()
+  def diff(%Ruleset{} = from, %Ruleset{} = to), do: Linx.Netfilter.Diff.diff(from, to)
 
-  @doc "Alias for `diff/2`."
-  @spec dry_run(term(), term()) :: {:ok, term()} | {:error, term()}
-  def dry_run(from, to), do: diff(from, to)
+  @doc """
+  Alias for `diff/2` — return the patch without sending it. The
+  name reads better at call sites where the intent is "show me
+  what would change".
+  """
+  @spec dry_run(Ruleset.t(), Ruleset.t()) :: Linx.Netfilter.Patch.t()
+  def dry_run(%Ruleset{} = from, %Ruleset{} = to), do: diff(from, to)
 
   @doc """
   Subscribes the caller to `NFNLGRP_NFTABLES` multicast events for

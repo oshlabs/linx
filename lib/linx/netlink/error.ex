@@ -58,6 +58,7 @@ defmodule Linx.Netlink.Error do
     42 => :enomsg,
     71 => :eproto,
     75 => :eoverflow,
+    85 => :erestart,
     90 => :emsgsize,
     92 => :enoprotoopt,
     93 => :eprotonosupport,

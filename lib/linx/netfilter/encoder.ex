@@ -37,7 +37,7 @@ defmodule Linx.Netfilter.Encoder do
   import Linx.Netfilter.Wire
   import Linx.Netlink.Constants
 
-  alias Linx.Netfilter.{Chain, Expr, Rule, Set, Table, Verdict, Wire}
+  alias Linx.Netfilter.{Chain, Expr, Patch, Rule, Set, Table, Verdict, Wire}
   alias Linx.Netfilter.Map, as: NMap
   alias Linx.Netlink.{Attr, Message}
   alias Linx.Netlink.Nfnl.Codec
@@ -583,6 +583,56 @@ defmodule Linx.Netfilter.Encoder do
     :atomics.add_get(counter, 1, 1)
   end
 
+  @doc """
+  Builds a `DELSET` message — removes a named set by `(family,
+  table, name)`. Returns `:enoent` from the kernel if missing.
+  """
+  @spec delete_set(Table.family(), String.t(), String.t()) :: Message.t()
+  def delete_set(family, table_name, set_name)
+      when is_atom(family) and is_binary(table_name) and is_binary(set_name) do
+    attrs =
+      [
+        {nfta_set_table(), [table_name, 0]},
+        {nfta_set_name(), [set_name, 0]}
+      ]
+
+    %Message{
+      type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_delset()),
+      flags: 0,
+      payload: Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
+    }
+  end
+
+  @doc """
+  Builds a `DELSETELEM` message that removes the given elements
+  from a set by raw element values.
+  """
+  @spec delete_set_elements(
+          Table.family(),
+          String.t(),
+          String.t(),
+          [term()],
+          atom(),
+          atom() | nil
+        ) :: Message.t()
+  def delete_set_elements(family, table_name, set_name, elements, key_type, data_type)
+      when is_atom(family) and is_binary(table_name) and is_binary(set_name) and
+             is_list(elements) and is_atom(key_type) do
+    elements_bin = encode_set_elements(elements, key_type, data_type)
+
+    attrs = [
+      {nfta_set_elem_list_table(), [table_name, 0]},
+      {nfta_set_elem_list_set(), [set_name, 0]},
+      {nfta_set_elem_list_elements(), elements_bin}
+    ]
+
+    %Message{
+      type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_delsetelem()),
+      flags: 0,
+      payload: Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
+    }
+  end
+
   # ===========================================================
   # Rules
   # ===========================================================
@@ -607,8 +657,12 @@ defmodule Linx.Netfilter.Encoder do
   def rule(%Rule{} = rule, family, table_name, chain_name, opts \\ []) do
     excl? = Keyword.get(opts, :excl, false)
     create? = Keyword.get(opts, :create, true)
+    replace? = Keyword.get(opts, :replace, false)
+    handle = Keyword.get(opts, :handle, rule.handle)
+    position = Keyword.get(opts, :position)
 
     expressions_bin = encode_expressions(rule.expressions)
+    userdata = encode_rule_userdata(rule.tag, rule.comment)
 
     attrs =
       [
@@ -616,15 +670,23 @@ defmodule Linx.Netfilter.Encoder do
         {nfta_rule_chain(), [chain_name, 0]},
         {nfta_rule_expressions(), expressions_bin}
       ]
+      |> maybe_add(replace? and not is_nil(handle), fn ->
+        {nfta_rule_handle(), Wire.u64_be(handle)}
+      end)
+      |> maybe_add_position(position)
+      |> maybe_add(userdata != <<>>, fn ->
+        {nfta_rule_userdata(), userdata}
+      end)
 
     payload = Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
 
     base_flags = 0
-    base_flags = if create?, do: base_flags ||| nlm_f_create(), else: base_flags
+    base_flags = if create? and not replace?, do: base_flags ||| nlm_f_create(), else: base_flags
     base_flags = if excl?, do: base_flags ||| nlm_f_excl(), else: base_flags
+    base_flags = if replace?, do: base_flags ||| nlm_f_replace(), else: base_flags
     # NLM_F_APPEND ensures the rule is appended (the kernel's
     # default with NEWRULE-without-position is to prepend).
-    base_flags = base_flags ||| nlm_f_append()
+    base_flags = if not replace?, do: base_flags ||| nlm_f_append(), else: base_flags
 
     %Message{
       type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_newrule()),
@@ -632,6 +694,202 @@ defmodule Linx.Netfilter.Encoder do
       payload: payload
     }
   end
+
+  defp maybe_add_position(attrs, nil), do: attrs
+
+  defp maybe_add_position(attrs, :append), do: attrs
+
+  defp maybe_add_position(attrs, {:after, handle}) when is_integer(handle) and handle > 0 do
+    attrs ++ [{nfta_rule_position(), Wire.u64_be(handle)}]
+  end
+
+  # NFTA_RULE_USERDATA is a binary slot. Linx packs a libnftnl-style
+  # TLV stream into it so tag + comment round-trip across pull.
+  #
+  # libnftnl reserves UDATA type 0 for the comment string. Linx uses
+  # type 16 (NFTNL_UDATA_RULE_LINX_TAG) — high enough that it
+  # doesn't collide with libnftnl's own extensions (libnftnl's
+  # rule-userdata types end at NFTNL_UDATA_RULE_COMMENT_NL_TYPE
+  # which is well below 16 in the current source).
+  @udata_rule_comment 0
+  @udata_rule_linx_tag 16
+
+  defp encode_rule_userdata(nil, nil), do: <<>>
+
+  defp encode_rule_userdata(tag, comment) do
+    parts =
+      []
+      |> maybe_add_tlv(@udata_rule_linx_tag, tag, &Atom.to_string/1)
+      |> maybe_add_tlv(@udata_rule_comment, comment, & &1)
+
+    IO.iodata_to_binary(parts)
+  end
+
+  defp maybe_add_tlv(list, _type, nil, _to_string), do: list
+
+  defp maybe_add_tlv(list, type, value, to_string) do
+    str = to_string.(value)
+    # NUL-terminate (libnftnl convention) and pack type:1 + len:1 + bytes.
+    payload = str <> <<0>>
+    list ++ [<<type::8, byte_size(payload)::8>>, payload]
+  end
+
+  @doc """
+  Builds a `DELRULE` message — removes a single rule by its
+  kernel-assigned handle.
+  """
+  @spec delete_rule(Table.family(), String.t(), String.t(), pos_integer()) :: Message.t()
+  def delete_rule(family, table_name, chain_name, handle)
+      when is_atom(family) and is_binary(table_name) and is_binary(chain_name) and
+             is_integer(handle) and handle > 0 do
+    attrs = [
+      {nfta_rule_table(), [table_name, 0]},
+      {nfta_rule_chain(), [chain_name, 0]},
+      {nfta_rule_handle(), Wire.u64_be(handle)}
+    ]
+
+    %Message{
+      type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_delrule()),
+      flags: 0,
+      payload: Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
+    }
+  end
+
+  @doc """
+  Builds a `DELCHAIN` message — removes a chain by name.
+  """
+  @spec delete_chain(Table.family(), String.t(), String.t()) :: Message.t()
+  def delete_chain(family, table_name, chain_name)
+      when is_atom(family) and is_binary(table_name) and is_binary(chain_name) do
+    attrs = [
+      {nfta_chain_table(), [table_name, 0]},
+      {nfta_chain_name(), [chain_name, 0]}
+    ]
+
+    %Message{
+      type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_delchain()),
+      flags: 0,
+      payload: Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
+    }
+  end
+
+  # ===========================================================
+  # Patch → messages
+  # ===========================================================
+
+  @doc """
+  Encodes a `%Linx.Netfilter.Patch{}` into the ordered list of
+  `%Message{}`s to send inside a single BATCH transaction.
+
+  Sets need their NFTA_SET_ID generated per-batch; this function
+  assigns ids in patch order so element-add ops can later
+  reference them by name (the kernel resolves by name regardless,
+  but libnftnl convention is to also send the id).
+  """
+  @spec from_patch(Patch.t()) :: [Message.t()]
+  def from_patch(%Patch{ops: ops}) do
+    Enum.flat_map(ops, &op_to_messages/1)
+  end
+
+  defp op_to_messages({:create_table, _family, %Table{} = t}) do
+    [table(t)]
+  end
+
+  defp op_to_messages({:delete_table, family, name}) do
+    [destroytable(family, name)]
+  end
+
+  defp op_to_messages({:create_chain, family, _table_name, %Chain{} = c}) do
+    [chain(c, family)]
+  end
+
+  defp op_to_messages({:delete_chain, family, table_name, chain_name}) do
+    [delete_chain(family, table_name, chain_name)]
+  end
+
+  defp op_to_messages({:create_set, family, %Set{} = s}) do
+    [set(s, family)]
+  end
+
+  defp op_to_messages({:create_set, family, %NMap{} = m}) do
+    [set(m, family)]
+  end
+
+  defp op_to_messages({:delete_set, family, table_name, set_name}) do
+    [delete_set(family, table_name, set_name)]
+  end
+
+  defp op_to_messages({:add_set_elements, family, table_name, set_name, elements}) do
+    # We need the key/data type to encode elements correctly. The
+    # diff layer carries them implicitly via the set struct, but
+    # the patch op only has raw element terms. Take the per-batch
+    # convention: peek at the first element's shape — but that
+    # doesn't work for, e.g., a port-int that could be inet_service
+    # or just an integer.
+    #
+    # Solution: the diff emits :add_set_elements with the parent
+    # set's reference. We need to enrich the op shape. For N5
+    # first-cut, attach `(key_type, data_type)` via a helper that
+    # peeks at the original set in the patch. As a workaround,
+    # assume :inet_service for integer keys, :ipv4_addr for 4-tuples,
+    # etc.
+    {key_type, data_type} = infer_types(elements)
+
+    [
+      set_elements_message(family, table_name, set_name, elements, key_type, data_type)
+    ]
+  end
+
+  defp op_to_messages({:delete_set_elements, family, table_name, set_name, elements}) do
+    {key_type, data_type} = infer_types(elements)
+    [delete_set_elements(family, table_name, set_name, elements, key_type, data_type)]
+  end
+
+  defp op_to_messages({:create_rule, family, table_name, chain_name, %Rule{} = r, position}) do
+    [rule(r, family, table_name, chain_name, position: position)]
+  end
+
+  defp op_to_messages({:replace_rule, family, table_name, chain_name, handle, %Rule{} = r}) do
+    [rule(r, family, table_name, chain_name, replace: true, handle: handle)]
+  end
+
+  defp op_to_messages({:delete_rule, family, table_name, chain_name, handle}) do
+    [delete_rule(family, table_name, chain_name, handle)]
+  end
+
+  defp set_elements_message(family, table_name, set_name, elements, key_type, data_type) do
+    elements_bin = encode_set_elements(elements, key_type, data_type)
+
+    attrs = [
+      {nfta_set_elem_list_table(), [table_name, 0]},
+      {nfta_set_elem_list_set(), [set_name, 0]},
+      {nfta_set_elem_list_elements(), elements_bin}
+    ]
+
+    %Message{
+      type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_newsetelem()),
+      flags: nlm_f_create(),
+      payload: Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
+    }
+  end
+
+  # Best-effort type inference for set elements when the patch op
+  # only carries raw values (without the parent set's declared
+  # type). Works for the common cases; explicit type passing will
+  # be added when the patch encoding needs it.
+  defp infer_types([{k, %Verdict{}} | _]), do: {infer_key_type(k), :verdict}
+  defp infer_types([{k, v} | _]), do: {infer_key_type(k), infer_key_type(v)}
+  defp infer_types([k | _]), do: {infer_key_type(k), nil}
+  defp infer_types([]), do: {:inet_service, nil}
+
+  defp infer_key_type(b) when is_binary(b) and byte_size(b) == 4, do: :ipv4_addr
+  defp infer_key_type(b) when is_binary(b) and byte_size(b) == 16, do: :ipv6_addr
+  defp infer_key_type({_, _, _, _}), do: :ipv4_addr
+  defp infer_key_type({_, _, _, _, _, _, _, _}), do: :ipv6_addr
+  defp infer_key_type({_, _, _, _, _, _}), do: :ether_addr
+  defp infer_key_type(n) when is_integer(n) and n < 256, do: :inet_proto
+  defp infer_key_type(n) when is_integer(n), do: :inet_service
+  defp infer_key_type(s) when is_binary(s), do: :ifname
 
   # ===========================================================
   # Expressions

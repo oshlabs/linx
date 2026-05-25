@@ -78,11 +78,13 @@ defmodule Linx.Netlink.Nfnl do
   Each call allocates fresh sequence numbers from the socket's
   counter, so concurrent users of the same socket cannot collide.
   """
-  @spec batch(Socket.t(), [Message.t()], atom() | 0..255) ::
+  @spec batch(Socket.t(), [Message.t()], atom() | 0..255, keyword()) ::
           :ok | {:error, {non_neg_integer(), Error.t()} | term()}
-  def batch(%Socket{} = socket, inner_messages, subsys \\ :nftables)
-      when is_list(inner_messages) do
-    begin_msg = Codec.batch_begin(subsys)
+  def batch(socket, inner_messages, subsys \\ :nftables, opts \\ [])
+
+  def batch(%Socket{} = socket, inner_messages, subsys, opts)
+      when is_list(inner_messages) and is_list(opts) do
+    begin_msg = Codec.batch_begin(subsys, Keyword.take(opts, [:genid]))
     end_msg = Codec.batch_end(subsys)
     all = [begin_msg | inner_messages] ++ [end_msg]
 
@@ -164,8 +166,15 @@ defmodule Linx.Netlink.Nfnl do
         end
 
       :error ->
-        # Unsolicited or out-of-batch — ignore.
-        process_responses(rest, socket, pending)
+        # Unsolicited seq — either unrelated multicast / stale, or a
+        # batch-envelope error (notably ERESTART on BATCH_END when
+        # NFTA_BATCH_GENID doesn't match). For non-error messages
+        # we ignore; for error messages we treat as fatal since the
+        # kernel only sends NLMSG_ERROR in response to our send.
+        case classify_batch_response(msg) do
+          :ack -> process_responses(rest, socket, pending)
+          {:error, err} -> {:error, {nil, err}}
+        end
     end
   end
 

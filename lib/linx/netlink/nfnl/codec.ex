@@ -224,6 +224,12 @@ defmodule Linx.Netlink.Nfnl.Codec do
   `payload` = the 4-byte `nfgenmsg` carrying the target subsys id as
   `res_id`. Caller fills in `seq` before encoding.
 
+  When `genid` is provided, appends `NFNL_BATCH_GENID` (attribute id
+  1, u32 BE) to the payload — the kernel rejects the batch with
+  `-ERESTART` at commit time if the netns ruleset generation has
+  advanced since `genid` was read. Used by `:reconcile`-mode pushes
+  for optimistic concurrency.
+
   ## Examples
 
       # Begin a batch targeting nf_tables:
@@ -233,20 +239,32 @@ defmodule Linx.Netlink.Nfnl.Codec do
       iex> msg.payload
       <<0, 0, 0, 10>>  # nfgenmsg with res_id = NFNL_SUBSYS_NFTABLES (10)
   """
-  @spec batch_begin(:nftables | :ctnetlink | :queue | :ulog | 0..255) :: Message.t()
-  def batch_begin(subsys)
+  @spec batch_begin(:nftables | :ctnetlink | :queue | :ulog | 0..255, keyword()) :: Message.t()
+  def batch_begin(subsys, opts \\ [])
 
-  def batch_begin(:nftables), do: batch_begin(@subsys_nftables)
-  def batch_begin(:ctnetlink), do: batch_begin(@subsys_ctnetlink)
-  def batch_begin(:queue), do: batch_begin(@subsys_queue)
-  def batch_begin(:ulog), do: batch_begin(@subsys_ulog)
+  def batch_begin(:nftables, opts), do: batch_begin(@subsys_nftables, opts)
+  def batch_begin(:ctnetlink, opts), do: batch_begin(@subsys_ctnetlink, opts)
+  def batch_begin(:queue, opts), do: batch_begin(@subsys_queue, opts)
+  def batch_begin(:ulog, opts), do: batch_begin(@subsys_ulog, opts)
 
-  def batch_begin(subsys) when is_integer(subsys) and subsys in 0..255 do
+  def batch_begin(subsys, opts) when is_integer(subsys) and subsys in 0..255 do
+    base = encode_nfgenmsg(:unspec, subsys)
+
+    payload =
+      case Keyword.get(opts, :genid) do
+        nil ->
+          base
+
+        gen when is_integer(gen) and gen >= 0 ->
+          # NFNL_BATCH_GENID = 1, u32 BE
+          base <> Linx.Netlink.Attr.encode([{1, <<gen::big-unsigned-32>>}])
+      end
+
     %Message{
       type: @batch_begin,
       flags: 0,
       seq: 0,
-      payload: encode_nfgenmsg(:unspec, subsys)
+      payload: payload
     }
   end
 
@@ -329,8 +347,10 @@ defmodule Linx.Netlink.Nfnl.Codec do
   end
 
   defp get_u32(attrs, tag, default) do
+    # nftables (NFTA_*) NLAs are big-endian on the wire — the kernel
+    # uses `nla_put_be32` to encode them. Decode the same way.
     case List.keyfind(attrs, tag, 0) do
-      {^tag, <<v::native-unsigned-32>>} -> v
+      {^tag, <<v::big-unsigned-32>>} -> v
       _ -> default
     end
   end

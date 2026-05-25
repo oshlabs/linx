@@ -101,14 +101,17 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `%Patch{ops: [...]}` value type | ⬜ | N5 |
-| `diff/2 :: Ruleset → Ruleset → Patch` | ⬜ | N5 — identity rules: name / tag-or-position / element-value |
-| Topological sort of patch ops | ⬜ | N5 |
-| In-place vs delete+recreate detection (per-entity allowlist) | ⬜ | N5 |
-| `push/2 mode: :reconcile` | ⬜ | N5 |
-| `dry_run/2` (alias for `diff/2`) | ⬜ | N5 |
-| `NFTA_BATCH_GENID` CAS with bounded retry | ⬜ | N5 |
-| Tag enforcement for `:reconcile` (untagged → `:tag_required` error) | ⬜ | N5 |
+| `%Linx.Netfilter.Patch{ops: [...]}` value type | ✅ | N5 — custom Inspect with op-kind summary |
+| `Linx.Netfilter.diff/2 :: Ruleset → Ruleset → Patch` | ✅ | N5 — identity: name for tables/chains/sets; tag-or-position for rules; element value for set elements |
+| Diff scoped to `to`'s tables (don't touch tables Linx doesn't own) | ✅ | N5 — coexists with Docker / firewalld in the same netns |
+| Topological sort of patch ops | ✅ | N5 — `Patch.sort/1`: deletes before creates of dependencies |
+| In-place vs delete+recreate detection | 🟡 | N5 — rules use `NLM_F_REPLACE`; chains always delete+create on structural change |
+| `Linx.Netfilter.push/2 mode: :reconcile` | ✅ | N5 — pull, diff, encode, BATCH_GENID, retry on ERESTART |
+| `Linx.Netfilter.dry_run/2` (alias for `diff/2`) | ✅ | N5 |
+| `NFNL_BATCH_GENID` CAS with bounded retry (default 3, exponential backoff) | ✅ | N5 — exhaust → `%Error{errno: :erestart, ruleset_gen: gen}` |
+| Tag enforcement for `:reconcile` | ✅ | N5 — untagged rule in multi-rule chain → `{:error, {:tag_required, _}}` |
+| Rule tag + comment round-trip via NFTA_RULE_USERDATA TLV | ✅ | N5 — Linx-specific UDATA type 16 for tags, type 0 for comments (libnftnl-compatible) |
+| Chain-policy equivalence: `nil` matches kernel default `:accept` | ✅ | N5 — pulled chains always carry a policy; user-built ones may not |
 
 ## Live monitor
 

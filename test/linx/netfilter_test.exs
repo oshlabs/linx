@@ -181,17 +181,8 @@ defmodule Linx.NetfilterTest do
     # The verbs that haven't shipped yet still return
     # {:error, :not_yet_implemented} so the surface is visible in
     # ExDoc + IDE completion. create_table/3, push/3, pull/1, pull/2
-    # all shipped in N2 — see test/linx/netfilter/integration_test.exs
-    # for end-to-end coverage. diff/dry_run/subscribe/log_listen
-    # land in N5, N5, N6, N7 respectively.
-
-    test "diff/2" do
-      assert {:error, :not_yet_implemented} = Netfilter.diff(%{}, %{})
-    end
-
-    test "dry_run/2 is an alias for diff/2" do
-      assert {:error, :not_yet_implemented} = Netfilter.dry_run(%{}, %{})
-    end
+    # shipped in N2. diff/2 + dry_run/2 shipped in N5. subscribe/1
+    # lands in N6; log_listen/2 in N7.
 
     test "subscribe/1" do
       assert {:error, :not_yet_implemented} = Netfilter.subscribe(self())

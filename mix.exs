@@ -216,6 +216,8 @@ defmodule Linx.MixProject do
           Linx.Netfilter.Vmap,
           Linx.Netfilter.Object,
           Linx.Netfilter.Flowtable,
+          Linx.Netfilter.Patch,
+          Linx.Netfilter.Diff,
           Linx.Netfilter.Encoder,
           Linx.Netfilter.Decoder,
           Linx.Netfilter.Wire

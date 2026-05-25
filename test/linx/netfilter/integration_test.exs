@@ -881,6 +881,207 @@ defmodule Linx.Netfilter.IntegrationTest do
       assert nft_out =~ ~r/flags interval/
     end
 
+    test "reconcile: empty patch when ruleset matches kernel state" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Rule, Ruleset}
+
+      table_name = unique_name("reconcile_idemp")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([Linx.Netfilter.Verdict.accept()], tag: :allow_all)
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+      assert {:ok, pulled} = Netfilter.pull(sock, {:inet, table_name})
+
+      # Diff against itself (well, against what came back from pull) → empty patch
+      assert :ok = Netfilter.push(sock, pulled, mode: :reconcile)
+    end
+
+    test "reconcile: changes a single rule via REPLACE" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+      table_name = unique_name("reconcile_replace")
+
+      original =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0,
+          policy: :drop
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<22::big-16>>),
+            Verdict.accept()
+          ], tag: :allow_ssh)
+        )
+
+      assert :ok = Netfilter.push(sock, original)
+
+      # Pull current to get handles
+      {:ok, pulled} = Netfilter.pull(sock, {:inet, table_name})
+
+      # Build modified ruleset — same shape, but different port
+      desired =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0,
+          policy: :drop
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<2222::big-16>>),
+            Verdict.accept()
+          ], tag: :allow_ssh)
+        )
+
+      # Verify the patch contains exactly one :replace_rule op
+      patch = Netfilter.diff(pulled, desired)
+      assert Enum.any?(patch.ops, &match?({:replace_rule, _, _, _, _, _}, &1))
+      refute Enum.any?(patch.ops, &match?({:create_rule, _, _, _, _, _}, &1))
+      refute Enum.any?(patch.ops, &match?({:delete_rule, _, _, _, _}, &1))
+
+      # Push it
+      assert :ok = Netfilter.push(sock, desired, mode: :reconcile)
+
+      # Verify the kernel sees the new port
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/(tcp|th) dport 2222/
+      refute nft_out =~ ~r/(tcp|th) dport 22[^0-9]/
+    end
+
+    test "reconcile: tag enforcement rejects untagged rules in multi-rule chains" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Ruleset, Verdict}
+
+      table_name = unique_name("reconcile_untagged")
+
+      bad_ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0
+        )
+        # Two rules, first tagged, second untagged → reconcile rejects
+        |> Ruleset.add_rule!(table_name, "input", [Verdict.accept()], tag: :allow)
+        |> Ruleset.add_rule!(table_name, "input", [Verdict.drop()])
+
+      assert {:error, {:tag_required, {:inet, ^table_name, "input"}}} =
+               Netfilter.push(sock, bad_ruleset, mode: :reconcile)
+    end
+
+    test "reconcile: tagged rule reordering is a no-op" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+      table_name = unique_name("reconcile_reorder")
+
+      original =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<22::big-16>>),
+            Verdict.accept()
+          ], tag: :allow_ssh)
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<80::big-16>>),
+            Verdict.accept()
+          ], tag: :allow_http)
+        )
+
+      assert :ok = Netfilter.push(sock, original)
+      {:ok, pulled} = Netfilter.pull(sock, {:inet, table_name})
+
+      # Same rules, reversed (build a new ruleset programmatically)
+      [first_rule, second_rule] = pulled.tables[{:inet, table_name}].chains["input"].rules
+
+      reordered =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0
+        )
+        |> Ruleset.add_rule!(table_name, "input", second_rule)
+        |> Ruleset.add_rule!(table_name, "input", first_rule)
+
+      # Tag-identity → reorder is invisible to diff → empty patch
+      patch = Netfilter.diff(pulled, reordered)
+      assert Linx.Netfilter.Patch.empty?(patch)
+
+      assert :ok = Netfilter.push(sock, reordered, mode: :reconcile)
+    end
+
+    test "dry_run/2 returns the patch without sending" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Ruleset, Verdict}
+
+      table_name = unique_name("dry_run")
+
+      {:ok, _} = Netfilter.create_table(sock, table_name)
+
+      {:ok, pulled} = Netfilter.pull(sock, {:inet, table_name})
+
+      desired =
+        pulled
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0
+        )
+
+      patch = Netfilter.dry_run(pulled, desired)
+      assert Enum.any?(patch.ops, &match?({:create_chain, _, _, _}, &1))
+
+      # Kernel state unchanged
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      refute nft_out =~ ~r/chain input/
+    end
+
     test "jump verdict to a regular chain" do
       {:ok, sock} = Nfnl.open()
       on_exit(fn -> Socket.close(sock) end)

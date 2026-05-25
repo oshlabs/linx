@@ -422,9 +422,93 @@ Ruleset.new()
 
 The anonymous set lives and dies with the rule.
 
-## (Will land with N5 — diff + :reconcile + BATCH_GENID CAS)
+## Reconcile push (N5) — minimal-change updates
 
-## (Will land with N5 — diff + :reconcile + BATCH_GENID CAS)
+`mode: :reconcile` is the LiveView-of-firewalls form: instead of
+rebuilding the entire table on every push, Linx pulls the
+kernel's current state, computes the minimum patch, and sends
+only the messages that change something.
+
+```elixir
+alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+# Build the desired state — same as :replace, but every rule that
+# matters across pushes carries a stable :tag.
+desired =
+  Ruleset.new()
+  |> Ruleset.add_table!(:inet, "fw", flags: [:owner])
+  |> Ruleset.add_chain!("fw", "input",
+       type: :filter, hook: :input, priority: 0, policy: :drop)
+  |> Ruleset.add_rule!("fw", "input",
+       Rule.build!([
+         Expr.payload(:tcp_dport),
+         Expr.cmp(:eq, <<22::big-16>>),
+         Verdict.accept()
+       ], tag: :allow_ssh))
+  |> Ruleset.add_rule!("fw", "input",
+       Rule.build!([
+         Expr.payload(:tcp_dport),
+         Expr.cmp(:eq, <<80::big-16>>),
+         Verdict.accept()
+       ], tag: :allow_http))
+
+# First push — `:replace` is fine for the initial create.
+:ok = Linx.Netfilter.push(sock, desired)
+
+# Later: move ssh from port 22 to 2222. Rebuild the ruleset (the
+# tag :allow_ssh marks the rule's identity across pushes), then
+# reconcile.
+desired_v2 = update_ssh_port(desired, 2222)
+
+:ok = Linx.Netfilter.push(sock, desired_v2, mode: :reconcile)
+# Wire payload: one BATCH_BEGIN with NFNL_BATCH_GENID, one NEWRULE
+# with NLM_F_REPLACE for the :allow_ssh handle, one BATCH_END.
+# The :allow_http rule is untouched — its connections survive.
+```
+
+The kernel's per-netns generation counter is read with `GETGEN`
+and threaded through the batch via `NFNL_BATCH_GENID`. If another
+writer (a separate `nft` invocation, firewalld, another Linx
+process) commits between Linx's pull and Linx's push, the kernel
+returns `-ERESTART` and Linx retries up to 3 times with
+exponential backoff before surfacing the error.
+
+Tables that exist in the kernel but aren't in `desired` are
+**not deleted** — the reconcile diff is scoped to tables in
+`desired`. This lets Linx coexist with Docker, firewalld, and
+other ruleset writers in the same netns without stomping on them.
+
+## Tag enforcement
+
+Reconcile mode rejects rulesets where a multi-rule chain has any
+untagged rule — without stable identity per rule, the diff has no
+way to tell "what changed" from "what's still the same":
+
+```elixir
+Linx.Netfilter.push(sock, ruleset_with_untagged_rules, mode: :reconcile)
+# => {:error, {:tag_required, {:inet, "fw", "input"}}}
+
+# Single-rule chains are fine — there's nothing to be ambiguous about.
+# Use `mode: :replace` (default) for chains you don't intend to tag.
+```
+
+## `dry_run/2`
+
+`dry_run/2` is `diff/2` under a more readable name — get the
+patch without sending it. Useful for "what would change?"
+queries before a commit.
+
+```elixir
+{:ok, current} = Linx.Netfilter.pull(sock, {:inet, "fw"})
+patch = Linx.Netfilter.dry_run(current, desired)
+IO.inspect(patch)
+# => #Linx.Netfilter.Patch<1 op: 1 replace>
+
+case patch do
+  %Linx.Netfilter.Patch{ops: []} -> IO.puts("Already up to date")
+  _ -> Linx.Netfilter.push(sock, desired, mode: :reconcile)
+end
+```
 
 ## (Will land with N6 — monitor: snapshot+tail)
 
