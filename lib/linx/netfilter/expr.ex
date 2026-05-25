@@ -261,6 +261,45 @@ defmodule Linx.Netfilter.Expr do
   end
 
   @doc """
+  Anonymous-set lookup — `tcp dport { 22, 80, 443 } accept`.
+
+  Returns a sentinel `%Expr{name: :__anon_set}` that the encoder
+  expands at `to_batch/2` time into an auto-generated
+  `NFT_SET_F_ANONYMOUS | NFT_SET_F_CONSTANT` set plus a regular
+  `lookup` expression referencing it. The anonymous-set lifecycle
+  is tied to the rule — it lives and dies with it.
+
+  `values` is the same shape as a `Linx.Netfilter.Set`'s elements
+  list. `key_type` is the same set of atoms `Set.new!/2` accepts.
+
+      Rule.build([
+        Expr.payload(:tcp_dport),
+        Expr.set_literal([22, 80, 443], :inet_service),
+        Verdict.accept()
+      ])
+
+  Options:
+
+    * `:flags` — passed to the auto-generated set (`:interval`,
+      `:constant`, etc.). `:anonymous` is always added; `:constant`
+      is added by default (anonymous sets are constant unless
+      explicitly otherwise).
+  """
+  @spec set_literal([term()], atom(), keyword()) :: t()
+  def set_literal(values, key_type, opts \\ [])
+      when is_list(values) and is_atom(key_type) and is_list(opts) do
+    %__MODULE__{
+      name: :__anon_set,
+      data: %{
+        values: values,
+        key_type: key_type,
+        flags: Keyword.get(opts, :flags, [:constant]),
+        sreg: Keyword.get(opts, :sreg, @reg_value)
+      }
+    }
+  end
+
+  @doc """
   Reject expression. Produces an explicit rejection response then
   drops the packet.
 

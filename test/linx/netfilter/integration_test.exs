@@ -633,6 +633,254 @@ defmodule Linx.Netfilter.IntegrationTest do
       assert Enum.any?(rule.expressions, &match?(%Expr{name: :nat, data: %{type: :dnat}}, &1))
     end
 
+    test "named ipv4_addr set with elements — push, pull, verify" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Set, Verdict}
+
+      table_name = unique_name("set_block")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_set!(
+          table_name,
+          Set.new!("blocklist",
+            key_type: :ipv4_addr,
+            elements: [{10, 0, 0, 1}, {10, 0, 0, 2}, {192, 168, 1, 100}]
+          )
+        )
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0,
+          policy: :accept
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:ip_saddr),
+            Expr.lookup("blocklist"),
+            Verdict.drop()
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      # Verify via shell-out
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/set blocklist/
+      assert nft_out =~ ~r/type ipv4_addr/
+      assert nft_out =~ ~r/10\.0\.0\.1/
+      assert nft_out =~ ~r/192\.168\.1\.100/
+
+      # Pull back and round-trip elements
+      assert {:ok, pulled} = Netfilter.pull(sock, {:inet, table_name})
+      [{:inet, ^table_name, t}] = Ruleset.tables(pulled)
+
+      blocklist = t.sets["blocklist"]
+      assert blocklist.key_type == :ipv4_addr
+      # Element order may not match push order; just check set
+      # membership.
+      element_set = MapSet.new(blocklist.elements)
+      assert MapSet.member?(element_set, {10, 0, 0, 1})
+      assert MapSet.member?(element_set, {10, 0, 0, 2})
+      assert MapSet.member?(element_set, {192, 168, 1, 100})
+    end
+
+    test "ipv4_addr → ipv4_addr map (DNAT targets)" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Map, Ruleset}
+
+      table_name = unique_name("map_dnat")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_map!(
+          table_name,
+          Map.new!("dnat_pool",
+            key_type: :inet_service,
+            data_type: :ipv4_addr,
+            elements: [{80, {10, 0, 0, 5}}, {443, {10, 0, 0, 6}}]
+          )
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/map dnat_pool/
+      assert nft_out =~ ~r/type inet_service.*ipv4_addr/
+      assert nft_out =~ ~r/80 : 10\.0\.0\.5/
+      assert nft_out =~ ~r/443 : 10\.0\.0\.6/
+
+      # Round-trip
+      assert {:ok, pulled} = Netfilter.pull(sock, {:inet, table_name})
+      [{:inet, ^table_name, t}] = Ruleset.tables(pulled)
+      m = t.maps["dnat_pool"]
+      assert m.key_type == :inet_service
+      assert m.data_type == :ipv4_addr
+
+      assert {80, {10, 0, 0, 5}} in m.elements
+      assert {443, {10, 0, 0, 6}} in m.elements
+    end
+
+    test "vmap dispatch — inet_service → verdict (jump to per-service chains)" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict, Vmap}
+
+      table_name = unique_name("vmap_dispatch")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "ssh_in")
+        |> Ruleset.add_chain!(table_name, "http_in")
+        |> Ruleset.add_map!(
+          table_name,
+          Vmap.new!("services",
+            key_type: :inet_service,
+            elements: [
+              {22, {:jump, "ssh_in"}},
+              {80, {:jump, "http_in"}}
+            ]
+          )
+        )
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0,
+          policy: :drop
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.lookup("services", dreg: 0)
+          ])
+        )
+        |> Ruleset.add_rule!(table_name, "ssh_in", [Verdict.accept()])
+        |> Ruleset.add_rule!(table_name, "http_in", [Verdict.accept()])
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/map services/
+      assert nft_out =~ ~r/type inet_service : verdict/
+      assert nft_out =~ ~r/22 : jump ssh_in/
+      assert nft_out =~ ~r/80 : jump http_in/
+    end
+
+    test "anonymous set in a rule: tcp dport { 22, 80, 443 } accept" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+      table_name = unique_name("anon_set")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0,
+          policy: :drop
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.set_literal([22, 80, 443], :inet_service),
+            Verdict.accept()
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      # nft renders the anonymous set inline: `{ 22, 80, 443 }`
+      assert nft_out =~ ~r/\{ ?22,/
+      assert nft_out =~ ~r/80,/
+      assert nft_out =~ ~r/443 ?\}/
+      assert nft_out =~ ~r/accept/
+    end
+
+    test "anonymous set with ipv4 addresses" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+      table_name = unique_name("anon_set_ip")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0,
+          policy: :accept
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:ip_saddr),
+            Expr.set_literal([{10, 0, 0, 1}, {10, 0, 0, 2}, {192, 168, 1, 100}], :ipv4_addr),
+            Verdict.drop()
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      # Without `:key_typeof` userdata, nft renders the set with
+      # generic byte-offset / hex notation rather than `ip saddr
+      # { 10.0.0.1, ... }`. The set still matches packets correctly;
+      # only the display form is generic. 10.0.0.1 = 0x0a000001.
+      assert nft_out =~ ~r/(10\.0\.0\.1|0xa000001)/
+      assert nft_out =~ ~r/(192\.168\.1\.100|0xc0a80164)/
+      assert nft_out =~ ~r/drop/
+    end
+
+    test "set with :interval flag for CIDR ranges" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Ruleset, Set}
+
+      table_name = unique_name("set_interval")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_set!(
+          table_name,
+          Set.new!("blocknets", key_type: :ipv4_addr, flags: [:interval])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/set blocknets/
+      assert nft_out =~ ~r/flags interval/
+    end
+
     test "jump verdict to a regular chain" do
       {:ok, sock} = Nfnl.open()
       on_exit(fn -> Socket.close(sock) end)

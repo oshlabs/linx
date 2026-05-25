@@ -18,7 +18,8 @@ defmodule Linx.Netfilter.Decoder do
 
   import Linx.Netfilter.Wire
 
-  alias Linx.Netfilter.{Chain, Expr, Rule, Ruleset, Table, Verdict, Wire}
+  alias Linx.Netfilter.{Chain, Expr, Rule, Ruleset, Set, Table, Verdict, Wire}
+  alias Linx.Netfilter.Map, as: NMap
   alias Linx.Netlink.Attr
   alias Linx.Netlink.Nfnl.Codec
 
@@ -364,41 +365,295 @@ defmodule Linx.Netfilter.Decoder do
   end
 
   # ===========================================================
+  # Sets / maps
+  # ===========================================================
+
+  @doc """
+  Decodes a `NEWSET` body into either a `%Linx.Netfilter.Set{}`
+  (plain set — no `NFT_SET_F_MAP` flag) or a `%Linx.Netfilter.Map{}`
+  (map / vmap).
+
+  Returns `{family, set_or_map}` for downstream assembly.
+  """
+  @spec set(binary()) :: {Table.family(), Set.t() | NMap.t()}
+  def set(body) when is_binary(body) do
+    {family_int, _ver, _res_id, attrs_bin} = Codec.decode_nfgenmsg(body)
+    family = Wire.family_atom(family_int)
+    attrs = Attr.decode(attrs_bin)
+
+    name = get_string(attrs, nfta_set_name())
+    table = get_string(attrs, nfta_set_table())
+    flags_int = get_u32_be(attrs, nfta_set_flags(), 0)
+    flags = Wire.set_flags_atoms(flags_int)
+    key_type_int = get_u32_be(attrs, nfta_set_key_type(), 0)
+    key_len = get_u32_be(attrs, nfta_set_key_len(), 0)
+    key_type = Wire.set_type_atom(key_type_int, key_len)
+
+    is_map? = Enum.member?(flags, :map)
+    is_anon? = Enum.member?(flags, :anonymous)
+
+    timeout = get_u64_be(attrs, nfta_set_timeout(), nil)
+    gc_interval = get_u32_be(attrs, nfta_set_gc_interval(), nil)
+    handle = get_u64_be(attrs, nfta_set_handle(), nil)
+    size = decode_set_desc_size(attrs)
+
+    user_flags = Enum.reject(flags, &(&1 in [:map, :anonymous]))
+
+    entity =
+      if is_map? do
+        data_type_int = get_u32_be(attrs, nfta_set_data_type(), 0)
+        data_len = get_u32_be(attrs, nfta_set_data_len(), 0)
+
+        data_type =
+          cond do
+            data_type_int == 0xFFFFFF00 -> :verdict
+            true -> Wire.set_type_atom(data_type_int, data_len)
+          end
+
+        %NMap{
+          name: name,
+          table: table,
+          key_type: key_type,
+          data_type: data_type,
+          flags: user_flags ++ if(is_anon?, do: [:anonymous], else: []),
+          elements: [],
+          timeout: timeout,
+          gc_interval: gc_interval,
+          size: size,
+          handle: handle,
+          comment: nil
+        }
+      else
+        %Set{
+          name: name,
+          table: table,
+          key_type: key_type,
+          flags: user_flags ++ if(is_anon?, do: [:anonymous], else: []),
+          elements: [],
+          timeout: timeout,
+          gc_interval: gc_interval,
+          size: size,
+          handle: handle,
+          comment: nil
+        }
+      end
+
+    {family, entity}
+  end
+
+  defp decode_set_desc_size(attrs) do
+    case List.keyfind(attrs, nfta_set_desc(), 0) do
+      {_, desc_bin} ->
+        desc_attrs = Attr.decode(desc_bin)
+        get_u32_be(desc_attrs, nfta_set_desc_size(), nil)
+
+      nil ->
+        nil
+    end
+  end
+
+  @doc """
+  Decodes a `NEWSETELEM` body into a list of elements attached to
+  a `(family, table_name, set_name)`.
+
+  Returns `{family, table_name, set_name, elements}` where
+  `elements` is a list of either raw key terms or `{key, value}`
+  tuples (the caller resolves which based on whether the parent
+  set is plain or a map).
+
+  For now we return the elements with KEY binary unparsed (raw
+  binary) and DATA either a raw binary or a `%Verdict{}` for
+  verdict data. Higher-level conversion (binary → tuple, etc.)
+  happens at assembly time when we know the parent set's
+  key_type.
+  """
+  @spec set_elements(binary()) ::
+          {Table.family(), String.t(), String.t(), [{binary(), term()} | binary()]}
+  def set_elements(body) when is_binary(body) do
+    {family_int, _ver, _res_id, attrs_bin} = Codec.decode_nfgenmsg(body)
+    family = Wire.family_atom(family_int)
+    attrs = Attr.decode(attrs_bin)
+
+    table = get_string(attrs, nfta_set_elem_list_table())
+    set_name = get_string(attrs, nfta_set_elem_list_set())
+
+    elements =
+      case List.keyfind(attrs, nfta_set_elem_list_elements(), 0) do
+        {_, list_bin} ->
+          list_bin
+          |> Attr.decode()
+          |> Enum.flat_map(fn
+            {tag, payload} when tag == nfta_list_elem() -> [decode_one_set_elem(payload)]
+            _ -> []
+          end)
+
+        nil ->
+          []
+      end
+
+    {family, table, set_name, elements}
+  end
+
+  defp decode_one_set_elem(bin) do
+    attrs = Attr.decode(bin)
+
+    key_bin =
+      case List.keyfind(attrs, nfta_set_elem_key(), 0) do
+        {_, key_nla} ->
+          key_attrs = Attr.decode(key_nla)
+          get_binary(key_attrs, nfta_data_value())
+
+        nil ->
+          nil
+      end
+
+    case List.keyfind(attrs, nfta_set_elem_data(), 0) do
+      {_, data_nla} ->
+        data_attrs = Attr.decode(data_nla)
+
+        data_value =
+          cond do
+            verdict_bin = get_binary(data_attrs, nfta_data_verdict()) ->
+              decode_verdict(verdict_bin)
+
+            true ->
+              get_binary(data_attrs, nfta_data_value())
+          end
+
+        {key_bin, data_value}
+
+      nil ->
+        key_bin
+    end
+  end
+
+  @doc """
+  Materialises a raw set-element list (from `set_elements/1`) into
+  the value shape the parent set expects. Plain sets keep raw key
+  binaries (the codec doesn't know to expand `<<10, 0, 0, 5>>` back
+  to `{10, 0, 0, 5}` without context). Maps preserve `{key, value}`.
+  """
+  @spec materialize_elements([{binary(), term()} | binary()], atom(), atom() | nil) ::
+          [term()]
+  def materialize_elements(elements, key_type, data_type) do
+    Enum.map(elements, fn
+      {k, v} -> {decode_key(k, key_type), decode_data(v, data_type)}
+      k -> decode_key(k, key_type)
+    end)
+  end
+
+  defp decode_key(<<a, b, c, d>>, :ipv4_addr), do: {a, b, c, d}
+
+  defp decode_key(<<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>, :ipv6_addr),
+    do: {a, b, c, d, e, f, g, h}
+
+  defp decode_key(<<a, b, c, d, e, f>>, :ether_addr), do: {a, b, c, d, e, f}
+  defp decode_key(<<port::big-16>>, :inet_service), do: port
+  defp decode_key(<<proto>>, :inet_proto), do: proto
+  defp decode_key(<<mark::big-32>>, :mark), do: mark
+  defp decode_key(bin, :ifname), do: String.trim_trailing(bin, <<0>>)
+  defp decode_key(bin, _), do: bin
+
+  defp decode_data(%Verdict{} = v, :verdict), do: v
+  defp decode_data(bin, type), do: decode_key(bin, type)
+
+  # ===========================================================
   # Assembly
   # ===========================================================
 
   @doc """
-  Builds a `%Ruleset{}` from separate lists of decoded table,
-  chain, and rule entries.
+  Builds a `%Ruleset{}` from separate lists of decoded entries.
 
     * `tables` — `[%Table{}]` from a `NFT_MSG_GETTABLE` dump.
     * `chains` — `[{family, %Chain{}}]` from a `NFT_MSG_GETCHAIN` dump.
     * `rules` — `[{family, table_name, chain_name, %Rule{}}]` from
       a `NFT_MSG_GETRULE` dump.
+    * `sets` — `[{family, %Set{} | %Map{}}]` from a
+      `NFT_MSG_GETSET` dump.
+    * `set_elements` — `[{family, table_name, set_name, [elem]}]`
+      from per-set `NFT_MSG_GETSETELEM` calls.
 
-  Chains are attached to their table by `(family, table_name)`;
-  rules are appended to their chain in the order received (which
-  matches the kernel's traversal order — rule position is
-  preserved on dump).
+  Chains, sets, and rules are attached to their parents by
+  `(family, table_name)`. Set elements are materialised against
+  the parent set's `key_type` / `data_type` and attached to the
+  set in dump order.
 
-  Entities that reference a missing parent (e.g. a chain whose
-  table isn't in `tables`) are silently dropped — this happens if
-  the dumps weren't atomic and a table was created/destroyed
-  between them.
+  Entities that reference a missing parent are silently dropped.
   """
-  @spec from_msgs([Table.t()], [{Table.family(), Chain.t()}], [
-          {Table.family(), String.t(), String.t(), Rule.t()}
-        ]) :: Ruleset.t()
-  def from_msgs(tables, chains, rules) do
+  @spec from_msgs(
+          [Table.t()],
+          [{Table.family(), Chain.t()}],
+          [{Table.family(), String.t(), String.t(), Rule.t()}],
+          [{Table.family(), Set.t() | NMap.t()}],
+          [{Table.family(), String.t(), String.t(), [term()]}]
+        ) :: Ruleset.t()
+  def from_msgs(tables, chains, rules, sets \\ [], set_elements \\ []) do
     tables_map =
       Enum.reduce(tables, %{}, fn %Table{family: f, name: n} = t, acc ->
         Map.put(acc, {f, n}, t)
       end)
 
     tables_map = attach_chains(tables_map, chains)
+    tables_map = attach_sets(tables_map, sets)
+    tables_map = attach_set_elements(tables_map, set_elements)
     tables_map = attach_rules(tables_map, rules)
 
     %Ruleset{tables: tables_map}
+  end
+
+  defp attach_sets(tables_map, sets) do
+    Enum.reduce(sets, tables_map, fn {family, entity}, acc ->
+      key = {family, entity_table(entity)}
+
+      case Map.fetch(acc, key) do
+        {:ok, %Table{} = t} ->
+          updated =
+            case entity do
+              %Set{} ->
+                %Table{t | sets: Map.put(t.sets, entity.name, entity)}
+
+              %NMap{} ->
+                %Table{t | maps: Map.put(t.maps, entity.name, entity)}
+            end
+
+          Map.put(acc, key, updated)
+
+        :error ->
+          acc
+      end
+    end)
+  end
+
+  defp entity_table(%Set{table: t}), do: t
+  defp entity_table(%NMap{table: t}), do: t
+
+  defp attach_set_elements(tables_map, set_elements) do
+    Enum.reduce(set_elements, tables_map, fn {family, table_name, set_name, raw_elems}, acc ->
+      key = {family, table_name}
+
+      case Map.fetch(acc, key) do
+        {:ok, %Table{} = t} ->
+          cond do
+            Map.has_key?(t.sets, set_name) ->
+              %Set{} = set = Map.fetch!(t.sets, set_name)
+              materialised = materialize_elements(raw_elems, set.key_type, nil)
+              updated_set = %Set{set | elements: set.elements ++ materialised}
+              Map.put(acc, key, %Table{t | sets: Map.put(t.sets, set_name, updated_set)})
+
+            Map.has_key?(t.maps, set_name) ->
+              %NMap{} = map = Map.fetch!(t.maps, set_name)
+              materialised = materialize_elements(raw_elems, map.key_type, map.data_type)
+              updated_map = %NMap{map | elements: map.elements ++ materialised}
+              Map.put(acc, key, %Table{t | maps: Map.put(t.maps, set_name, updated_map)})
+
+            true ->
+              acc
+          end
+
+        :error ->
+          acc
+      end
+    end)
   end
 
   defp attach_chains(tables_map, chains) do

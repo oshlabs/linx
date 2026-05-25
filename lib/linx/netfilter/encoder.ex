@@ -37,7 +37,8 @@ defmodule Linx.Netfilter.Encoder do
   import Linx.Netfilter.Wire
   import Linx.Netlink.Constants
 
-  alias Linx.Netfilter.{Chain, Expr, Rule, Table, Verdict, Wire}
+  alias Linx.Netfilter.{Chain, Expr, Rule, Set, Table, Verdict, Wire}
+  alias Linx.Netfilter.Map, as: NMap
   alias Linx.Netlink.{Attr, Message}
   alias Linx.Netlink.Nfnl.Codec
 
@@ -192,14 +193,84 @@ defmodule Linx.Netfilter.Encoder do
   @spec to_batch(Linx.Netfilter.Ruleset.t(), keyword()) :: [Message.t()]
   def to_batch(%Linx.Netfilter.Ruleset{} = ruleset, _opts \\ []) do
     Enum.flat_map(ruleset.tables, fn {{family, _name}, %Table{} = table} ->
-      [destroytable(family, table.name), table(table)] ++
-        Enum.map(table.chains, fn {_, %Chain{} = chain} -> chain(chain, family) end) ++
-        Enum.flat_map(table.chains, fn {_, %Chain{} = chain} ->
+      {rewritten_chains, anonymous_sets} = expand_anonymous_sets(table)
+
+      sets_msgs = Enum.map(table.sets, fn {_, s} -> set(s, family) end)
+      maps_msgs = Enum.map(table.maps, fn {_, m} -> set(m, family) end)
+      anon_set_msgs = Enum.map(anonymous_sets, &set(&1, family))
+
+      set_elem_msgs =
+        (Enum.map(table.sets, fn {_, s} -> set_elements(s, family) end) ++
+           Enum.map(table.maps, fn {_, m} -> set_elements(m, family) end) ++
+           Enum.map(anonymous_sets, &set_elements(&1, family)))
+        |> Enum.reject(&is_nil/1)
+
+      chain_msgs = Enum.map(rewritten_chains, fn {_, c} -> chain(c, family) end)
+
+      rule_msgs =
+        Enum.flat_map(rewritten_chains, fn {_, %Chain{} = chain} ->
           Enum.map(chain.rules, fn %Rule{} = rule ->
             rule(rule, family, table.name, chain.name)
           end)
         end)
+
+      # Order matters: declarations before references.
+      #   named + anonymous sets/maps → rules can reference them
+      #   chains → vmap verdicts can reference them by name
+      #   set/map elements → vmaps with jump/goto verdicts find chains
+      #   rules → everything referenced exists
+      [destroytable(family, table.name), table(table)] ++
+        sets_msgs ++ maps_msgs ++ anon_set_msgs ++ chain_msgs ++ set_elem_msgs ++ rule_msgs
     end)
+  end
+
+  # Walks all rules in `table`, replacing every `:__anon_set`
+  # sentinel expression with a regular `lookup`. Returns the
+  # rewritten chains map and the list of anonymous Set values
+  # that must be emitted as NEWSET + NEWSETELEM before any rule
+  # references them.
+  defp expand_anonymous_sets(%Table{} = table) do
+    {chains, anon_sets, _counter} =
+      Enum.reduce(table.chains, {%{}, [], 0}, fn {chain_name, %Chain{} = chain},
+                                                 {chains_acc, sets_acc, n} ->
+        {rewritten_rules, new_sets, n2} =
+          Enum.reduce(chain.rules, {[], sets_acc, n}, fn rule, {rules, sa, nn} ->
+            {rewritten, sa2, nn2} = rewrite_rule_anon_sets(rule, table.name, sa, nn)
+            {rules ++ [rewritten], sa2, nn2}
+          end)
+
+        new_chain = %Chain{chain | rules: rewritten_rules}
+        {Map.put(chains_acc, chain_name, new_chain), new_sets, n2}
+      end)
+
+    {chains, anon_sets}
+  end
+
+  defp rewrite_rule_anon_sets(%Rule{expressions: exprs} = rule, table_name, sets_acc, counter) do
+    {new_exprs, sets_acc2, counter2} =
+      Enum.reduce(exprs, {[], sets_acc, counter}, fn
+        %Expr{name: :__anon_set, data: data}, {acc, sa, n} ->
+          name = "__set#{n}"
+          {:ok, anon_set} =
+            Linx.Netfilter.Set.new(name,
+              key_type: data.key_type,
+              flags: Enum.uniq([:anonymous | data.flags]),
+              elements: data.values,
+              table: table_name
+            )
+
+          lookup_expr = %Expr{
+            name: :lookup,
+            data: %{set: name, sreg: data.sreg, dreg: nil, flags: []}
+          }
+
+          {acc ++ [lookup_expr], sa ++ [anon_set], n + 1}
+
+        other, {acc, sa, n} ->
+          {acc ++ [other], sa, n}
+      end)
+
+    {%Rule{rule | expressions: new_exprs}, sets_acc2, counter2}
   end
 
   # ===========================================================
@@ -276,6 +347,240 @@ defmodule Linx.Netfilter.Encoder do
       end)
 
     Attr.encode(inner)
+  end
+
+  # ===========================================================
+  # Sets / maps
+  # ===========================================================
+
+  @doc """
+  Builds a `NEWSET` message. Accepts either a `%Linx.Netfilter.Set{}`
+  (plain set) or a `%Linx.Netfilter.Map{}` (typed map, including
+  vmaps — `data_type: :verdict`).
+
+  The encoder auto-derives the `NFT_SET_F_MAP` flag for maps and
+  `NFT_SET_F_EVAL` for `:dynamic` sets; callers shouldn't include
+  them in `:flags` directly (but `set_flags_int/1` accepts them
+  for round-trip purposes).
+  """
+  @spec set(Set.t() | NMap.t(), Table.family(), keyword()) :: Message.t()
+  def set(set_or_map, family, opts \\ []) when is_atom(family) and is_list(opts) do
+    excl? = Keyword.get(opts, :excl, false)
+    create? = Keyword.get(opts, :create, true)
+
+    {table, name, key_type, data_type, flags, elements, timeout, gc_interval, size, _kind} =
+      extract_set_fields(set_or_map)
+
+    {key_id, key_len} = Wire.set_type_info(key_type)
+
+    # Auto-set flags based on shape
+    auto_flags =
+      flags
+      |> maybe_append_atom(data_type != nil, :map)
+
+    flags_int = Wire.set_flags_int(auto_flags)
+
+    # Transaction-local set ID. The kernel uses this to resolve
+    # set references from rules created in the same batch (via
+    # NFTA_LOOKUP_SET_ID). Even when rules reference by name,
+    # libnftnl always sends it and recent kernels expect it on
+    # NEWSET. Generate a stable-within-this-encode id from a
+    # process counter.
+    set_id = Keyword.get(opts, :set_id, next_set_id())
+
+    base_attrs =
+      [
+        {nfta_set_table(), [table, 0]},
+        {nfta_set_name(), [name, 0]},
+        {nfta_set_flags(), Wire.u32_be(flags_int)},
+        {nfta_set_key_type(), Wire.u32_be(key_id)},
+        {nfta_set_key_len(), Wire.u32_be(key_len)},
+        {nfta_set_id(), Wire.u32_be(set_id)}
+      ]
+      |> maybe_add(data_type != nil, fn ->
+        {data_id, _data_len} = Wire.set_type_info(data_type)
+
+        # NFTA_SET_DATA_TYPE for verdict maps must be 0xffffff00 sentinel
+        # (NFT_DATA_VERDICT) when the kernel-side data is a verdict;
+        # otherwise the libnftnl type id.
+        data_type_int =
+          case data_type do
+            :verdict -> 0xFFFFFF00
+            _ -> data_id
+          end
+
+        {nfta_set_data_type(), Wire.u32_be(data_type_int)}
+      end)
+      |> maybe_add(data_type != nil, fn ->
+        {_data_id, data_len} = Wire.set_type_info(data_type)
+        {nfta_set_data_len(), Wire.u32_be(data_len)}
+      end)
+      |> maybe_add(not is_nil(timeout), fn ->
+        {nfta_set_timeout(), Wire.u64_be(timeout)}
+      end)
+      |> maybe_add(not is_nil(gc_interval), fn ->
+        {nfta_set_gc_interval(), Wire.u32_be(gc_interval)}
+      end)
+      |> maybe_add(not is_nil(size), fn ->
+        desc = Attr.encode([{nfta_set_desc_size(), Wire.u32_be(size)}])
+        {nfta_set_desc(), desc}
+      end)
+
+    payload = Codec.encode_nfgenmsg(family, 0) <> Attr.encode(base_attrs)
+
+    base_flags = 0
+    base_flags = if create?, do: base_flags ||| nlm_f_create(), else: base_flags
+    base_flags = if excl?, do: base_flags ||| nlm_f_excl(), else: base_flags
+
+    _ = elements
+
+    %Message{
+      type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_newset()),
+      flags: base_flags,
+      payload: payload
+    }
+  end
+
+  @doc """
+  Builds a `NEWSETELEM` message — adds one or more elements to a
+  named set.
+
+  Elements is a list of either:
+
+    * raw key terms (for plain sets) — `[{10,0,0,1}, "1.2.3.4", ...]`.
+    * `{key, data}` tuples (for maps and vmaps) — `[{22, %Verdict{...}}, ...]`.
+
+  The encoder normalises each into the wire form using
+  `key_type` / `data_type` from the parent set.
+  """
+  @spec set_elements(Set.t() | NMap.t(), Table.family(), keyword()) :: Message.t() | nil
+  def set_elements(set_or_map, family, opts \\ []) when is_atom(family) and is_list(opts) do
+    {table, name, key_type, data_type, _flags, elements, _, _, _, _} =
+      extract_set_fields(set_or_map)
+
+    case elements do
+      [] ->
+        nil
+
+      _ ->
+        elements_bin = encode_set_elements(elements, key_type, data_type)
+
+        attrs = [
+          {nfta_set_elem_list_table(), [table, 0]},
+          {nfta_set_elem_list_set(), [name, 0]},
+          {nfta_set_elem_list_elements(), elements_bin}
+        ]
+
+        payload = Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
+        create? = Keyword.get(opts, :create, true)
+        base_flags = if create?, do: nlm_f_create(), else: 0
+
+        %Message{
+          type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_newsetelem()),
+          flags: base_flags,
+          payload: payload
+        }
+    end
+  end
+
+  defp encode_set_elements(elements, key_type, data_type) do
+    elements
+    |> Enum.map(fn elem -> encode_one_set_elem(elem, key_type, data_type) end)
+    |> Attr.encode()
+  end
+
+  defp encode_one_set_elem(elem, key_type, data_type) do
+    {key_term, data_term} =
+      case data_type do
+        nil -> {elem, nil}
+        _ -> elem
+      end
+
+    key_bin = encode_key_value(key_term, key_type)
+
+    # NFTA_SET_ELEM_KEY = nested NFTA_DATA_VALUE
+    key_nla = Attr.encode([{nfta_data_value(), key_bin}])
+
+    inner_attrs =
+      [{nfta_set_elem_key(), key_nla}]
+      |> maybe_add(data_type != nil, fn ->
+        {nfta_set_elem_data(), encode_set_elem_data(data_term, data_type)}
+      end)
+
+    {nfta_list_elem(), Attr.encode(inner_attrs)}
+  end
+
+  defp encode_set_elem_data(%Verdict{} = v, :verdict) do
+    # NFTA_SET_ELEM_DATA → nested NFTA_DATA_VERDICT
+    Attr.encode(encode_data_verdict(v))
+  end
+
+  defp encode_set_elem_data(value, data_type) do
+    bin = encode_key_value(value, data_type)
+    Attr.encode([{nfta_data_value(), bin}])
+  end
+
+  defp encode_key_value(value, type) do
+    cond do
+      is_binary(value) ->
+        value
+
+      type == :ipv4_addr and is_tuple(value) and tuple_size(value) == 4 ->
+        {a, b, c, d} = value
+        <<a, b, c, d>>
+
+      type == :ipv6_addr and is_tuple(value) and tuple_size(value) == 8 ->
+        {a, b, c, d, e, f, g, h} = value
+        <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
+
+      type == :ether_addr and is_tuple(value) and tuple_size(value) == 6 ->
+        {a, b, c, d, e, f} = value
+        <<a, b, c, d, e, f>>
+
+      type == :inet_service and is_integer(value) ->
+        <<value::big-16>>
+
+      type == :inet_proto and is_integer(value) ->
+        <<value>>
+
+      type == :mark and is_integer(value) ->
+        <<value::big-32>>
+
+      true ->
+        raise ArgumentError,
+              "cannot encode set element #{inspect(value)} for type #{inspect(type)}"
+    end
+  end
+
+  defp extract_set_fields(%Set{} = s) do
+    {s.table, s.name, s.key_type, nil, s.flags, s.elements, s.timeout, s.gc_interval, s.size,
+     :set}
+  end
+
+  defp extract_set_fields(%NMap{} = m) do
+    {m.table, m.name, m.key_type, m.data_type, m.flags, m.elements, m.timeout, m.gc_interval,
+     m.size, :map}
+  end
+
+  defp maybe_append_atom(flags, true, atom), do: if(atom in flags, do: flags, else: flags ++ [atom])
+  defp maybe_append_atom(flags, false, _atom), do: flags
+
+  # Process-local atomic counter for set IDs. The kernel only cares
+  # that IDs within one batch are unique; we just give every set a
+  # fresh value.
+  defp next_set_id do
+    counter =
+      case :persistent_term.get({__MODULE__, :set_id_counter}, nil) do
+        nil ->
+          ref = :atomics.new(1, signed: false)
+          :persistent_term.put({__MODULE__, :set_id_counter}, ref)
+          ref
+
+        ref ->
+          ref
+      end
+
+    :atomics.add_get(counter, 1, 1)
   end
 
   # ===========================================================

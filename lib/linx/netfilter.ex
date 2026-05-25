@@ -135,7 +135,16 @@ defmodule Linx.Netfilter do
   """
 
   import Linx.Netlink.Constants
-  import Linx.Netfilter.Wire, only: [nft_msg_getchain: 0, nft_msg_getrule: 0]
+
+  import Linx.Netfilter.Wire,
+    only: [
+      nft_msg_getchain: 0,
+      nft_msg_getrule: 0,
+      nft_msg_getset: 0,
+      nft_msg_getsetelem: 0,
+      nfta_set_elem_list_table: 0,
+      nfta_set_elem_list_set: 0
+    ]
 
   alias Linx.Netfilter.{Decoder, Encoder, Error, Ruleset, Table}
   alias Linx.Netlink.{Message, Nfnl, Request, Socket}
@@ -290,13 +299,16 @@ defmodule Linx.Netfilter do
   def pull(%Socket{} = sock) do
     with {:ok, tables} <- dump_tables(sock, :unspec),
          {:ok, chains} <- dump_chains(sock, :unspec),
-         {:ok, rules} <- dump_rules(sock, :unspec) do
-      {:ok, Decoder.from_msgs(tables, chains, rules)}
+         {:ok, rules} <- dump_rules(sock, :unspec),
+         {:ok, sets} <- dump_sets(sock, :unspec),
+         {:ok, set_elems} <- dump_set_elements_for(sock, sets) do
+      {:ok, Decoder.from_msgs(tables, chains, rules, sets, set_elems)}
     end
   end
 
   @doc """
-  Pulls a single table (and its chains, rules) by `{family, name}`.
+  Pulls a single table (and its chains, rules, sets) by
+  `{family, name}`.
 
   Returns `{:ok, %Ruleset{}}` containing just that table, or
   `{:error, %Linx.Netfilter.Error{errno: :enoent}}` if the table
@@ -307,14 +319,21 @@ defmodule Linx.Netfilter do
   def pull(%Socket{} = sock, {family, name}) when is_atom(family) and is_binary(name) do
     with {:ok, [table]} <- get_table(sock, family, name),
          {:ok, chains} <- dump_chains(sock, family),
-         {:ok, rules} <- dump_rules(sock, family) do
-      # Filter chains + rules to just this table.
+         {:ok, rules} <- dump_rules(sock, family),
+         {:ok, sets} <- dump_sets(sock, family) do
+      # Filter chains + rules + sets to just this table.
       chains = Enum.filter(chains, fn {_, c} -> c.table == name end)
       rules = Enum.filter(rules, fn {_, t, _, _} -> t == name end)
+      sets = Enum.filter(sets, fn {_, s} -> entity_table(s) == name end)
 
-      {:ok, Decoder.from_msgs([table], chains, rules)}
+      with {:ok, set_elems} <- dump_set_elements_for(sock, sets) do
+        {:ok, Decoder.from_msgs([table], chains, rules, sets, set_elems)}
+      end
     end
   end
+
+  defp entity_table(%Linx.Netfilter.Set{table: t}), do: t
+  defp entity_table(%Linx.Netfilter.Map{table: t}), do: t
 
   # ----- internals -----
 
@@ -341,6 +360,74 @@ defmodule Linx.Netfilter do
     }
 
     talk_dump(sock, msg, &Decoder.rule/1, :pull)
+  end
+
+  defp dump_sets(sock, family) do
+    msg = %Message{
+      type: NfnlCodec.nlmsg_type(NfnlCodec.subsys_nftables(), nft_msg_getset()),
+      flags: nlm_f_dump(),
+      payload: NfnlCodec.encode_nfgenmsg(family, 0)
+    }
+
+    talk_dump(sock, msg, &Decoder.set/1, :pull)
+  end
+
+  defp dump_set_elements_for(sock, sets) do
+    # GETSETELEM doesn't support dump-all; it requires NFTA_SET_ELEM_LIST_SET.
+    # Issue one request per known set.
+    sets
+    |> Enum.reduce_while({:ok, []}, fn {family, entity}, {:ok, acc} ->
+      case dump_set_elements_one(sock, family, entity_table(entity), entity.name) do
+        {:ok, elements} -> {:cont, {:ok, [{family, entity_table(entity), entity.name, elements} | acc]}}
+        {:error, %Linx.Netfilter.Error{errno: :enoent}} ->
+          # Set vanished between the GETSET dump and this call. Skip.
+          {:cont, {:ok, acc}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, rev} -> {:ok, Enum.reverse(rev)}
+      err -> err
+    end
+  end
+
+  defp dump_set_elements_one(sock, family, table_name, set_name) do
+    attrs =
+      Linx.Netlink.Attr.encode([
+        {nfta_set_elem_list_table(), [table_name, 0]},
+        {nfta_set_elem_list_set(), [set_name, 0]}
+      ])
+
+    msg = %Message{
+      type: NfnlCodec.nlmsg_type(NfnlCodec.subsys_nftables(), nft_msg_getsetelem()),
+      flags: nlm_f_dump(),
+      payload: NfnlCodec.encode_nfgenmsg(family, 0) <> attrs
+    }
+
+    case Request.talk(sock, msg.type, msg.flags, msg.payload) do
+      {:ok, messages} ->
+        # Each message decodes to {family, table, set, [elements]} —
+        # we know table/set already, so just collect element lists.
+        elements =
+          Enum.flat_map(messages, fn m ->
+            {_, _, _, elems} = Decoder.set_elements(m.payload)
+            elems
+          end)
+
+        {:ok, elements}
+
+      {:error, %NetlinkError{} = err} ->
+        {:error,
+         Error.from_posix(err.errno, :pull,
+           subsys: :nftables,
+           message: err.message
+         )}
+
+      {:error, other} ->
+        {:error, other}
+    end
   end
 
   defp get_table(sock, family, name) do

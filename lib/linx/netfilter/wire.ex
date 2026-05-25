@@ -246,6 +246,160 @@ defmodule Linx.Netfilter.Wire do
   defmacro nf_nat_range_proto_offset, do: 0x20
   defmacro nf_nat_range_netmap, do: 0x40
 
+  # NFTA_SET_* — set attributes (`enum nft_set_attributes`)
+  defmacro nfta_set_table, do: 1
+  defmacro nfta_set_name, do: 2
+  defmacro nfta_set_flags, do: 3
+  defmacro nfta_set_key_type, do: 4
+  defmacro nfta_set_key_len, do: 5
+  defmacro nfta_set_data_type, do: 6
+  defmacro nfta_set_data_len, do: 7
+  defmacro nfta_set_policy, do: 8
+  defmacro nfta_set_desc, do: 9
+  defmacro nfta_set_id, do: 10
+  defmacro nfta_set_timeout, do: 11
+  defmacro nfta_set_gc_interval, do: 12
+  defmacro nfta_set_userdata, do: 13
+  defmacro nfta_set_pad, do: 14
+  defmacro nfta_set_obj_type, do: 15
+  defmacro nfta_set_handle, do: 16
+  defmacro nfta_set_expr, do: 17
+  defmacro nfta_set_expressions, do: 18
+
+  # NFT_SET_F_* — set flag bitmask values (`enum nft_set_flags`)
+  defmacro nft_set_anonymous, do: 0x1
+  defmacro nft_set_constant, do: 0x2
+  defmacro nft_set_interval, do: 0x4
+  defmacro nft_set_map, do: 0x8
+  defmacro nft_set_timeout_flag, do: 0x10
+  defmacro nft_set_eval, do: 0x20
+  defmacro nft_set_object_flag, do: 0x40
+  defmacro nft_set_concat, do: 0x80
+  defmacro nft_set_expr_flag, do: 0x100
+
+  # NFTA_SET_ELEM_* — set element attributes
+  defmacro nfta_set_elem_key, do: 1
+  defmacro nfta_set_elem_data, do: 2
+  defmacro nfta_set_elem_flags, do: 3
+  defmacro nfta_set_elem_timeout, do: 4
+  defmacro nfta_set_elem_expiration, do: 5
+  defmacro nfta_set_elem_userdata, do: 6
+  defmacro nfta_set_elem_expr, do: 7
+  defmacro nfta_set_elem_pad, do: 8
+  defmacro nfta_set_elem_objref, do: 9
+  defmacro nfta_set_elem_key_end, do: 10
+  defmacro nfta_set_elem_expressions, do: 11
+
+  # NFT_SET_ELEM_F_* — set element flag values
+  defmacro nft_set_elem_interval_end, do: 0x1
+  defmacro nft_set_elem_catchall, do: 0x2
+
+  # NFTA_SET_ELEM_LIST_* — set element list attributes (NEWSETELEM body)
+  defmacro nfta_set_elem_list_table, do: 1
+  defmacro nfta_set_elem_list_set, do: 2
+  defmacro nfta_set_elem_list_elements, do: 3
+  defmacro nfta_set_elem_list_set_id, do: 4
+
+  # NFTA_SET_DESC_* — set descriptor (size, concat fields)
+  defmacro nfta_set_desc_size, do: 1
+  defmacro nfta_set_desc_concat, do: 2
+
+  # ===========================================================
+  # libnftnl key/data type IDs
+  #
+  # The kernel's NFTA_SET_KEY_TYPE / NFTA_SET_DATA_TYPE attributes
+  # carry an integer that is opaque to the kernel itself — it's
+  # interpreted by userspace (libnftnl / `nft list ruleset`) for
+  # display purposes. The values come from libnftnl's data_reg.h.
+  # ===========================================================
+
+  defmacro nftnl_type_invalid, do: 0
+  defmacro nftnl_type_verdict, do: 1
+  defmacro nftnl_type_nf_proto, do: 2
+  defmacro nftnl_type_bitmask, do: 3
+  defmacro nftnl_type_integer, do: 4
+  defmacro nftnl_type_string, do: 5
+  defmacro nftnl_type_lladdr, do: 6
+  defmacro nftnl_type_ipaddr, do: 7
+  defmacro nftnl_type_ip6addr, do: 8
+  defmacro nftnl_type_etheraddr, do: 9
+  defmacro nftnl_type_ethertype, do: 10
+  defmacro nftnl_type_inet_protocol, do: 12
+  defmacro nftnl_type_inet_service, do: 13
+  defmacro nftnl_type_mark, do: 19
+  defmacro nftnl_type_ifname, do: 41
+
+  @doc """
+  Maps a Linx key-type atom to its `(libnftnl_type_id, byte_len)`
+  pair for `NFTA_SET_KEY_TYPE` / `NFTA_SET_KEY_LEN`.
+  """
+  @spec set_type_info(atom()) :: {non_neg_integer(), pos_integer()}
+  def set_type_info(:ipv4_addr), do: {7, 4}
+  def set_type_info(:ipv6_addr), do: {8, 16}
+  def set_type_info(:ether_addr), do: {9, 6}
+  def set_type_info(:inet_proto), do: {12, 1}
+  def set_type_info(:inet_service), do: {13, 2}
+  def set_type_info(:mark), do: {19, 4}
+  def set_type_info(:ifname), do: {41, 16}
+  def set_type_info(:verdict), do: {1, 16}
+
+  @doc """
+  Inverse: maps a libnftnl type id + length back to a key-type
+  atom. Returns `{:unknown_type, id, len}` for unrecognised pairs.
+  """
+  @spec set_type_atom(non_neg_integer(), pos_integer()) :: atom() | tuple()
+  def set_type_atom(7, 4), do: :ipv4_addr
+  def set_type_atom(8, 16), do: :ipv6_addr
+  def set_type_atom(9, 6), do: :ether_addr
+  def set_type_atom(12, 1), do: :inet_proto
+  def set_type_atom(13, 2), do: :inet_service
+  def set_type_atom(19, 4), do: :mark
+  def set_type_atom(41, 16), do: :ifname
+  def set_type_atom(1, _), do: :verdict
+  def set_type_atom(id, len), do: {:unknown_type, id, len}
+
+  @doc """
+  Maps a set-flags atom list to the u32 bitmask. The encoder may
+  add `:map` / `:eval` automatically based on the set's
+  `:data_type` / `:dynamic` shape.
+  """
+  @spec set_flags_int([atom()]) :: non_neg_integer()
+  def set_flags_int(flags) when is_list(flags) do
+    import Bitwise
+
+    Enum.reduce(flags, 0, fn
+      :anonymous, acc -> acc ||| 0x1
+      :constant, acc -> acc ||| 0x2
+      :interval, acc -> acc ||| 0x4
+      :map, acc -> acc ||| 0x8
+      :timeout, acc -> acc ||| 0x10
+      :dynamic, acc -> acc ||| 0x20
+      :eval, acc -> acc ||| 0x20
+      :object, acc -> acc ||| 0x40
+      :concat, acc -> acc ||| 0x80
+      :expr, acc -> acc ||| 0x100
+      :auto_merge, acc -> acc
+      _, acc -> acc
+    end)
+  end
+
+  @doc "Inverse: u32 bitmask → list of flag atoms."
+  @spec set_flags_atoms(non_neg_integer()) :: [atom()]
+  def set_flags_atoms(flags) when is_integer(flags) do
+    import Bitwise
+
+    []
+    |> append_if((flags &&& 0x1) != 0, :anonymous)
+    |> append_if((flags &&& 0x2) != 0, :constant)
+    |> append_if((flags &&& 0x4) != 0, :interval)
+    |> append_if((flags &&& 0x8) != 0, :map)
+    |> append_if((flags &&& 0x10) != 0, :timeout)
+    |> append_if((flags &&& 0x20) != 0, :dynamic)
+    |> append_if((flags &&& 0x40) != 0, :object)
+    |> append_if((flags &&& 0x80) != 0, :concat)
+    |> append_if((flags &&& 0x100) != 0, :expr)
+  end
+
   # ===========================================================
   # Mapping helpers (atom → integer / vice versa)
   # ===========================================================

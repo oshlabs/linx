@@ -86,13 +86,16 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| Named set element types (ipv4_addr, ipv6_addr, ether_addr, inet_proto, inet_service, mark, ifname) | ⬜ | N4 |
-| Anonymous sets (inline `{1, 2, 3}`) | ⬜ | N4 |
-| Set element add/del (NFT_MSG_NEWSETELEM / DELSETELEM) | ⬜ | N4 |
-| Interval sets (CIDRs, port ranges; `flags interval`, `auto_merge`) | ⬜ | N4 |
-| Concatenations (`type ipv4_addr . inet_service`) | ⬜ | N4 |
-| Verdict maps (vmaps) | ⬜ | N4 |
-| Dynamic sets (`flags dynamic`, `timeout`; `Expr.dynset/3`) | ⬜ | N4 |
+| Named set element types (ipv4_addr, ipv6_addr, ether_addr, inet_proto, inet_service, mark, ifname) | ✅ | N4 — wire codec round-trip; element tuples normalised |
+| Set encoder + decoder (NEWSET / GETSET dump) | ✅ | N4 — `Encoder.set/3`, `Decoder.set/1`; NFTA_SET_ID auto-assigned |
+| Set element encoder + decoder (NFT_MSG_NEWSETELEM) | ✅ | N4 — batched per-set elements, key/data NLA_NESTED |
+| Verdict maps (vmaps) | ✅ | N4 — `Vmap.new!/2` round-trips; elements with `%Verdict{}` data |
+| Anonymous sets (inline `{22, 80, 443}`) | ✅ | N4 — `Expr.set_literal/3`; expanded at `to_batch` time, NFT_SET_F_ANONYMOUS\|CONSTANT |
+| Set element add/del at the verb level | 🟡 | N4 — encoder ships, no Linx.Netfilter.add_set_elements/3 verb yet |
+| Interval sets (CIDRs, port ranges; `flags interval`) | 🟡 | N4 — `:interval` flag ships; interval-element encoding (range-pair format) deferred |
+| Concatenations (`type ipv4_addr . inet_service`) | ⬜ | N4+ — bit-packed type IDs, doubled key_len |
+| Dynamic sets (`flags dynamic`, `timeout`; `Expr.dynset/3`) | ⬜ | N4+ — value type ships, encoder for dynset expression deferred |
+| Userdata for set type display (so `nft list` renders typed) | ⬜ | future — anonymous sets currently render as `@nh,...` hex |
 
 ## Diff + `:reconcile` + CAS
 

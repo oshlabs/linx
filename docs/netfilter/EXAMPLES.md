@@ -329,7 +329,100 @@ Ruleset.new()
      ]))
 ```
 
-## (Will land with N4 — sets, maps, vmaps, dynamic sets)
+## Named sets (N4)
+
+A named set declared on a table, then referenced from rules with
+`Expr.lookup/2`. Elements round-trip through `push` and `pull/2`.
+
+```elixir
+alias Linx.Netfilter.{Expr, Rule, Ruleset, Set, Verdict}
+
+Ruleset.new()
+|> Ruleset.add_table!(:inet, "fw", flags: [:owner])
+|> Ruleset.add_set!("fw",
+     Set.new!("blocklist",
+       key_type: :ipv4_addr,
+       elements: [{10, 0, 0, 1}, {10, 0, 0, 2}, {192, 168, 1, 100}]))
+|> Ruleset.add_chain!("fw", "input",
+     type: :filter, hook: :input, priority: 0, policy: :accept)
+|> Ruleset.add_rule!("fw", "input",
+     Rule.build!([
+       Expr.payload(:ip_saddr),
+       Expr.lookup("blocklist"),
+       Verdict.drop()
+     ]))
+```
+
+Element types: `:ipv4_addr` (4-tuple or 4-byte binary),
+`:ipv6_addr` (8-tuple or 16-byte), `:ether_addr`, `:inet_proto`,
+`:inet_service` (port int), `:mark`, `:ifname`. The codec
+normalises element shapes for you on encode and decode.
+
+## Maps and vmaps (N4)
+
+A typed map carries `key → value` associations. When the
+`:data_type` is `:verdict`, the map is a **verdict map** (vmap) —
+the kernel's rule-dispatch primitive (one lookup replaces N
+individual rules).
+
+```elixir
+alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict, Vmap}
+
+Ruleset.new()
+|> Ruleset.add_table!(:inet, "fw", flags: [:owner])
+|> Ruleset.add_chain!("fw", "ssh_in")
+|> Ruleset.add_chain!("fw", "http_in")
+|> Ruleset.add_map!("fw",
+     Vmap.new!("services",
+       key_type: :inet_service,
+       elements: [
+         {22, {:jump, "ssh_in"}},
+         {80, {:jump, "http_in"}}
+       ]))
+|> Ruleset.add_chain!("fw", "input",
+     type: :filter, hook: :input, priority: 0, policy: :drop)
+|> Ruleset.add_rule!("fw", "input",
+     Rule.build!([
+       Expr.payload(:tcp_dport),
+       Expr.lookup("services", dreg: 0)  # dreg: 0 loads into verdict register
+     ]))
+|> Ruleset.add_rule!("fw", "ssh_in", [Verdict.accept()])
+|> Ruleset.add_rule!("fw", "http_in", [Verdict.accept()])
+```
+
+For plain (non-verdict) maps:
+
+```elixir
+alias Linx.Netfilter.Map, as: NMap
+
+NMap.new!("dnat_pool",
+  key_type: :inet_service,
+  data_type: :ipv4_addr,
+  elements: [{80, {10, 0, 0, 5}}, {443, {10, 0, 0, 6}}])
+```
+
+## Anonymous sets (N4)
+
+Inline `{22, 80, 443}` literals in a rule — the encoder
+auto-generates a `NFT_SET_F_ANONYMOUS | NFT_SET_F_CONSTANT` set
+tied to the rule, no separate `add_set!` needed.
+
+```elixir
+Ruleset.new()
+|> Ruleset.add_table!(:inet, "fw", flags: [:owner])
+|> Ruleset.add_chain!("fw", "input",
+     type: :filter, hook: :input, priority: 0, policy: :drop)
+|> Ruleset.add_rule!("fw", "input",
+     Rule.build!([
+       Expr.payload(:tcp_dport),
+       Expr.set_literal([22, 80, 443], :inet_service),
+       Verdict.accept()
+     ]))
+```
+
+The anonymous set lives and dies with the rule.
+
+## (Will land with N5 — diff + :reconcile + BATCH_GENID CAS)
 
 ## (Will land with N5 — diff + :reconcile + BATCH_GENID CAS)
 
