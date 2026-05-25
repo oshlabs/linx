@@ -18,9 +18,9 @@ defmodule Linx.Netfilter.Decoder do
 
   import Linx.Netfilter.Wire
 
-  alias Linx.Netfilter.{Chain, Expr, Rule, Ruleset, Set, Table, Verdict, Wire}
+  alias Linx.Netfilter.{Chain, Event, Expr, Rule, Ruleset, Set, Table, Verdict, Wire}
   alias Linx.Netfilter.Map, as: NMap
-  alias Linx.Netlink.Attr
+  alias Linx.Netlink.{Attr, Message}
   alias Linx.Netlink.Nfnl.Codec
 
   # ===========================================================
@@ -719,6 +719,98 @@ defmodule Linx.Netfilter.Decoder do
         _ -> acc
       end
     end)
+  end
+
+  # ===========================================================
+  # Multicast events
+  # ===========================================================
+
+  @doc """
+  Decodes a `NFNLGRP_NFTABLES` multicast message into a partial
+  `%Linx.Netfilter.Event{}` — `gen_id` / `proc_pid` / `proc_name`
+  are left nil; the Monitor GenServer fills them in from the most
+  recent `NEW_GEN` event.
+
+  For NEW_GEN events, the gen / pid / name come from the body
+  itself.
+
+  Dispatches on the low byte of `nlmsghdr.type` (the per-subsys
+  message opcode).
+  """
+  @spec event(Message.t()) :: Event.t()
+  def event(%Message{type: type, payload: body}) do
+    {_subsys, msg_type} = Codec.split_type(type)
+    decode_event(msg_type, body)
+  end
+
+  defp decode_event(msg_type, body) do
+    cond do
+      msg_type == nft_msg_newgen() ->
+        gen = decode_gen(body)
+
+        %Event{
+          op: :new_gen,
+          entity: gen,
+          gen_id: gen.id,
+          proc_pid: gen.proc_pid,
+          proc_name: gen.proc_name
+        }
+
+      msg_type == nft_msg_newtable() ->
+        %Event{op: :new_table, entity: table(body)}
+
+      msg_type == nft_msg_deltable() or msg_type == nft_msg_destroytable() ->
+        %Event{op: :del_table, entity: table(body)}
+
+      msg_type == nft_msg_newchain() ->
+        %Event{op: :new_chain, entity: chain(body)}
+
+      msg_type == nft_msg_delchain() or msg_type == nft_msg_destroychain() ->
+        %Event{op: :del_chain, entity: chain(body)}
+
+      msg_type == nft_msg_newrule() ->
+        %Event{op: :new_rule, entity: rule(body)}
+
+      msg_type == nft_msg_delrule() or msg_type == nft_msg_destroyrule() ->
+        %Event{op: :del_rule, entity: rule(body)}
+
+      msg_type == nft_msg_newset() ->
+        %Event{op: :new_set, entity: set(body)}
+
+      msg_type == nft_msg_delset() or msg_type == nft_msg_destroyset() ->
+        %Event{op: :del_set, entity: set(body)}
+
+      msg_type == nft_msg_newsetelem() ->
+        %Event{op: :new_set_element, entity: set_elements(body)}
+
+      msg_type == nft_msg_delsetelem() or msg_type == nft_msg_destroysetelem() ->
+        %Event{op: :del_set_element, entity: set_elements(body)}
+
+      true ->
+        %Event{op: {:unknown, msg_type}, entity: body}
+    end
+  end
+
+  defp decode_gen(body) do
+    {_family, _ver, _res_id, attrs_bin} = Codec.decode_nfgenmsg(body)
+    attrs = Attr.decode(attrs_bin)
+
+    %{
+      id: get_u32_be(attrs, nfta_gen_id(), 0),
+      proc_pid: get_u32_be(attrs, nfta_gen_proc_pid(), nil),
+      proc_name: decode_gen_proc_name(attrs)
+    }
+  end
+
+  defp nfta_gen_id, do: 1
+  defp nfta_gen_proc_pid, do: 2
+  defp nfta_gen_proc_name, do: 3
+
+  defp decode_gen_proc_name(attrs) do
+    case List.keyfind(attrs, nfta_gen_proc_name(), 0) do
+      {_, value} -> String.trim_trailing(value, <<0>>)
+      nil -> nil
+    end
   end
 
   # ===========================================================

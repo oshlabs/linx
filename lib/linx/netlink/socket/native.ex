@@ -55,4 +55,18 @@ defmodule Linx.Netlink.Socket.Native do
   """
   @spec close_fd(non_neg_integer) :: :ok
   def close_fd(_fd), do: :erlang.nif_error(:nif_not_loaded)
+
+  @doc """
+  Binds a netlink socket fd to `nl_pid = 0` (kernel-auto-assigned)
+  with the given group-membership bitmask.
+
+  Erlang's `:socket.bind/2` does not accept netlink `sockaddr_nl`,
+  so the bind goes through this NIF. Use `groups = 0` for a plain
+  bind (e.g. to enable multicast reception via
+  `NETLINK_ADD_MEMBERSHIP` setsockopt later — the socket must be
+  bound to receive multicast events at all).
+  """
+  @spec bind_netlink(non_neg_integer(), non_neg_integer()) ::
+          :ok | {:error, integer()}
+  def bind_netlink(_fd, _groups), do: :erlang.nif_error(:nif_not_loaded)
 end

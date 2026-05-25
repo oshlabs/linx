@@ -52,6 +52,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <linux/netlink.h> /* struct sockaddr_nl */
 #include <sched.h>      /* setns, CLONE_NEWNET */
 #include <string.h>
 #include <sys/socket.h> /* socket, AF_NETLINK, SOCK_RAW, SOCK_CLOEXEC */
@@ -181,9 +182,48 @@ static ERL_NIF_TERM close_fd(ErlNifEnv *env, int argc,
 	return enif_make_atom(env, "ok");
 }
 
+/* bind_netlink(Fd::integer, GroupsBitmask::integer) -> ok | {error, Errno}
+ *
+ * Binds the netlink fd with nl_pid = 0 (kernel auto-assigns) and the given
+ * group-membership bitmask. Erlang's :socket.bind/2 doesn't accept netlink
+ * sockaddrs, so we do this in C.
+ *
+ * For modern multi-group subscriptions, NETLINK_ADD_MEMBERSHIP via
+ * setsockopt is preferred — but the socket must still be bound first to
+ * receive multicast (else the kernel never delivers events to it). Calling
+ * this with groups=0 just binds for auto-port assignment. */
+static ERL_NIF_TERM bind_netlink(ErlNifEnv *env, int argc,
+				 const ERL_NIF_TERM argv[])
+{
+	(void)argc;
+
+	int fd;
+	if (!enif_get_int(env, argv[0], &fd))
+		return enif_make_badarg(env);
+
+	unsigned int groups;
+	if (!enif_get_uint(env, argv[1], &groups))
+		return enif_make_badarg(env);
+
+	struct sockaddr_nl addr = {
+		.nl_family = AF_NETLINK,
+		.nl_pid = 0, /* let the kernel auto-assign */
+		.nl_groups = groups,
+	};
+
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		return enif_make_tuple2(
+			env, enif_make_atom(env, "error"),
+			enif_make_int(env, errno));
+	}
+
+	return enif_make_atom(env, "ok");
+}
+
 static ErlNifFunc nif_funcs[] = {
 	{"open_in_netns", 2, open_in_netns, ERL_NIF_DIRTY_JOB_IO_BOUND},
 	{"close_fd", 1, close_fd, 0},
+	{"bind_netlink", 2, bind_netlink, 0},
 };
 
 ERL_NIF_INIT(Elixir.Linx.Netlink.Socket.Native, nif_funcs, NULL, NULL, NULL, NULL)

@@ -218,6 +218,8 @@ defmodule Linx.MixProject do
           Linx.Netfilter.Flowtable,
           Linx.Netfilter.Patch,
           Linx.Netfilter.Diff,
+          Linx.Netfilter.Event,
+          Linx.Netfilter.Monitor,
           Linx.Netfilter.Encoder,
           Linx.Netfilter.Decoder,
           Linx.Netfilter.Wire

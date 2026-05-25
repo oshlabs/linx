@@ -117,13 +117,15 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| Monitor socket on `NFNLGRP_NFTABLES` | ⬜ | N6 |
-| `Linx.Netfilter.Monitor` GenServer | ⬜ | N6 |
-| `subscribe/1` → `{:linx_netfilter, :event, %Event{}}` | ⬜ | N6 |
-| Event decoder (NEWTABLE/DELTABLE/.../NEWGEN/DELGEN) | ⬜ | N6 |
-| Exactly-once-from-snapshot pattern (`subscribe_first:` opt on pull) | ⬜ | N6 |
-| ENOBUFS recovery (`{:linx_netfilter, :resync_needed}`) | ⬜ | N6 |
-| Batch grouping by gen_id | ⬜ | N6 |
+| Monitor socket on `NFNLGRP_NFTABLES` | ✅ | N6 — `Linx.Netlink.Socket.add_membership/2` joins group 7 |
+| `Linx.Netfilter.Monitor` GenServer | ✅ | N6 — short-timeout polling loop; 4 MiB SO_RCVBUF default |
+| `Linx.Netfilter.subscribe/2` → `{:linx_netfilter, :event, %Event{}}` | ✅ | N6 — `unsubscribe/1` stops the monitor |
+| `%Linx.Netfilter.Event{gen_id, proc_pid, proc_name, op, entity}` value type | ✅ | N6 — custom Inspect with op + path summary |
+| Event decoder dispatches on NEW/DEL of TABLE/CHAIN/RULE/SET/SETELEM + NEWGEN | ✅ | N6 — reuses N2-N4 entity decoders |
+| Snapshot+tail (`subscribe_first:` opt on pull/1..2) | ✅ | N6 — captures gen before dump; Monitor.set_min_gen filters pre-snapshot events |
+| ENOBUFS recovery (`{:linx_netfilter, :resync_needed}`) | ✅ | N6 — owner re-runs snapshot+tail |
+| Batch grouping by gen_id | ✅ | N6 — entity events buffered until NEWGEN closes the batch; all dispatched with that gen + committer |
+| Netlink socket auto-bind with `nl_pid = 0` | ✅ | N6 — added `Native.bind_netlink/2` NIF; required for multicast |
 
 ## NFLOG (NFNL_SUBSYS_ULOG)
 

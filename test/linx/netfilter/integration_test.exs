@@ -21,6 +21,22 @@ defmodule Linx.Netfilter.IntegrationTest do
     "linx_n2_#{prefix}_#{suffix}"
   end
 
+  defp drain_events(timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_drain([], deadline)
+  end
+
+  defp do_drain(acc, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:linx_netfilter, :event, event} -> do_drain([event | acc], deadline)
+      {:linx_netfilter, :resync_needed} -> do_drain(acc, deadline)
+    after
+      remaining -> Enum.reverse(acc)
+    end
+  end
+
   describe "create_table/3 — minimal happy path" do
     test "creates an :inet table and returns a single-table ruleset" do
       {:ok, sock} = Nfnl.open()
@@ -1080,6 +1096,143 @@ defmodule Linx.Netfilter.IntegrationTest do
         System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
 
       refute nft_out =~ ~r/chain input/
+    end
+
+    test "monitor: subscribe + push → owner receives :event messages" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Event, Ruleset}
+
+      {:ok, monitor} = Netfilter.subscribe(self())
+      on_exit(fn -> if Process.alive?(monitor), do: Netfilter.unsubscribe(monitor) end)
+
+      # Let the monitor settle on the socket.
+      Process.sleep(50)
+
+      table_name = unique_name("monitor_basic")
+
+      # Push something so the kernel multicasts NEW_GEN + NEW_TABLE
+      assert {:ok, _} = Netfilter.create_table(sock, table_name)
+
+      # Drain events for up to 500ms
+      events = drain_events(500)
+
+      # Expect at least one :new_gen + one :new_table for OUR table.
+      assert Enum.any?(events, &match?(%Event{op: :new_gen}, &1))
+
+      assert Enum.any?(events, fn
+               %Event{op: :new_table, entity: %{name: ^table_name}} -> true
+               _ -> false
+             end)
+
+      # The :new_table event carries gen_id + proc_pid + proc_name
+      # from the most recent NEW_GEN.
+      table_event =
+        Enum.find(events, fn
+          %Event{op: :new_table, entity: %{name: ^table_name}} -> true
+          _ -> false
+        end)
+
+      assert is_integer(table_event.gen_id) and table_event.gen_id > 0
+      assert is_binary(table_event.proc_name) or is_nil(table_event.proc_name)
+    end
+
+    test "monitor: full ruleset push generates one event per entity" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
+
+      {:ok, monitor} = Netfilter.subscribe(self())
+      on_exit(fn -> if Process.alive?(monitor), do: Netfilter.unsubscribe(monitor) end)
+
+      Process.sleep(50)
+
+      table_name = unique_name("monitor_full")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "input",
+          type: :filter,
+          hook: :input,
+          priority: 0
+        )
+        |> Ruleset.add_rule!(table_name, "input",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<22::big-16>>),
+            Verdict.accept()
+          ], tag: :allow_ssh)
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      events = drain_events(500)
+
+      table_events =
+        Enum.filter(events, fn
+          %{op: :new_table, entity: %{name: ^table_name}} -> true
+          _ -> false
+        end)
+
+      chain_events =
+        Enum.filter(events, fn
+          %{op: :new_chain, entity: {_, %{table: ^table_name, name: "input"}}} -> true
+          _ -> false
+        end)
+
+      rule_events =
+        Enum.filter(events, fn
+          %{op: :new_rule, entity: {_, ^table_name, "input", _}} -> true
+          _ -> false
+        end)
+
+      assert length(table_events) >= 1
+      assert length(chain_events) >= 1
+      assert length(rule_events) >= 1
+    end
+
+    test "monitor: snapshot+tail via pull subscribe_first drops pre-snapshot events" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      table_name = unique_name("monitor_snap")
+      # Create something BEFORE we subscribe — should not be replayed
+      assert {:ok, _} = Netfilter.create_table(sock, table_name)
+
+      {:ok, monitor} = Netfilter.subscribe(self())
+      on_exit(fn -> if Process.alive?(monitor), do: Netfilter.unsubscribe(monitor) end)
+
+      Process.sleep(50)
+
+      # subscribe_first captures the gen RIGHT before pull. Events at
+      # or below that gen are dropped from the feed.
+      assert {:ok, _pulled} = Netfilter.pull(sock, subscribe_first: monitor)
+
+      # Drain — should be empty (no commits since subscribe_first).
+      events = drain_events(200)
+      assert events == []
+
+      # Now commit something — that event should flow.
+      table_name_2 = unique_name("monitor_snap2")
+      assert {:ok, _} = Netfilter.create_table(sock, table_name_2)
+
+      events = drain_events(300)
+
+      assert Enum.any?(events, fn
+               %{op: :new_table, entity: %{name: ^table_name_2}} -> true
+               _ -> false
+             end)
+    end
+
+    test "unsubscribe stops the monitor" do
+      {:ok, monitor} = Netfilter.subscribe(self())
+      assert Process.alive?(monitor)
+      assert :ok = Netfilter.unsubscribe(monitor)
+      Process.sleep(20)
+      refute Process.alive?(monitor)
     end
 
     test "jump verdict to a regular chain" do

@@ -338,19 +338,31 @@ defmodule Linx.Netfilter do
   Pulls the kernel's nftables state into a Ruleset value.
 
   No-arg form dumps the entire netns — every table, every chain,
-  every rule the caller can see. Use `pull/2` for a scoped dump
-  (one table by `(family, name)`).
+  every rule the caller can see. Pass a `{family, name}` tuple to
+  scope the dump to one table (or `pull/3` with options).
+
+  Options (no-arg form):
+
+    * `:subscribe_first` — pid of a `Linx.Netfilter.Monitor` to
+      handshake against. Captures the current gen via `GETGEN`
+      and tells the monitor to drop events at or below it.
+      Subsequent multicast events with `gen_id > captured` are
+      guaranteed not to be in the returned snapshot (snapshot+tail
+      pattern).
 
   Implementation: three sequential dumps (`GETTABLE`, `GETCHAIN`,
-  `GETRULE`), then `Linx.Netfilter.Decoder.from_msgs/3` assembles
-  them into the Ruleset. Dumps are not atomic across types — if a
-  table is created between the table dump and the rule dump, its
-  rules will be silently dropped during assembly. N5's `:reconcile`
-  mode adds `NFTA_BATCH_GENID` for atomicity.
+  `GETRULE`) plus per-set `GETSETELEM`, then `Decoder.from_msgs/5`
+  assembles them. Dumps are not atomic across types — for full
+  consistency under churn, combine with `:subscribe_first` and the
+  Monitor.
   """
-  @spec pull(Socket.t()) :: {:ok, Ruleset.t()} | {:error, Error.t() | term()}
-  def pull(%Socket{} = sock) do
-    with {:ok, tables} <- dump_tables(sock, :unspec),
+  @spec pull(Socket.t(), keyword() | {atom(), String.t()}) ::
+          {:ok, Ruleset.t()} | {:error, Error.t() | term()}
+  def pull(sock, opts_or_scope \\ [])
+
+  def pull(%Socket{} = sock, opts) when is_list(opts) do
+    with :ok <- maybe_snapshot_first(sock, opts),
+         {:ok, tables} <- dump_tables(sock, :unspec),
          {:ok, chains} <- dump_chains(sock, :unspec),
          {:ok, rules} <- dump_rules(sock, :unspec),
          {:ok, sets} <- dump_sets(sock, :unspec),
@@ -359,18 +371,28 @@ defmodule Linx.Netfilter do
     end
   end
 
+  def pull(%Socket{} = sock, {family, name})
+      when is_atom(family) and is_binary(name) do
+    pull(sock, {family, name}, [])
+  end
+
   @doc """
-  Pulls a single table (and its chains, rules, sets) by
-  `{family, name}`.
+  Scoped pull — fetches one table by `(family, name)` plus its
+  chains, rules, and sets.
+
+  Accepts the same options as the no-arg `pull/2` (currently
+  `:subscribe_first`).
 
   Returns `{:ok, %Ruleset{}}` containing just that table, or
   `{:error, %Linx.Netfilter.Error{errno: :enoent}}` if the table
   doesn't exist.
   """
-  @spec pull(Socket.t(), {atom(), String.t()}) ::
+  @spec pull(Socket.t(), {atom(), String.t()}, keyword()) ::
           {:ok, Ruleset.t()} | {:error, Error.t() | term()}
-  def pull(%Socket{} = sock, {family, name}) when is_atom(family) and is_binary(name) do
-    with {:ok, [table]} <- get_table(sock, family, name),
+  def pull(%Socket{} = sock, {family, name}, opts)
+      when is_atom(family) and is_binary(name) and is_list(opts) do
+    with :ok <- maybe_snapshot_first(sock, opts),
+         {:ok, [table]} <- get_table(sock, family, name),
          {:ok, chains} <- dump_chains(sock, family),
          {:ok, rules} <- dump_rules(sock, family),
          {:ok, sets} <- dump_sets(sock, family) do
@@ -382,6 +404,28 @@ defmodule Linx.Netfilter do
       with {:ok, set_elems} <- dump_set_elements_for(sock, sets) do
         {:ok, Decoder.from_msgs([table], chains, rules, sets, set_elems)}
       end
+    end
+  end
+
+  # Snapshot+tail handshake: capture the gen RIGHT before dumping,
+  # then tell the Monitor to drop events at or below that gen.
+  # Any commit that happens AFTER our GETGEN will produce events
+  # with gen > captured, so the owner sees them; commits BEFORE
+  # are already in the snapshot we're about to read.
+  defp maybe_snapshot_first(sock, opts) do
+    case Keyword.get(opts, :subscribe_first) do
+      nil ->
+        :ok
+
+      monitor when is_pid(monitor) ->
+        case Linx.Netlink.Nfnl.Codec.get_gen(sock) do
+          {:ok, gen} ->
+            Linx.Netfilter.Monitor.set_min_gen(monitor, gen.id)
+            :ok
+
+          {:error, _} = err ->
+            err
+        end
     end
   end
 
@@ -560,15 +604,40 @@ defmodule Linx.Netfilter do
   def dry_run(%Ruleset{} = from, %Ruleset{} = to), do: diff(from, to)
 
   @doc """
-  Subscribes the caller to `NFNLGRP_NFTABLES` multicast events for
-  the current netns. Returns a monitor reference; the caller
-  receives `{:linx_netfilter, :event, %Event{}}` per ruleset change
-  and `{:linx_netfilter, :resync_needed}` on `ENOBUFS`.
+  Subscribes `owner_pid` to multicast nfnetlink events for ruleset
+  changes in the current netns.
 
-  Lands in N6.
+  Returns `{:ok, monitor_pid}`. The owner then receives:
+
+    * `{:linx_netfilter, :event, %Linx.Netfilter.Event{}}` per
+      committed change (one `:new_gen` followed by one event per
+      mutated entity).
+    * `{:linx_netfilter, :resync_needed}` when the monitor socket
+      overflows (`ENOBUFS`) — the owner should re-pull state.
+
+  Options:
+
+    * `:netns` — namespace to monitor. Defaults to `:host`.
+    * `:since_gen` — initial floor; events at or below this gen
+      are dropped. Use in tandem with `pull/1..2`'s
+      `:subscribe_first` for snapshot+tail.
+    * `:rcvbuf` — multicast socket receive buffer size in bytes;
+      default 4 MiB.
+
+  See `Linx.Netfilter.Monitor` for the GenServer's full surface.
   """
-  @spec subscribe(pid()) :: {:ok, reference()} | {:error, term()}
-  def subscribe(_owner_pid \\ self()), do: {:error, :not_yet_implemented}
+  @spec subscribe(pid(), keyword()) :: {:ok, pid()} | {:error, term()}
+  def subscribe(owner_pid \\ self(), opts \\ [])
+      when is_pid(owner_pid) and is_list(opts) do
+    monitor_opts = [owner: owner_pid] ++ Keyword.take(opts, [:netns, :since_gen, :rcvbuf])
+    Linx.Netfilter.Monitor.start_link(monitor_opts)
+  end
+
+  @doc """
+  Unsubscribes by stopping the Monitor returned from `subscribe/2`.
+  """
+  @spec unsubscribe(pid()) :: :ok
+  def unsubscribe(monitor) when is_pid(monitor), do: Linx.Netfilter.Monitor.stop(monitor)
 
   @doc """
   Opens an NFLOG listener bound to `group`. The owner receives

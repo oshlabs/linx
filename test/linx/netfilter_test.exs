@@ -178,15 +178,9 @@ defmodule Linx.NetfilterTest do
   end
 
   describe "N1-N7 stubs" do
-    # The verbs that haven't shipped yet still return
-    # {:error, :not_yet_implemented} so the surface is visible in
-    # ExDoc + IDE completion. create_table/3, push/3, pull/1, pull/2
-    # shipped in N2. diff/2 + dry_run/2 shipped in N5. subscribe/1
-    # lands in N6; log_listen/2 in N7.
-
-    test "subscribe/1" do
-      assert {:error, :not_yet_implemented} = Netfilter.subscribe(self())
-    end
+    # create_table/3, push/3, pull/1, pull/2 shipped in N2. diff/2 +
+    # dry_run/2 shipped in N5. subscribe/1 shipped in N6.
+    # log_listen/2 lands in N7.
 
     test "log_listen/2" do
       assert {:error, :not_yet_implemented} = Netfilter.log_listen(self(), group: 5000)

@@ -510,7 +510,67 @@ case patch do
 end
 ```
 
-## (Will land with N6 — monitor: snapshot+tail)
+## Monitor — live ruleset events (N6)
+
+Subscribe to `NFNLGRP_NFTABLES` multicast events. The owner pid
+receives `{:linx_netfilter, :event, %Event{}}` for every committed
+change, with full provenance (`gen_id`, `proc_pid`, `proc_name`).
+
+```elixir
+alias Linx.Netfilter.{Event, Monitor}
+
+{:ok, monitor} = Linx.Netfilter.subscribe(self())
+
+# Now anyone (us, another nft client, firewalld, ...) committing
+# to the netns triggers events:
+receive do
+  {:linx_netfilter, :event, %Event{op: :new_table, entity: t, proc_name: who}} ->
+    IO.puts("#{who} created table #{t.family}/#{t.name}")
+end
+
+:ok = Linx.Netfilter.unsubscribe(monitor)
+```
+
+The kernel broadcasts entity events first, then a `NEW_GEN`
+closing marker. The Monitor buffers entities until `NEW_GEN`
+arrives and dispatches them all stamped with that gen — so each
+`%Event{}` carries the full context of "who changed this and
+when".
+
+## Snapshot+tail (no race with the kernel)
+
+The race-free "get current state, then watch for changes" pattern.
+`subscribe_first:` captures the gen before pull and tells the
+Monitor to drop events already in the snapshot:
+
+```elixir
+{:ok, monitor} = Linx.Netfilter.subscribe(self())
+{:ok, snapshot} = Linx.Netfilter.pull(sock, subscribe_first: monitor)
+
+# `snapshot` contains everything as of gen N.
+# Subsequent {:linx_netfilter, :event, ...} messages cover gen > N.
+# Apply them as deltas to `snapshot` for a perfectly-consistent
+# live view.
+```
+
+## ENOBUFS recovery
+
+If the multicast traffic outpaces the consumer, the kernel drops
+messages and the Monitor emits a resync hint:
+
+```elixir
+receive do
+  {:linx_netfilter, :resync_needed} ->
+    # Drop the partial state; re-pull from scratch.
+    {:ok, fresh} = Linx.Netfilter.pull(sock, subscribe_first: monitor)
+    ...
+end
+```
+
+Default `SO_RCVBUF` is 4 MiB; pass `:rcvbuf` to `subscribe/2` to
+raise it further if your environment is heavily churned.
+
+## (Will land with N7 — NFLOG via NFNL_SUBSYS_ULOG)
 
 ## (Will land with N7 — NFLOG via NFNL_SUBSYS_ULOG)
 

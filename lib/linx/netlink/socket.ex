@@ -37,6 +37,8 @@ defmodule Linx.Netlink.Socket do
   # >= 4.12.
   @sol_netlink 270
   @netlink_ext_ack 11
+  @netlink_add_membership 1
+  @netlink_drop_membership 2
 
   @enforce_keys [:socket, :netns, :protocol, :seq]
   defstruct [:socket, :netns, :protocol, :seq]
@@ -99,11 +101,68 @@ defmodule Linx.Netlink.Socket do
   @spec close(t) :: :ok
   def close(%__MODULE__{socket: socket}), do: :socket.close(socket)
 
+  @doc """
+  Joins a netlink multicast group on `socket`.
+
+  Subsequent reads will receive multicast events for `group` (a
+  protocol-family-specific group number — `NFNLGRP_NFTABLES = 7`
+  for nfnetlink ruleset events, `RTNLGRP_LINK = 1` for rtnetlink
+  link events, etc.).
+  """
+  @spec add_membership(t(), pos_integer()) :: :ok | {:error, term()}
+  def add_membership(%__MODULE__{socket: socket}, group)
+      when is_integer(group) and group > 0 do
+    :socket.setopt_native(
+      socket,
+      {@sol_netlink, @netlink_add_membership},
+      <<group::native-32>>
+    )
+  end
+
+  @doc "Leaves a multicast group joined via `add_membership/2`."
+  @spec drop_membership(t(), pos_integer()) :: :ok | {:error, term()}
+  def drop_membership(%__MODULE__{socket: socket}, group)
+      when is_integer(group) and group > 0 do
+    :socket.setopt_native(
+      socket,
+      {@sol_netlink, @netlink_drop_membership},
+      <<group::native-32>>
+    )
+  end
+
+  @doc """
+  Sets the socket receive buffer size (`SO_RCVBUF`) in bytes.
+
+  For multicast monitors that may face heavy churn, a larger
+  buffer reduces the chance of `ENOBUFS` overflow. The kernel
+  silently clamps to its `net.core.rmem_max` ceiling — use
+  `SO_RCVBUFFORCE` (requires `CAP_NET_ADMIN`) to override.
+  """
+  @spec set_rcvbuf(t(), pos_integer()) :: :ok | {:error, term()}
+  def set_rcvbuf(%__MODULE__{socket: socket}, bytes)
+      when is_integer(bytes) and bytes > 0 do
+    :socket.setopt(socket, {:socket, :rcvbuf}, bytes)
+  end
+
   defp build(socket, netns, protocol) do
     # Best-effort: pre-4.12 kernels do not know NETLINK_EXT_ACK and return
     # EINVAL here. Ignore the result — without extended ack we just get plain
     # errno-only errors, which is still correct.
     _ = :socket.setopt_native(socket, {@sol_netlink, @netlink_ext_ack}, <<1::native-32>>)
+
+    # Explicit bind with nl_pid=0 (kernel auto-assigns). Required for
+    # multicast: an unbound netlink socket never receives broadcast
+    # events even after NETLINK_ADD_MEMBERSHIP. For request/reply
+    # users this is a no-op (auto-bind would happen on first sendto
+    # anyway). Erlang's :socket.bind/2 doesn't speak netlink
+    # sockaddrs, so the bind goes via the NIF.
+    case :socket.getopt(socket, {:otp, :fd}) do
+      {:ok, fd} ->
+        _ = Native.bind_netlink(fd, 0)
+
+      _ ->
+        :ok
+    end
 
     %__MODULE__{
       socket: socket,
