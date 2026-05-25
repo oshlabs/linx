@@ -147,10 +147,10 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `Linx.NFT.Tokenizer` (handwritten char-by-char state machine) | ⬜ | N8 |
-| `Linx.NFT.Parser` (handwritten token-stream recursive descent) | ⬜ | N8 |
-| `Linx.NFT.Compiler` (AST → validator-setter calls → `%Ruleset{}`) | ⬜ | N8 |
-| `Linx.NFT.ParseError` (file:line:column + code_snippet) | ⬜ | N8 |
+| `Linx.NFT.Tokenizer` (handwritten char-by-char state machine) | ✅ | N8a — start-condition stack (`:default`/`:string`/`:line_comment`/`:block_comment`/`:elixir_expr`); identifiers, integers (dec/hex/bin), strings with escapes, IPv4/IPv6/MAC/CIDR literals, statement separators, line + nested block comments, `\#{...}` Elixir interpolation when opted in |
+| `Linx.NFT.Parser` (handwritten token-stream recursive descent) | ⬜ | N8b |
+| `Linx.NFT.Compiler` (AST → validator-setter calls → `%Ruleset{}`) | ⬜ | N8c |
+| `Linx.NFT.ParseError` (file:line:column + code_snippet) | ✅ | N8a — Elixir-compiler-style caret rendering via `code_snippet/2`; `raise_syntax_error!/2` helper |
 | `sigil_NFT/2` | ⬜ | N8 — `~NFT"table inet ... { ... }"` |
 | `parse/1` / `parse_file/1` | ⬜ | N8 — same parser, different entry |
 | `format/1` (canonical emit) | ⬜ | N8 — Inspect.Algebra; no trivia preservation |
