@@ -365,6 +365,8 @@ defmodule Linx.NFT.Compiler do
   defp payload_dispatch(:ip6, :daddr), do: {:ok, :ip6_daddr, :ipv6}
   defp payload_dispatch(:icmp, :type), do: {:ok, :icmp_type, {:int, 1}}
   defp payload_dispatch(:icmp, :code), do: {:ok, :icmp_code, {:int, 1}}
+  defp payload_dispatch(:icmpv6, :type), do: {:ok, :icmpv6_type, {:int, 1}}
+  defp payload_dispatch(:icmpv6, :code), do: {:ok, :icmpv6_code, {:int, 1}}
   defp payload_dispatch(_, _), do: :unknown
 
   defp meta_kind(:iif), do: {:int, 4}
@@ -550,6 +552,23 @@ defmodule Linx.NFT.Compiler do
   defp literal_for_set!({:address, :cidr_v4, cidr, _}, _, _), do: cidr
   defp literal_for_set!({:address, :cidr_v6, cidr, _}, _, _), do: cidr
   defp literal_for_set!({:string, s, _}, _, _), do: s
+
+  # When the set's key type is an integer-shaped one, identifier
+  # elements like `tcp` / `echo-request` / `nd-router-solicit`
+  # resolve to their numeric values via parse_int_keyword.
+  defp literal_for_set!({:identifier, name, meta} = node, key_type, state)
+       when key_type in [:inet_proto, :inet_service, :mark] do
+    case parse_int_keyword(name) do
+      {:ok, n} ->
+        n
+
+      :error ->
+        raise_at!(state, value_meta(node) || meta,
+          "compiler: unknown name `#{name}` in #{key_type} set"
+        )
+    end
+  end
+
   defp literal_for_set!({:identifier, s, _}, _, _), do: s
 
   defp literal_for_set!({:range, lo, hi, _}, _, _state),
@@ -810,10 +829,36 @@ defmodule Linx.NFT.Compiler do
     end
   end
 
+  # IP protocol numbers (used by `ip protocol NAME` matches and as
+  # 1-byte set elements).
   defp parse_int_keyword("tcp"), do: {:ok, 6}
   defp parse_int_keyword("udp"), do: {:ok, 17}
   defp parse_int_keyword("icmp"), do: {:ok, 1}
   defp parse_int_keyword("icmpv6"), do: {:ok, 58}
+
+  # ICMPv6 type values (RFC 4443 + ND from RFC 4861 + extensions).
+  # These are unique to the ICMPv6 namespace; ICMPv4-specific
+  # symbolic names (`echo-request` = 8, etc.) are NOT supported here
+  # yet — ICMPv4 uses are rare and most authors write the integer.
+  defp parse_int_keyword("destination-unreachable"), do: {:ok, 1}
+  defp parse_int_keyword("packet-too-big"), do: {:ok, 2}
+  defp parse_int_keyword("time-exceeded"), do: {:ok, 3}
+  defp parse_int_keyword("parameter-problem"), do: {:ok, 4}
+  defp parse_int_keyword("echo-request"), do: {:ok, 128}
+  defp parse_int_keyword("echo-reply"), do: {:ok, 129}
+  defp parse_int_keyword("mld-listener-query"), do: {:ok, 130}
+  defp parse_int_keyword("mld-listener-report"), do: {:ok, 131}
+  defp parse_int_keyword("mld-listener-done"), do: {:ok, 132}
+  defp parse_int_keyword("nd-router-solicit"), do: {:ok, 133}
+  defp parse_int_keyword("nd-router-advert"), do: {:ok, 134}
+  defp parse_int_keyword("nd-neighbor-solicit"), do: {:ok, 135}
+  defp parse_int_keyword("nd-neighbor-advert"), do: {:ok, 136}
+  defp parse_int_keyword("redirect"), do: {:ok, 137}
+  defp parse_int_keyword("router-renumbering"), do: {:ok, 138}
+  defp parse_int_keyword("ind-neighbor-solicit"), do: {:ok, 141}
+  defp parse_int_keyword("ind-neighbor-advert"), do: {:ok, 142}
+  defp parse_int_keyword("mld2-listener-report"), do: {:ok, 143}
+
   defp parse_int_keyword(_), do: :error
 
   defp value_meta({_, _, meta}) when is_map(meta), do: meta

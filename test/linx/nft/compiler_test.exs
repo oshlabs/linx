@@ -333,6 +333,63 @@ defmodule Linx.NFT.CompilerTest do
     end
   end
 
+  describe "rules — icmpv6" do
+    test "icmpv6 type with integer literal" do
+      rs =
+        compile!("""
+        table ip6 t {
+          chain c { icmpv6 type 128 accept }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:ip6, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :payload, data: %{base: :transport, offset: 0, len: 1}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<128>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+    end
+
+    test "icmpv6 type with symbolic name `echo-request`" do
+      rs =
+        compile!("""
+        table ip6 t {
+          chain c { icmpv6 type echo-request accept }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:ip6, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :payload, data: %{base: :transport, offset: 0, len: 1}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<128>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+    end
+
+    test "icmpv6 type with inline set of symbolic names" do
+      rs =
+        compile!("""
+        table ip6 t {
+          chain c {
+            icmpv6 type { echo-request, echo-reply, nd-router-solicit, nd-router-advert } accept
+          }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:ip6, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :payload, data: %{base: :transport, offset: 0, len: 1}},
+               %Expr{name: :__anon_set, data: %{values: values, key_type: :inet_proto}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+
+      assert values == [128, 129, 133, 134]
+    end
+  end
+
   describe "rules — actions" do
     test "counter accept" do
       rs =
