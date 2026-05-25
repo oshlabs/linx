@@ -28,6 +28,20 @@ defmodule Linx.NFT.CompilerTest do
     c
   end
 
+  describe "flush ruleset" do
+    test "top-level flush ruleset is a compile-time noop" do
+      rs =
+        compile!("""
+        flush ruleset
+
+        table inet t { chain c { accept } }
+        """)
+
+      assert %Ruleset{} = rs
+      assert {:ok, _table} = Ruleset.fetch_table(rs, {:inet, "t"})
+    end
+  end
+
   describe "empty / minimal" do
     test "empty source compiles to an empty ruleset" do
       assert compile!("") == Ruleset.new()

@@ -151,8 +151,15 @@ defmodule Linx.NFT.Parser do
         {item, rest2} = parse_define(rest, meta, state)
         parse_top(skip_seps(rest2), state, [item | acc])
 
+      # `flush ruleset` — declarative "start with an empty ruleset"
+      # directive, commonly used at the top of nftables.conf files.
+      # The compiler treats it as a noop (Ruleset.new() is already
+      # empty).
+      [{:identifier, "flush", meta}, {:identifier, "ruleset", _} | rest] ->
+        parse_top(skip_seps(rest), state, [{:flush_ruleset, meta} | acc])
+
       [tok | _] ->
-        raise_unexpected!(state, tok, "expected `table`, `include`, or `define`")
+        raise_unexpected!(state, tok, "expected `table`, `include`, `define`, or `flush ruleset`")
     end
   end
 

@@ -135,6 +135,15 @@ defmodule Linx.NFT.Compiler do
     rs
   end
 
+  defp compile_top({:flush_ruleset, _meta}, rs, _state) do
+    # Semantically `flush ruleset` clears the existing kernel state
+    # before installing fresh rules. At the value-type layer we
+    # always start from `Ruleset.new()` — so the directive is a
+    # noop here. (When we push to the kernel, the :replace push
+    # mode already does the equivalent via DESTROYTABLE.)
+    rs
+  end
+
   # ===========================================================
   # Table-body items
   # ===========================================================

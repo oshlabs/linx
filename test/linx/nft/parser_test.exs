@@ -18,6 +18,22 @@ defmodule Linx.NFT.ParserTest do
     err
   end
 
+  describe "flush ruleset" do
+    test "stand-alone flush ruleset directive" do
+      assert [{:flush_ruleset, _meta}] = parse!("flush ruleset")
+    end
+
+    test "flush ruleset followed by a table definition" do
+      src = """
+      flush ruleset
+
+      table inet t { chain c { } }
+      """
+
+      assert [{:flush_ruleset, _}, {:table, :inet, "t", _, _}] = parse!(src)
+    end
+  end
+
   describe "empty / whitespace" do
     test "empty source produces an empty AST" do
       assert parse!("") == []

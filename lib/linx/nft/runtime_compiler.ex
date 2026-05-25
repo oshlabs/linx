@@ -116,6 +116,8 @@ defmodule Linx.NFT.RuntimeCompiler do
 
   defp build_top({:comment, _}, _rs_var, _state), do: []
 
+  defp build_top({:flush_ruleset, _meta}, _rs_var, _state), do: []
+
   # ===========================================================
   # Table-body items
   # ===========================================================
