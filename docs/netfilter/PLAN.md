@@ -1,15 +1,19 @@
 # Linx.Netfilter — implementation plan
 
-> 🟡 **Design phase complete; not yet started.** Planning doc only;
-> nothing on disk under `lib/linx/netfilter*` or `c_src/linx_netfilter.c`
-> yet. The full sequencing — N0 (scaffolding + Nfnl socket) → N1
-> (value types + pipeline DSL) → N2 (minimal expressions + push) →
-> N3 (NAT) → N4 (sets/maps/vmaps) → N5 (diff + `:reconcile` +
-> BATCH_GENID CAS) → N6 (monitor socket) → N7 (NFLOG) → **v1.0** →
-> N8 (`~NFT` sigil + conf parser) → N9 (`mix format` plugin) →
-> **v1.5** — is detailed in the *Sequencing* section. Each lands
-> as its own commit; `COVERAGE.md` becomes the canonical
-> "what's in / what's deferred" tracker as the surface ships.
+> 🟢 **N0–N8 shipped; N9 (mix format plugin) remaining.** The
+> v1.0 core (N0 scaffolding + Nfnl socket → N1 value types +
+> pipeline DSL → N2 minimal expressions + push → N3 NAT → N4
+> sets/maps/vmaps → N5 diff + `:reconcile` + BATCH_GENID CAS →
+> N6 monitor socket → N7 NFLOG) all landed on the
+> `netfilter-foundations` branch (commits N0..N7). N8 (`~NFT`
+> sigil + Conf parser) shipped as eleven sub-commits N8a..N8k on
+> `netfilter-nft-sigil` — see the N8 section below for what each
+> covered. The remaining N9 work (the `mix format` plugin) plus a
+> long tail of per-construct extensions (`limit`, meta/ct
+> setters, named objects, flowtables, concat keys, NPTv6,
+> includes/defines, the deferred expressions listed in
+> *Deferred*) ships as future per-feature commits. `COVERAGE.md`
+> is the canonical "what's in / what's deferred" tracker.
 
 ## Goal
 
@@ -375,17 +379,43 @@ Linx.NFT.Parser               — handwritten token-stream parser
 Linx.NFT.Compiler             — AST → calls to validator-setter
                                 functions on Linx.Netfilter.Ruleset
                                 producing %Ruleset{} (or compile-time
-                                error with file:line:column).
+                                error with file:line:column). Used by
+                                the static-body sigil path and by
+                                parse/1 + parse_file/1.
+
+Linx.NFT.RuntimeCompiler      — AST → quoted Elixir code that
+                                builds a %Ruleset{} at runtime.
+                                Used by the sigil's interpolation-
+                                bearing path (HEEx-style): at each
+                                :elixir_expr value position, emits
+                                a Linx.NFT.Runtime call so the
+                                interpolated value is encoded for
+                                the typed field.
+
+Linx.NFT.Runtime              — runtime helpers for interpolated
+                                ~NFT bodies. cmp!/3, encode_int!/2,
+                                encode_ipv4!/1, encode_ipv6!/1,
+                                encode_ifname!/1. Raises ArgumentError
+                                on type mismatch.
 
 Linx.NFT.ParseError           — dedicated error struct with
                                 {file, line, column, snippet, message}
-                                + raise_syntax_error!/3 helper,
+                                + raise_syntax_error!/2 helper,
                                 modelled on
                                 Phoenix.LiveView.TagEngine.Tokenizer.ParseError.
 
-Linx.NFT.Formatter            — mix format plugin (features:
-                                [sigils: [:NFT], extensions: [".nft"]]).
-                                Pretty-printer using Inspect.Algebra.
+Linx.NFT.Formatter            — canonical-emit pretty-printer.
+                                format/1 walks a %Ruleset{} and
+                                produces syntactically-valid nft
+                                source. Round-trip (parse → format →
+                                parse) is structurally identical
+                                for the supported slice.
+
+Linx.NFT.Formatter (N9 work)  — mix format plugin behaviour
+                                (features: [sigils: [:NFT],
+                                extensions: [".nft"]]) — ships in
+                                N9 by delegating to the existing
+                                canonical-emit Formatter.
 
   build
   c_src/                      — no C source for Linx.Netfilter
@@ -673,50 +703,76 @@ survives socket close until explicitly deleted.
 
 ### `~NFT` sigil compile flow
 
+`~NFT` is uppercase, so Elixir's parser leaves `#{...}` alone
+and the sigil macro receives the literal binary verbatim. This
+is the same pattern Phoenix HEEx uses for `~H` (HEEx defines its
+own `{...}` interpolation, parsed from raw bytes); Linx.NFT
+uses `#{...}` as the marker because nft already reserves bare
+`{` for braces. Lowercase multi-letter sigils don't exist in
+Elixir — `~nft` is a SyntaxError.
+
 ```
 ~NFT"""              ──┐
-table inet myapp {     │  (1) sigil_NFT/2 macro receives the binary
-  chain input {        │      and the modifiers; returns a quoted
-    tcp dport 22       │      Linx.NFT.Compiler.compile/3 call
-      accept           │      at compile time.
+table inet myapp {     │  (1) sigil_NFT/2 macro receives the
+  chain input {        │      literal binary (uppercase sigil; no
+    tcp dport 22       │      Elixir-side interpolation expansion).
+      accept           │
   }                  ──┘
 }
 """
 
-(2) Linx.NFT.Tokenizer.tokenize/1
-    char-by-char state machine produces a flat list of tokens:
-    [{:keyword, "table"}, {:identifier, "inet"}, {:identifier, "myapp"},
-     {:lbrace}, {:keyword, "chain"}, ...]
-    with {file, line, column} on every token.
+(2) Linx.NFT.Tokenizer.tokenize/2 with interpolation?: true
+    char-by-char state machine with explicit start-condition
+    stack (mirrors nft's scanner.l + HEEx's tokenizer). Produces
+    a flat list of tokens — punctuation, identifiers, integers,
+    addresses, time literals, statement separators — plus
+    {:elixir_expr, raw_source, meta} tokens for every #{...}
+    block (the tokenizer counts braces, skips Elixir strings /
+    charlists / comments).
 
-(3) Linx.NFT.Parser.parse/1
-    token-stream pattern-matching with token_stack +
-    buffer stack; produces internal AST nodes:
-    {:table, family, name, [{:chain, name, [{:rule, [exprs...]}]}]}.
+(3) Linx.NFT.Parser.parse/2
+    recursive-descent token-stream parser. Produces internal
+    AST nodes: {:table, family, name, body, meta},
+    {:chain, name, opts, stmts, meta}, {:rule, stmts, opts, meta},
+    {:match, lhs, op, rhs, meta}, {:verdict, kind, meta}, …
+    :elixir_expr tokens flow through to value-position AST
+    nodes ({:elixir_expr, raw_source, meta}).
 
-(4) Linx.NFT.Compiler.compile/3
-    walks the AST, calling validator-setter functions on
-    Linx.Netfilter.Ruleset:
-      Ruleset.new()
-      |> Ruleset.add_table(:inet, "myapp")
-      |> Ruleset.add_chain("myapp", "input", type: :filter, hook: :input, ...)
-      |> Ruleset.add_rule("myapp", "input", Rule.build([...]))
-    Validation errors raised as Linx.NFT.ParseError with the
-    AST node's source location.
+(4) The macro inspects the token list. Two paths:
 
-(5) The macro expands to the constructed %Linx.Netfilter.Ruleset{}
-    value as a compile-time term (or a let-block if there were
-    interpolations).
+    (4a) STATIC — no :elixir_expr tokens present.
+         Linx.NFT.Compiler.compile/2 walks the AST and calls
+         validator-setter functions on Linx.Netfilter.Ruleset
+         (the SAME surface the pipeline DSL uses — no parallel
+         validation layer). Produces a %Linx.Netfilter.Ruleset{}
+         value at compile time. The macro emits it via
+         Macro.escape/1 — zero runtime cost.
 
-Interpolations: ~NFT"tcp dport #{port} accept" is tokenized as
-[..., {:keyword, "dport"}, {:elixir_expr, ast, {file, line, col}},
- {:keyword, "accept"}, ...]. The parser places the expression in
-the correct AST position (here, the "value side of cmp"); the
-compiler emits a runtime check that the interpolated value
-matches the expected type (integer or set-of-integers) at the
-point of interpolation. Type-aware safe interpolation, modelled
-on HEEx's attribute-position vs body-position distinction.
+    (4b) RUNTIME — at least one :elixir_expr token present.
+         Linx.NFT.RuntimeCompiler.emit/2 walks the AST and
+         produces an Elixir AST (quoted code) that, when
+         evaluated at runtime, builds the %Ruleset{} via the
+         same validator-setter calls. At each :elixir_expr
+         value position, the emitted code calls into
+         Linx.NFT.Runtime — Runtime.cmp!/3 takes the evaluated
+         Elixir value plus the field kind the surrounding nft
+         syntax expects ({:int, 1|2|4|8} / :ipv4 / :ipv6 /
+         :ifname), encodes it per kind, and returns an
+         %Expr{name: :cmp} ready to splice into the rule's
+         expression list. Type mismatches raise ArgumentError
+         at runtime with a message naming the expected kind.
+
+Validation errors (in either path) raise Linx.NFT.ParseError
+with the AST node's source location and an Elixir-compiler-
+style caret rendering of the offending source line.
 ```
+
+The static / runtime split is the headline architectural call:
+hand-authored static rulesets pay no runtime cost (literal
+%Ruleset{}), and dynamic rulesets get position-typed runtime
+encoding without `Kernel.to_string` getting in the way (which
+would be unavoidable if we'd used a lowercase sigil and relied
+on Elixir's own interpolation expansion).
 
 ### Monitor socket: snapshot + tail
 
@@ -1047,70 +1103,162 @@ NFLOG observability. The N0–N7 stretch is the load-bearing
 "first wedge"; everything beyond is ergonomics and
 extension-of-surface.
 
-### N8 — `~NFT` sigil + Conf parser
+### N8 — `~NFT` sigil + Conf parser (shipped as N8a–N8k)
 
-- `Linx.NFT.Tokenizer` — handwritten char-by-char lexer with
-  explicit start-condition stack (mirrors nft's scanner.l).
-  ~700-1000 LOC.
-- `Linx.NFT.Parser` — handwritten token-stream parser
-  (recursive-descent, token_stack + buffer stack, mirrors HEEx's
-  parser.ex). ~800-1200 LOC.
-- `Linx.NFT.Compiler` — AST walker that calls validator-setter
-  functions on Ruleset/Table/Chain/etc. Produces `%Ruleset{}` or
-  raises `Linx.NFT.ParseError` with `{file, line, column,
-  snippet, message}`. ~400-600 LOC.
-- `Linx.NFT.ParseError` — dedicated struct with formatted
-  `code_snippet/1` (Elixir-compiler-style caret rendering),
-  raised through `raise_syntax_error!/3`.
-- `Linx.NFT.sigil_NFT/2` — the sigil itself; modifier-less
-  initially.
-- `Linx.NFT.parse/1` (binary → `{:ok, Ruleset.t()} | {:error,
-  ParseError.t()}`), `parse_file/1`. Same code path; file mode is
-  just a different entry point reading from disk.
-- `Linx.NFT.format/1` (Ruleset → binary) — canonical emit
-  using `Inspect.Algebra`. ~300-500 LOC.
-- **Scope: the ~85% subset**:
-  - **Top-level**: tables, includes, defines.
-  - **Tables**: all families (ip/ip6/inet/arp/bridge/netdev).
-  - **Chains**: all hooks (`prerouting`/`input`/`forward`/
-    `output`/`postrouting`/`ingress`/`egress`); priorities by
-    symbolic name or integer; policy `accept|drop`; jump-target
-    chains (no hook).
-  - **Matches**: `ip/ip6 saddr/daddr` (with CIDR), `tcp/udp
-    sport/dport` (single + set + range), `meta iif/oif/iifname/
-    oifname/mark`, `ct state`.
-  - **Statements**: `accept/drop/reject/jump/goto/return/queue`,
-    `counter`, `limit rate N/(second|minute|hour|day)`,
-    `log prefix "..." [group N]`, `dnat/snat/masquerade/redirect`.
-  - **Sets/maps**: named (with `type`, `flags`, `timeout`,
-    `gc-interval`, `size`, `elements`), anonymous inline,
-    concatenations.
-  - **Vmaps**: dispatch via `vmap @name`, inline vmaps.
-  - **Comments**: `#` line comments, `comment "..."` token.
-  - **Interpolations** (`~NFT` only): `#{...}` Elixir
-    interpolation in value-position (cmp RHS, set element list,
-    interface name, integer field). Compile-time type-check.
-- **Out of scope for N8** (parse error: "this expression is not
-  yet supported in ~NFT; use the pipeline DSL"):
-  `tproxy`, `osf`, `synproxy`, `secmark`, raw payload
-  (`@th,0,16`), `numgen`, `jhash`, `hash`, `fib`, `socket`, `xfrm`,
-  `tunnel`, `dup`, `fwd`, `xt` compat shims, ct fields beyond
-  `state`, conntrack helpers/zones/timeouts, flowtables (the
-  declarative side — `flow add @ft` is in scope).
+Shipped as eleven sub-commits on the `netfilter-nft-sigil`
+branch. Each sub-commit is independently reviewable; they were
+sequenced to add architectural layers first, then ergonomics
+on top, then real-world-driven extensions.
 
-**Tests**: golden-tests against a corpus of public `nftables.conf`
-files. Parse → emit → re-parse → assert identical Ruleset.
-Plus a battery of negative tests (unclosed brace, missing
-`{`, unknown family, type-mismatched interpolation, …) checking
-`Linx.NFT.ParseError` with expected line/column.
+**Core layers (the structural commitments):**
 
-### N9 — `mix format` plugin
+- **N8a** — `Linx.NFT.Tokenizer` (~970 LOC) + `Linx.NFT.ParseError`
+  (~95 LOC). Handwritten char-by-char lexer with an explicit
+  start-condition stack: `:default` / `:string` / `:line_comment`
+  / `:block_comment` / `:elixir_expr`. The stack discipline is
+  load-bearing — every future long-tail extension adds at most
+  one condition + clause, none touch existing ones. Mirrors
+  nft's own `scanner.l` (50+ start conditions) and HEEx's
+  tokenizer.
 
-- `Linx.NFT.Formatter` implementing the `Mix.Tasks.Format`
-  behaviour:
+- **N8b** — `Linx.NFT.Parser` (~880 LOC). Handwritten
+  recursive-descent over the token stream. AST nodes for tables
+  / chains / rules / matches / verdicts / actions / sets / maps
+  / vmaps / objects / flowtables / `include` / `define`. Every
+  node carries `{file, line, column}` meta.
+
+- **N8c** — `Linx.NFT.Compiler` (~600 LOC). AST → validator-
+  setter calls on `Linx.Netfilter.Ruleset`. The SAME surface the
+  pipeline DSL uses — no parallel validation layer. Returns
+  `%Ruleset{}` or raises `Linx.NFT.ParseError` with the AST
+  node's location.
+
+- **N8d** — `Linx.NFT` public module + `Linx.NFT.Formatter`
+  (~440 LOC). `sigil_NFT/2`, `parse/1`, `parse_file/1`, `format/1`
+  for canonical emit. Round-trip works for the supported slice.
+
+- **N8e** — `Linx.NFT.RuntimeCompiler` + `Linx.NFT.Runtime`.
+  Wires `#{...}` interpolation via the tokenizer's existing
+  `:interpolation?` mode (HEEx pattern, not Elixir's interpolation
+  expansion). The macro dispatches to RuntimeCompiler when any
+  `:elixir_expr` tokens are present; emitted code calls
+  `Runtime.cmp!/3` at the value position with the typed
+  field kind. Static-only sigils stay on the compile-time
+  literal path.
+
+- **N8f** — round-trip golden tests against a curated corpus of
+  fixtures in `test/linx/nft/fixtures/*.nft`. Each fixture
+  asserted three ways: parses, `parse → format → parse` is
+  structurally equal, `format → parse → format` is byte-stable.
+
+**Real-world-driven extensions (added when fixtures exposed gaps):**
+
+- **N8g** — bare `iifname` / `oifname` / `iif` / `oif`
+  shorthand at rule top level (no `meta` prefix needed). What
+  every real-world host firewall config actually uses.
+
+- **N8h** — `ct state` matches via the kernel-correct
+  `bitwise(mask) + cmp_neq_0` pattern. Supports the brace form
+  (`ct state { established, related }`), the comma-no-brace
+  form (`ct state established,related`), and inverted op
+  (`ct state != invalid`). Fixes both single-state and
+  multi-state shapes; the older `ct + cmp_eq` pattern was a
+  pre-existing subtle bug.
+
+- **N8i** — `icmpv6 type` / `icmpv6 code` payload dispatch +
+  18 symbolic ICMPv6 type names (`echo-request`,
+  `nd-router-solicit`, etc.). Identifier elements inside
+  integer-typed sets resolve through `parse_int_keyword/1`,
+  so `icmpv6 type { echo-request, echo-reply, ... }` compiles
+  cleanly.
+
+- **N8j** — `flush ruleset` top-level directive. Compiler
+  noop (we always start from `Ruleset.new()`); accepted so
+  real configs parse from the first line.
+
+- **N8k** — fixture 08, an anonymized real-world home-router
+  config exercising every N8g–N8j addition plus the older
+  core. Surfaced two formatter handlers that needed adding
+  (`meta + __anon_set` for inline-set matches on meta fields;
+  key-type-aware element rendering so `:ifname` strings get
+  quoted in formatted output).
+
+**Scope: the ~85% subset, end-to-end working:**
+
+- **Top level**: tables, `flush ruleset`. `include` /
+  `define` parse but the compiler doesn't substitute yet.
+- **Tables**: all families (ip / ip6 / inet / arp / bridge /
+  netdev).
+- **Chains**: all hooks; integer or named-alias priorities
+  resolved via `Wire.priority_int/2`, with optional `+N` / `-N`
+  offset; policy `accept` / `drop`; jump-target (regular)
+  chains.
+- **Matches**: `ip` / `ip6 saddr` / `daddr` (with CIDR),
+  `tcp` / `udp sport` / `dport` (single + range + inline set +
+  named set ref), `icmp` / `icmpv6 type` / `code` (integer +
+  symbolic names + inline set), `meta iif` / `oif` / `iifname` /
+  `oifname` / `mark` / `protocol`, `ct state` (single + comma
+  list + brace set, with proper bitwise pattern), `ip protocol
+  NAME` with symbolic names. Bare meta shorthand for the four
+  common ifname/iif variants.
+- **Verdicts**: accept / drop / continue / return / queue /
+  `jump <chain>` / `goto <chain>` / `reject [with ...]`.
+- **Actions**: `counter`, `log prefix "..." [group N] [level X]`,
+  `dnat to ADDR`, `snat to ADDR`, `masquerade`, `redirect`
+  (all with optional `random` / `fully-random` / `persistent`
+  flags). `meta FIELD set VALUE` and `ct FIELD set VALUE`
+  parse but raise a clear ParseError at compile (no setter
+  Expr yet).
+- **Sets / maps / vmaps**: named declarations with `type`,
+  `flags`, `timeout`, `gc-interval`, `size`, `elements`.
+  Anonymous inline sets. Maps + vmaps declare cleanly;
+  element-side compile for vmap-dispatch deferred to a small
+  follow-up.
+- **Per-rule**: `comment "..."` trailer, `tag` propagation.
+- **Comments**: `#` line, `/* ... */` block (nested OK).
+- **Interpolation** (`~NFT` only, HEEx-style): `#{...}` in
+  match RHS at `{:int, _}` / `:ipv4` / `:ipv6` / `:ifname`
+  positions; runtime-typed via `Linx.NFT.Runtime`.
+
+**Still deferred** (parse cleanly but raise a precise
+ParseError naming the missing feature):
+
+- `limit rate N/period` — no `Expr.limit` constructor yet.
+- `meta FIELD set` / `ct FIELD set` — no setter `%Expr{}`.
+- Named objects at table level (`counter ctr { ... }`,
+  `quota q { ... }`, `limit l { ... }`).
+- Flowtables (declarative side).
+- Concatenated set/map keys (`type ipv4_addr . inet_service`).
+- `snat ip6 prefix to ADDR` (NPTv6).
+- `include "path"` substitution (parse-only today).
+- `define name = value` substitution (parse-only).
+- The big-deferred expressions (`synproxy`, `secmark`, `osf`,
+  `fib`, `jhash`, `xfrm`, advanced ct fields, `dup`/`fwd`,
+  `xt` compat) — each is a per-construct addition: tokenizer
+  keyword(s) + parser case + compiler case + wire-codec case.
+
+**Tests**: 866 unit (was 693 at end of N7) + 147 integration.
+Golden suite is 9 fixtures × 3 assertions = 27 tests; each
+fixture has a header comment naming its source / inspiration
+so the corpus stays curatable. Aspirational corpus (Debian /
+Arch defaults, Kubernetes nftables kube-proxy, firewalld
+exports, nftables wiki samples) deferred to a separate test
+module once the remaining long-tail features land — see the
+comment block at the top of `test/linx/nft/golden_test.exs`
+for the per-source feature gap list.
+
+### N9 — `mix format` plugin (still to ship)
+
+`Linx.NFT.Formatter` already exists as the canonical-emit
+pretty-printer (shipped in N8d, exercised by every golden-test
+fixture). N9 extends it with the `Mix.Tasks.Format` behaviour
+callbacks so `mix format` can rewrite both inline `~NFT` sigil
+bodies in `.ex` source AND standalone `.nft` files:
+
+- Add to `Linx.NFT.Formatter`:
   - `features(_opts)` → `[sigils: [:NFT], extensions: [".nft"]]`
-  - `format(source, opts)` → pretty-printed binary via the
-    same `Linx.NFT.format/1` (or a dedicated pretty-printer with
+  - `format(source, opts)` — parses, then delegates to the
+    existing `format/1` (or a dedicated pretty-printer with
     `:nft_line_length` / `:inline_matcher` config).
 - Users add to `.formatter.exs`:
   ```elixir
@@ -1118,8 +1266,15 @@ Plus a battery of negative tests (unclosed brace, missing
   ```
 - Documented in `docs/netfilter/EXAMPLES.md` with a worked
   example of `mix format` reflowing a sigil and a `.nft` file.
+- The output-stability assertion in the N8f golden corpus
+  already proves `format → parse → format` is idempotent — the
+  invariant `mix format` needs to behave well on repeated runs.
 
-**v1.5 release here.** `~NFT` becomes the headline feature.
+**v1.5 release at the end of N9.** `~NFT` becomes the headline
+feature: hand-authored, sigil-interpolated, file-mode, and
+`mix format`-rewritable — all converging on the same
+`%Linx.Netfilter.Ruleset{}` via the same validator-setter
+surface.
 
 ## Testing
 
