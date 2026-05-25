@@ -1,19 +1,20 @@
 # Linx.Netfilter — implementation plan
 
-> 🟢 **N0–N8 shipped; N9 (mix format plugin) remaining.** The
-> v1.0 core (N0 scaffolding + Nfnl socket → N1 value types +
-> pipeline DSL → N2 minimal expressions + push → N3 NAT → N4
-> sets/maps/vmaps → N5 diff + `:reconcile` + BATCH_GENID CAS →
-> N6 monitor socket → N7 NFLOG) all landed on the
-> `netfilter-foundations` branch (commits N0..N7). N8 (`~NFT`
-> sigil + Conf parser) shipped as eleven sub-commits N8a..N8k on
-> `netfilter-nft-sigil` — see the N8 section below for what each
-> covered. The remaining N9 work (the `mix format` plugin) plus a
-> long tail of per-construct extensions (`limit`, meta/ct
-> setters, named objects, flowtables, concat keys, NPTv6,
-> includes/defines, the deferred expressions listed in
-> *Deferred*) ships as future per-feature commits. `COVERAGE.md`
-> is the canonical "what's in / what's deferred" tracker.
+> 🟢 **N0–N9 shipped; v1.5 reached.** The v1.0 core (N0
+> scaffolding + Nfnl socket → N1 value types + pipeline DSL →
+> N2 minimal expressions + push → N3 NAT → N4 sets/maps/vmaps →
+> N5 diff + `:reconcile` + BATCH_GENID CAS → N6 monitor socket
+> → N7 NFLOG) all landed on the `netfilter-foundations` branch
+> (commits N0..N7). N8 (`~NFT` sigil + Conf parser) shipped as
+> eleven sub-commits N8a..N8k, and N9 (`mix format` plugin)
+> shipped as the `Mix.Tasks.Format` behaviour callbacks on the
+> existing `Linx.NFT.Formatter`, both on
+> `netfilter-nft-sigil`. The long tail of per-construct
+> extensions (`limit`, meta/ct setters, named objects,
+> flowtables, concat keys, NPTv6, includes/defines, the
+> deferred expressions listed in *Deferred*) ships as future
+> per-feature commits. `COVERAGE.md` is the canonical "what's
+> in / what's deferred" tracker.
 
 ## Goal
 
@@ -411,11 +412,14 @@ Linx.NFT.Formatter            — canonical-emit pretty-printer.
                                 parse) is structurally identical
                                 for the supported slice.
 
-Linx.NFT.Formatter (N9 work)  — mix format plugin behaviour
-                                (features: [sigils: [:NFT],
-                                extensions: [".nft"]]) — ships in
-                                N9 by delegating to the existing
-                                canonical-emit Formatter.
+Linx.NFT.Formatter            — also implements Mix.Tasks.Format
+  (Mix.Tasks.Format)            since N9: features/1 advertises
+                                [sigils: [:NFT], extensions:
+                                [".nft"]]; format/2 reflows static
+                                sigil bodies and .nft files through
+                                the same canonical emit path.
+                                Interpolation-bearing sigil bodies
+                                pass through unchanged.
 
   build
   c_src/                      — no C source for Linx.Netfilter
@@ -1247,31 +1251,44 @@ module once the remaining long-tail features land — see the
 comment block at the top of `test/linx/nft/golden_test.exs`
 for the per-source feature gap list.
 
-### N9 — `mix format` plugin (still to ship)
+### N9 — `mix format` plugin (shipped)
 
-`Linx.NFT.Formatter` already exists as the canonical-emit
-pretty-printer (shipped in N8d, exercised by every golden-test
-fixture). N9 extends it with the `Mix.Tasks.Format` behaviour
-callbacks so `mix format` can rewrite both inline `~NFT` sigil
-bodies in `.ex` source AND standalone `.nft` files:
+`Linx.NFT.Formatter` (which already housed the canonical-emit
+pretty-printer from N8d) now also implements
+`Mix.Tasks.Format`. `mix format` reflows both inline `~NFT`
+sigil bodies in `.ex` sources AND standalone `.nft` files via
+the same `format/1` path.
 
-- Add to `Linx.NFT.Formatter`:
-  - `features(_opts)` → `[sigils: [:NFT], extensions: [".nft"]]`
-  - `format(source, opts)` — parses, then delegates to the
-    existing `format/1` (or a dedicated pretty-printer with
-    `:nft_line_length` / `:inline_matcher` config).
-- Users add to `.formatter.exs`:
+- `features/1` returns `[sigils: [:NFT], extensions: [".nft"]]`.
+- `format/2` dispatches on `opts[:sigil]` / `opts[:extension]`:
+  - **Static sigil body / `.nft` file** — parse → `format/1` →
+    return.
+  - **Interpolation-bearing sigil body** — return source
+    unchanged. AST-aware reflow that preserves `#{…}` positions
+    while reflowing the surrounding nft syntax is deferred (it
+    would need an AST-to-source emitter parallel to the existing
+    Expr-to-source one).
+  - **Parse error in `.nft` file** — raises
+    `Linx.NFT.ParseError` so the user sees the bad file.
+  - **Parse error in sigil body** — leaves verbatim; the
+    surrounding compile run reports the same error with better
+    stack context.
+- Users wire it up:
   ```elixir
-  [plugins: [Linx.NFT.Formatter], inputs: ["**/*.nft", ...]]
+  # .formatter.exs
+  [
+    plugins: [Linx.NFT.Formatter],
+    inputs: ["{lib,test}/**/*.{ex,exs}", "**/*.nft"]
+  ]
   ```
-- Documented in `docs/netfilter/EXAMPLES.md` with a worked
-  example of `mix format` reflowing a sigil and a `.nft` file.
-- The output-stability assertion in the N8f golden corpus
-  already proves `format → parse → format` is idempotent — the
-  invariant `mix format` needs to behave well on repeated runs.
+- Documented in `docs/netfilter/EXAMPLES.md` with worked
+  examples for both the sigil-reflow and the `.nft`-file path.
+- Idempotence guaranteed by the same invariant N8f's golden
+  output-stability assertion enforces: `format → parse →
+  format` is byte-identical for every supported construct.
 
-**v1.5 release at the end of N9.** `~NFT` becomes the headline
-feature: hand-authored, sigil-interpolated, file-mode, and
+**v1.5 release.** `~NFT` is now the headline feature:
+hand-authored, sigil-interpolated, file-mode, and
 `mix format`-rewritable — all converging on the same
 `%Linx.Netfilter.Ruleset{}` via the same validator-setter
 surface.

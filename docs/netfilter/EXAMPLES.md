@@ -781,4 +781,79 @@ Round-trip is structurally identical for the supported slice —
 `parse(format(rs)) == {:ok, rs}`. Trivia (original comments,
 blank lines, ordering) isn't preserved; that's a v2 enhancement.
 
-## (Will land with N9 — `mix format` plugin)
+## `mix format` plugin — Linx.NFT.Formatter
+
+`Linx.NFT.Formatter` implements the `Mix.Tasks.Format` behaviour,
+so `mix format` can reflow both `~NFT"…"` sigil bodies inside
+`.ex` source AND standalone `.nft` files using the same canonical
+emit path as `Linx.NFT.format/1`.
+
+Wire it up in the project's `.formatter.exs`:
+
+```elixir
+# .formatter.exs
+[
+  plugins: [Linx.NFT.Formatter],
+  inputs: [
+    "{lib,test}/**/*.{ex,exs}",
+    "**/*.nft"
+  ]
+]
+```
+
+After saving, `mix format` reflows things like:
+
+```elixir
+# Before
+ruleset = ~NFT"table inet x{chain c{tcp dport 22 accept}}"
+```
+
+```elixir
+# After mix format
+ruleset = ~NFT"""
+table inet x {
+  chain c {
+    tcp dport 22 accept
+  }
+}
+"""
+```
+
+And standalone `firewall.nft`:
+
+```
+# Before
+table inet x{chain c{tcp dport 22 accept}}
+```
+
+```
+# After mix format firewall.nft
+table inet x {
+  chain c {
+    tcp dport 22 accept
+  }
+}
+```
+
+### Idempotence
+
+`format → parse → format` is byte-identical for the supported
+slice — the same invariant the golden test corpus
+(`test/linx/nft/fixtures/*.nft`) asserts on every fixture.
+Running `mix format` twice on the same file produces no diff;
+running it on a fresh file converges in one pass.
+
+### Interpolation-bearing sigils
+
+For now, `~NFT` sigil bodies that contain `#{…}` interpolations
+are **left untouched** by `mix format` — preserving the
+interpolation positions while reflowing the surrounding nft
+syntax requires AST-aware re-emission that hasn't been built
+yet. Static sigil bodies and `.nft` files reformat freely.
+
+### Errors
+
+A parse error in a `.nft` file raises `Linx.NFT.ParseError` from
+`mix format`, surfacing visibly so the user fixes it. For
+sigils, parse errors leave the body verbatim — the surrounding
+compile run reports the same error with better stack context.

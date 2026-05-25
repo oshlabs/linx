@@ -37,8 +37,40 @@ defmodule Linx.NFT.Formatter do
   remains valid nft (a comment) and the gap is visible. As the
   compiler grows (e.g. `limit`, `meta mark set`), the formatter
   gains the inverse cases alongside.
+
+  ## `mix format` integration
+
+  Implements the `Mix.Tasks.Format` behaviour: when listed under
+  `:plugins` in a project's `.formatter.exs`, `mix format`
+  reflows both inline `~NFT"…"` sigil bodies inside `.ex`
+  sources AND standalone `.nft` files. Users wire it up with:
+
+      # .formatter.exs
+      [
+        plugins: [Linx.NFT.Formatter],
+        inputs: ["{lib,test}/**/*.{ex,exs}", "**/*.nft"]
+      ]
+
+  Behaviour:
+
+    * **Static `~NFT` sigil body / `.nft` file** — parses,
+      runs through `format/1`, returns the canonical
+      single-formatted source. Idempotent (N8f's
+      output-stability assertion already proves this).
+    * **Interpolation-bearing `~NFT` sigil body** — left
+      verbatim. AST-aware formatting that preserves `\#{…}`
+      positions while reflowing the surrounding nft syntax is a
+      future enhancement.
+    * **Parse error in a `.nft` file** — raises
+      `Linx.NFT.ParseError`, surfacing visibly so the user
+      fixes the bad file. (For sigils, parse errors leave the
+      body unchanged — the surrounding compile run will report
+      the same error anyway, with better stack context.)
   """
 
+  @behaviour Mix.Tasks.Format
+
+  alias Linx.NFT.{ParseError, Tokenizer}
   alias Linx.Netfilter.{Chain, Expr, Rule, Ruleset, Set, Table, Verdict, Wire}
   alias Linx.Netfilter.Map, as: NMap
 
@@ -567,5 +599,79 @@ defmodule Linx.NFT.Formatter do
     |> String.split("\n")
     |> Enum.map(fn line -> if line == "", do: "", else: pad <> line end)
     |> Enum.join("\n")
+  end
+
+  # ===========================================================
+  # Mix.Tasks.Format behaviour — `mix format` plugin entry points
+  # ===========================================================
+
+  @impl Mix.Tasks.Format
+  def features(_formatter_opts) do
+    [sigils: [:NFT], extensions: [".nft"]]
+  end
+
+  @impl Mix.Tasks.Format
+  def format(source, formatter_opts) when is_binary(source) do
+    cond do
+      formatter_opts[:sigil] == :NFT -> format_sigil_body(source, formatter_opts)
+      formatter_opts[:extension] == ".nft" -> format_nft_file(source, formatter_opts)
+      true -> source
+    end
+  end
+
+  defp format_sigil_body(source, opts) do
+    file = opts[:file] || "nofile"
+    line = opts[:line] || 1
+
+    # Detect interpolations by tokenizing in :interpolation? mode.
+    # If any :elixir_expr tokens are present we leave the body
+    # untouched — preserving `\#{…}` positions while reflowing the
+    # rest is a richer formatter capability that hasn't been built
+    # yet (it'd need an AST-to-source emitter; the existing
+    # Formatter walks compiled %Expr{}s).
+    case Tokenizer.tokenize(source, file: file, line: line, interpolation?: true) do
+      {:ok, tokens} ->
+        if has_interpolation?(tokens) do
+          source
+        else
+          format_static_body(source, file)
+        end
+
+      {:error, _err} ->
+        # Tokenization failure — pass through unchanged. The compile
+        # run will surface the same error with better context.
+        source
+    end
+  end
+
+  defp format_nft_file(source, opts) do
+    file = opts[:file] || "nofile"
+
+    case Linx.NFT.parse(source, file: file) do
+      {:ok, ruleset} -> format(ruleset)
+      {:error, %ParseError{} = err} -> raise err
+    end
+  end
+
+  defp format_static_body(source, file) do
+    case Linx.NFT.parse(source, file: file) do
+      {:ok, ruleset} ->
+        # Sigil bodies live inside heredoc-style triple quotes;
+        # trim the trailing newline that `format/1` always tacks
+        # on so the closing `"""` doesn't end up with a blank line
+        # in front of it.
+        ruleset |> format() |> String.trim_trailing("\n")
+
+      {:error, _err} ->
+        # Same rationale as the tokenize-error branch above.
+        source
+    end
+  end
+
+  defp has_interpolation?(tokens) do
+    Enum.any?(tokens, fn
+      {:elixir_expr, _, _} -> true
+      _ -> false
+    end)
   end
 end
