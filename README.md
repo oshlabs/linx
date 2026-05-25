@@ -22,55 +22,61 @@ end
 
 Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Windows.
 
-## The headline example
+## The headline composition
 
-Spawn a rootless namespaced bash, attach our terminal to it, run a few real commands inside, exit back to iex — verbatim transcript from an actual session:
+Linx's value isn't any single subsystem — it's that they all hook into the same `Linx.Process` *checkpoint*, the window between `clone(2)` and `execve(2)` where the child is parked. Inside that window a workload's identity, resource ceiling, network, privileges, and syscall surface are all decided at once, before its first instruction.
 
+```elixir
+iex> alias Linx.{Process, User, Cgroup, Capabilities, Seccomp}
+iex> alias Linx.Netlink.Rtnl
+
+iex> {:ok, c} =
+...>   Process.spawn(
+...>     argv: ["/usr/sbin/nginx"],
+...>     namespaces: [:net, :pid, :user],
+...>     no_new_privs: true
+...>   )
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> {:ok, host_pid} = Process.host_pid(c)
+
+# Identity:  root inside ↔ this uid outside.
+iex> :ok = User.setup_maps(host_pid,
+...>         uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
+
+# Resources: 256 MiB / half a CPU.
+iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/nginx-42")
+iex> :ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
+iex> :ok = Cgroup.set_cpu_max(cg, {50_000, 100_000})
+iex> :ok = Cgroup.add_process(cg, host_pid)
+
+# Network:   a macvlan with an address and a default route.
+iex> {:ok, host_sock} = Rtnl.open()
+iex> :ok = Rtnl.Link.create_macvlan(host_sock, "ct0", "eth0", :bridge)
+iex> :ok = Rtnl.Link.move_to_netns(host_sock, "ct0", host_pid)
+iex> {:ok, ns} = Rtnl.open({:pid, host_pid})
+iex> :ok = Rtnl.Link.set_up(ns, "ct0")
+iex> :ok = Rtnl.Address.add(ns, "ct0", "10.0.0.5", 24)
+iex> :ok = Rtnl.Route.add_default(ns, "10.0.0.1")
+
+# Privilege: only cap_net_bind_service.
+iex> all = Linx.Capabilities.Constants.all()
+iex> :ok = Capabilities.drop_bounding(c,
+...>         MapSet.difference(all, MapSet.new([:cap_net_bind_service])))
+
+# Syscalls:  only what nginx actually needs.
+iex> {:ok, filter} = Seccomp.allow_list(nginx_syscalls, default: :kill_process)
+iex> :ok = Seccomp.install(c, filter)
+
+# Release the workload. Every constraint above is in force from
+# the moment execve(2) runs.
+iex> :ok = Process.proceed(c)
 ```
-[ldr@fry linx]$ iex -S mix
-Erlang/OTP 28 [erts-16.3.1] [source] [64-bit] [smp:8:8] [ds:8:8:10] [async-threads:1] [jit:ns]
 
-Interactive Elixir (1.19.5) - press Ctrl+C to exit (type h() ENTER for help)
-iex(1)> {:ok, c} =
-          Linx.Process.spawn(
-            argv: ["/bin/bash"],
-            namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
-            stdio: :pty
-          )
-{:ok, #PID<0.179.0>}
-iex(2)> Linx.Process.proceed(c)
-:ok
-iex(3)> Linx.Tty.attach(:controlling, c)
-[nobody@fry linx]$ whoami
-nobody
-[nobody@fry linx]$ env | head -n3
-SHELL=/usr/bin/bash
-SESSION_MANAGER=local/fry:@/tmp/.ICE-unix/2936,unix/fry:/tmp/.ICE-unix/2936
-WINDOWID=94479143562352
-[nobody@fry linx]$ ps | head -n3
-    PID TTY          TIME CMD
-      1 ?        00:00:13 systemd
-      2 ?        00:00:00 kthreadd
-[nobody@fry linx]$ w
- 23:11:36 up 3 days,  9:22,  1 user,  load average: 0.51, 1.12, 1.70
-USER     TTY       LOGIN@   IDLE   JCPU   PCPU  WHAT
-ldr      tty1      Wed13    3days  0.04s  0.04s /usr/lib/sddm/sddm-helper ...
-[nobody@fry linx]$ exit
-exit
-{:ok, {:exited, 0}}
-iex(4)>
-```
-
-A few things worth noticing in that session:
-
-- **Rootless.** No `sudo` to start iex. The `:user` namespace gives the BEAM ephemeral privilege inside the new user ns, which is what makes the other namespaces creatable. Inside the container, the workload reports itself as `nobody` — that's the kernel's default for a user namespace whose uid/gid maps haven't been written. Fixable with `Linx.User` — see "Going further: become root inside" below.
-- **`ps` shows host processes.** The `:mount` namespace is fresh, but `/proc` hasn't been remounted inside it, so `ps` reads the host's `/proc` and sees host PIDs. Fixable with `Linx.Mount` — see "Going further: give the container its own `/proc`" below.
-- **`exit` returns to iex with `{:ok, {:exited, 0}}`.** The session's exit code propagates back as a plain Elixir return value, after `attach/2` restores the local terminal.
-- **No explicit `receive` for the lifecycle events.** The session emits `{:linx_process, :ready, _}` and `:running` into the iex evaluator's mailbox in the background; `attach/2`'s pump only matches on the messages it cares about, so the lifecycle events are just left there for a later `flush()` if you want to look. If you need the host pid (e.g. to configure the child's mount/user/cgroup state from the outside), `receive` for `:ready` and then call `Linx.Process.host_pid/1` — see the next examples.
+The subsystems are independent — you can spawn without namespaces, use netlink without spawning, drop caps without seccomp. They compose cleanly because they share one primitive (the checkpoint), not because there's a framework holding them together. The sections below walk through each subsystem in isolation; the "Going further" recipes that follow show progressively richer compositions, each layering one more subsystem onto a base spawn.
 
 ### Going further: become root inside
 
-The `whoami → nobody` caveat from the transcript above is the kernel's default for a user namespace whose uid/gid maps haven't been written. `Linx.User.setup_maps/2` writes them from the host while the child is parked at the checkpoint — picking the mapping that makes the workload think it's `root` while staying unprivileged outside:
+A workload spawned with `:user` in the namespaces list gets its own user namespace, but until uid/gid maps are written it sees itself as `nobody`/`nogroup` — the kernel's default. `Linx.User.setup_maps/2` writes the maps from the host while the child is parked at the checkpoint — picking the mapping that makes the workload think it's `root` while staying unprivileged outside:
 
 ```elixir
 iex> alias Linx.Process, as: P
@@ -103,7 +109,7 @@ Now `whoami` inside the attached bash reports `root`; `id` shows `uid=0(root) gi
 
 ### Going further: give the container its own `/proc`
 
-The other caveat from the transcript — `ps` showing host PIDs — is the inherited mount table doing its job. Remount `/proc` inside the child's namespace at the checkpoint and `ps` sees only what lives inside:
+A workload spawned with `:pid` and `:mount` namespaces inherits the host's mount table — so `/proc` still reflects the host, and `ps` inside the container shows host PIDs rather than the namespace's. Remount `/proc` inside the child's namespace at the checkpoint and `ps` sees only what lives inside:
 
 ```elixir
 iex> alias Linx.Process, as: P
@@ -132,7 +138,7 @@ Now `ps` inside the attached bash shows only the workload's own processes (PID 1
 
 ### Going further: configure the container's network before bash starts
 
-The transcript above doesn't touch `Linx.Netlink`. Adding it lets you configure the child's network from the host *while the child is parked at the checkpoint between `clone()` and `execve()`*:
+`Linx.Netlink` lets you configure the child's network from the host *while the child is parked at the checkpoint between `clone()` and `execve()`* — build a virtual link, hand it to the child, add an address and route, then proceed:
 
 ```elixir
 iex> alias Linx.Process, as: P
@@ -365,20 +371,49 @@ The headliner is **`attach/2`**: given a `Linx.Process` session running under `s
 - **Initial window size.** The workload's PTY is sized from the local terminal at entry, so `vim` and `less` open at the right dimensions.
 - **Live resize.** Drag your terminal corner while inside the attached shell and the workload sees `SIGWINCH` with the new size in real time. A `:gen_event` handler registered on OTP's `:erl_signal_server` carries each resize through.
 
-```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Tty
+The end-to-end demo — spawn a rootless namespaced bash, attach our local terminal to it, run a few real commands inside, exit back to iex — verbatim transcript from an actual session:
 
-iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], stdio: :pty)
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(c)
-iex> receive do {:linx_process, :running} -> :ok end
-
-# iex blocks here. Your terminal IS the bash. Type, run vim, resize,
-# exit. attach returns the workload's terminal event.
-iex> Tty.attach(:controlling, c)
-{:ok, {:exited, 0}}
 ```
+[ldr@fry linx]$ iex -S mix
+Erlang/OTP 28 [erts-16.3.1] [source] [64-bit] [smp:8:8] [ds:8:8:10] [async-threads:1] [jit:ns]
+
+Interactive Elixir (1.19.5) - press Ctrl+C to exit (type h() ENTER for help)
+iex(1)> {:ok, c} =
+          Linx.Process.spawn(
+            argv: ["/bin/bash"],
+            namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
+            stdio: :pty
+          )
+{:ok, #PID<0.179.0>}
+iex(2)> Linx.Process.proceed(c)
+:ok
+iex(3)> Linx.Tty.attach(:controlling, c)
+[nobody@fry linx]$ whoami
+nobody
+[nobody@fry linx]$ env | head -n3
+SHELL=/usr/bin/bash
+SESSION_MANAGER=local/fry:@/tmp/.ICE-unix/2936,unix/fry:/tmp/.ICE-unix/2936
+WINDOWID=94479143562352
+[nobody@fry linx]$ ps | head -n3
+    PID TTY          TIME CMD
+      1 ?        00:00:13 systemd
+      2 ?        00:00:00 kthreadd
+[nobody@fry linx]$ w
+ 23:11:36 up 3 days,  9:22,  1 user,  load average: 0.51, 1.12, 1.70
+USER     TTY       LOGIN@   IDLE   JCPU   PCPU  WHAT
+ldr      tty1      Wed13    3days  0.04s  0.04s /usr/lib/sddm/sddm-helper ...
+[nobody@fry linx]$ exit
+exit
+{:ok, {:exited, 0}}
+iex(4)>
+```
+
+A few things worth noticing in that session:
+
+- **Rootless.** No `sudo` to start iex. The `:user` namespace gives the BEAM ephemeral privilege inside the new user ns, which is what makes the other namespaces creatable. Inside the container, the workload reports itself as `nobody` — the kernel's default for a user namespace whose uid/gid maps haven't been written. Fixable with `Linx.User` (see "Going further: become root inside" earlier in this doc).
+- **`ps` shows host processes.** The `:mount` namespace is fresh, but `/proc` hasn't been remounted inside it, so `ps` reads the host's `/proc` and sees host PIDs. Fixable with `Linx.Mount` (see "Going further: give the container its own `/proc`").
+- **`exit` returns to iex with `{:ok, {:exited, 0}}`.** The session's exit code propagates back as a plain Elixir return value, after `attach/2` restores the local terminal.
+- **No explicit `receive` for the lifecycle events.** The session emits `{:linx_process, :ready, _}` and `:running` into the iex evaluator's mailbox in the background; `attach/2`'s pump only matches on the messages it cares about, so the lifecycle events are just left there for a later `flush()` if you want to look. If you need the host pid (e.g. to configure the child's mount/user/cgroup state from the outside), `receive` for `:ready` and then call `Linx.Process.host_pid/1` — every other Linx subsystem does that.
 
 More in [`docs/tty/EXAMPLES.md`](docs/tty/EXAMPLES.md).
 
@@ -427,7 +462,7 @@ iex> case Linx.Cgroup.destroy(cg) do
 ...> end
 ```
 
-**Composition with `Linx.Process`** happens at the existing checkpoint between `:ready` and `proceed/1`, as in the headline example above. `Linx.Process` has zero awareness of cgroups; cgroupfs is enough.
+**Composition with `Linx.Process`** happens at the existing checkpoint between `:ready` and `proceed/1`, as in the headline composition at the top of this doc. `Linx.Process` has zero awareness of cgroups; cgroupfs is enough.
 
 More in [`docs/cgroup/EXAMPLES.md`](docs/cgroup/EXAMPLES.md).
 
@@ -672,7 +707,7 @@ iex> {:ok, links} = Link.list(sock)
 - **Rules** (policy routing) — `list`, `add`, `delete`.
 - **Stats** — `get` / `list` for `rtnl_link_stats64` counters.
 
-**Sockets in another netns.** `Rtnl.open({:pid, child_pid})` opens the socket from inside the target's network namespace; the socket then belongs to that netns for its whole life (the BEAM only ever briefly entered the namespace on an isolated thread). This is what makes the headline example work — configuring the child's network from the host while the child waits at the checkpoint.
+**Sockets in another netns.** `Rtnl.open({:pid, child_pid})` opens the socket from inside the target's network namespace; the socket then belongs to that netns for its whole life (the BEAM only ever briefly entered the namespace on an isolated thread). This is what makes the headline composition work — configuring the child's network from the host while the child waits at the checkpoint.
 
 ```elixir
 iex> {:ok, ns} = Rtnl.open({:pid, 41234})
