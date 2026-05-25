@@ -1,0 +1,28 @@
+# 01 — minimal stateful host firewall
+# Reference shape: the canonical "input/forward/output with conntrack"
+# pattern documented at:
+# https://wiki.nftables.org/wiki-nftables/index.php/Configuring_chains
+# (close cousin of Arch Linux's default /etc/nftables.conf, trimmed
+# to features the compiler supports today)
+
+table inet filter {
+  chain input {
+    type filter hook input priority 0
+    policy drop
+
+    ct state established accept
+    meta iifname "lo" accept
+    tcp dport 22 accept
+    counter drop
+  }
+
+  chain forward {
+    type filter hook forward priority 0
+    policy drop
+  }
+
+  chain output {
+    type filter hook output priority 0
+    policy accept
+  }
+}

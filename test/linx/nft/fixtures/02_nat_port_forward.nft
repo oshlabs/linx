@@ -1,0 +1,18 @@
+# 02 — NAT port-forward + masquerade
+# Reference shape from:
+# https://wiki.nftables.org/wiki-nftables/index.php/Performing_Network_Address_Translation_(NAT)
+# (named-priority aliases `dstnat` / `srcnat` resolved by the compiler
+# via Linx.Netfilter.Wire.priority_int/2; round-trip emits as the
+# resolved integers, which re-parse identically.)
+
+table ip nat {
+  chain prerouting {
+    type nat hook prerouting priority dstnat
+    tcp dport 8080 dnat to 10.0.0.5
+  }
+
+  chain postrouting {
+    type nat hook postrouting priority srcnat
+    meta oifname "eth0" masquerade
+  }
+}

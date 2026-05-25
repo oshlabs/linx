@@ -1,0 +1,20 @@
+# 03 — multi-chain dispatch with anonymous sets and jumps
+# A regular (non-base) chain reached via `jump` from a base chain,
+# matched via an inline anonymous set on tcp dport. Reference:
+# https://wiki.nftables.org/wiki-nftables/index.php/Quick_reference-nftables_in_10_minutes
+
+table inet myrouter {
+  chain input {
+    type filter hook input priority 0
+    policy drop
+
+    ct state established accept
+    tcp dport { 22, 80, 443 } jump web_services
+    meta iifname "lo" accept
+    drop
+  }
+
+  chain web_services {
+    counter accept
+  }
+}

@@ -1,0 +1,14 @@
+# 06 — IPv6 filtering with link-local + multicast CIDRs
+# Exercises the ip6 family + ip6 saddr/daddr payload + IPv6 CIDR
+# matching (bitwise + cmp under the hood).
+
+table ip6 filter {
+  chain input {
+    type filter hook input priority 0
+    policy drop
+
+    ct state established accept
+    ip6 saddr fe80::/10 accept
+    ip6 daddr ff00::/8 drop
+  }
+}
