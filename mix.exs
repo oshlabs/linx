@@ -16,8 +16,11 @@ defmodule Linx.MixProject do
       #   * :linx_process   -- the linx_process Port binary (Linx.Process)
       #   * :linx_tty       -- the linx_tty NIF (Linx.Tty)
       #   * :linx_mount     -- the linx_mount NIF (Linx.Mount)
+      #   * :linx_sysctl    -- the linx_sysctl NIF (Linx.Sysctl)
       # See lib/mix/tasks/compile.*.ex.
-      compilers: Mix.compilers() ++ [:netlink_nif, :linx_process, :linx_tty, :linx_mount],
+      compilers:
+        Mix.compilers() ++
+          [:netlink_nif, :linx_process, :linx_tty, :linx_mount, :linx_sysctl],
       deps: deps(),
       name: "Linx",
       description: "Linux kernel interfaces for Elixir — netlink, and more.",
@@ -76,7 +79,11 @@ defmodule Linx.MixProject do
         "docs/seccomp/EXAMPLES.md",
         "docs/seccomp/PLAN.md",
         "docs/seccomp/COVERAGE.md",
-        "docs/seccomp/REFERENCES.md"
+        "docs/seccomp/REFERENCES.md",
+        "docs/sysctl/EXAMPLES.md",
+        "docs/sysctl/PLAN.md",
+        "docs/sysctl/COVERAGE.md",
+        "docs/sysctl/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -128,6 +135,12 @@ defmodule Linx.MixProject do
           "docs/seccomp/COVERAGE.md",
           "docs/seccomp/REFERENCES.md"
         ],
+        "Sysctl — guides": ["docs/sysctl/EXAMPLES.md"],
+        "Sysctl — design": [
+          "docs/sysctl/PLAN.md",
+          "docs/sysctl/COVERAGE.md",
+          "docs/sysctl/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -172,6 +185,12 @@ defmodule Linx.MixProject do
           Linx.Seccomp.Builder,
           Linx.Seccomp.Error,
           Linx.Seccomp.Filter
+        ],
+        Sysctl: [
+          Linx.Sysctl,
+          Linx.Sysctl.Entry,
+          Linx.Sysctl.Error,
+          Linx.Sysctl.Native
         ],
         "Netlink core": [
           Linx.Netlink,
