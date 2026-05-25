@@ -87,6 +87,7 @@ defmodule Linx.MixProject do
         "docs/netfilter/EXAMPLES.md",
         "docs/netfilter/PLAN.md",
         "docs/netfilter/COVERAGE.md",
+        "docs/netfilter/TODO.md",
         "docs/netfilter/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
@@ -149,6 +150,7 @@ defmodule Linx.MixProject do
         "Netfilter — design": [
           "docs/netfilter/PLAN.md",
           "docs/netfilter/COVERAGE.md",
+          "docs/netfilter/TODO.md",
           "docs/netfilter/REFERENCES.md"
         ],
         "Repo-wide": ["AGENTS.md"]
