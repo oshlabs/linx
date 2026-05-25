@@ -40,6 +40,8 @@ iex> receive do {:linx_process, :ready, _} -> :ok end
 iex> {:ok, host_pid} = Process.host_pid(c)
 
 # Identity:  root inside ↔ this uid outside.
+iex> my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
+iex> my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integer()
 iex> :ok = User.setup_maps(host_pid,
 ...>         uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
 
@@ -64,6 +66,10 @@ iex> :ok = Capabilities.drop_bounding(c,
 ...>         MapSet.difference(all, MapSet.new([:cap_net_bind_service])))
 
 # Syscalls:  only what nginx actually needs.
+iex> nginx_syscalls = ~w(read write openat close fstat brk mmap munmap mprotect
+...>                     socket bind listen accept4 setsockopt getsockopt
+...>                     rt_sigaction rt_sigprocmask rt_sigreturn exit_group
+...>                     epoll_pwait epoll_ctl epoll_create1 clock_gettime futex)a
 iex> {:ok, filter} = Seccomp.allow_list(nginx_syscalls, default: :kill_process)
 iex> :ok = Seccomp.install(c, filter)
 
