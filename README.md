@@ -269,7 +269,36 @@ The filter is a `%Linx.Seccomp.Filter{}` value — composable, introspectable, t
 
 `Linx.User` + `Linx.Capabilities` + `Linx.Seccomp` together are the security tripod: identity (who is the workload?), privilege bounds (what can it ask the kernel for?), and syscall surface (what can it call at all?). Three orthogonal envelopes, three independent verbs, all sharing the same `Linx.Process` checkpoint.
 
-The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`, drop processes into cgroups whether or not they're Linx-spawned, configure caps and seccomp filters on any session that's at the checkpoint. They compose because they share clean primitives, not because there's a framework holding them together.
+### Going further: tune the kernel knobs the container sees
+
+The same checkpoint slot also accepts `Linx.Sysctl.write/3` with `in: {:pid, host_pid}`. Set per-namespace sysctls — `kernel.hostname`, `net.ipv4.ip_forward`, `net.ipv4.tcp_rmem`, the per-IPC-ns `kernel.shm*` limits — directly in the child's namespace stack while the workload is parked. The kernel routes the write through the *target's* namespace context, not the BEAM's; the BEAM's own values are unchanged.
+
+```elixir
+iex> alias Linx.Process, as: P
+iex> alias Linx.Sysctl
+
+iex> {:ok, c} =
+...>   P.spawn(argv: ["/usr/sbin/nginx"],
+...>           namespaces: [:net, :uts, :ipc])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> {:ok, host_pid} = P.host_pid(c)
+
+# Give the container its own hostname + enable IP forwarding +
+# bump TCP buffers, all before nginx ever starts. None of this
+# touches the host's /proc/sys values.
+iex> :ok = Sysctl.write("kernel.hostname", "ct-web-01", in: {:pid, host_pid})
+iex> :ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+iex> :ok = Sysctl.write("net.ipv4.tcp_rmem", [4096, 262_144, 16_777_216],
+...>                    in: {:pid, host_pid})
+
+iex> P.proceed(c)
+```
+
+A small NIF (`c_src/linx_sysctl.c`) opens the target's `/proc/<pid>/ns/{user,mnt,uts,ipc,net}` stack and `setns(2)`s into each one on a throwaway pthread, performs the file I/O, and exits — the same setns-on-a-throwaway-pthread pattern `Linx.Mount` and `Linx.Netlink` use. Same-namespace fds are filtered out via inode comparison (so a workload spawned with only `[:net, :uts]` doesn't trip `EINVAL` on the unchanged user/mnt/ipc setns calls). The `:in` option is lifecycle-agnostic — the same call works just as well after `proceed/1` against a fully running container.
+
+> **Host vs container.** Drop the `in:` option and the same verbs target the BEAM's own namespaces — `Linx.Sysctl.write("net.ipv4.ip_forward", 1)` is the natural way to flip a host-level knob from a Nerves application or a standalone Elixir release. Pure-Elixir file I/O on the host path; the NIF only loads for the cross-namespace case.
+
+The pieces are independent — you can spawn without namespaces, use netlink without spawning, attach to any `Linx.Process` with `stdio: :pty`, drop processes into cgroups whether or not they're Linx-spawned, configure caps / seccomp filters / sysctls on any session that's at the checkpoint. They compose because they share clean primitives, not because there's a framework holding them together.
 
 ## Subsystems
 
@@ -690,6 +719,64 @@ The filter is installed by the child agent (`apply_seccomp` in `c_src/linx_proce
 
 More in [`docs/seccomp/EXAMPLES.md`](docs/seccomp/EXAMPLES.md).
 
+### `Linx.Sysctl` — kernel tunable parameters
+
+The kernel's `/proc/sys/` surface — the same knobs `sysctl(8)` reads and writes (`net.ipv4.ip_forward`, `kernel.hostname`, `vm.swappiness`, `kernel.printk`, the per-protocol TCP tuning knobs, the per-IPC-namespace `kernel.shm*` limits, …). Pure-Elixir file I/O on the host path; a small NIF handles the cross-namespace case.
+
+```elixir
+iex> alias Linx.Sysctl
+
+iex> Sysctl.read("kernel.ostype")
+{:ok, "Linux"}
+
+iex> Sysctl.read_int("net.ipv4.ip_forward")
+{:ok, 0}
+
+iex> Sysctl.write("net.ipv4.ip_forward", 1)
+:ok
+```
+
+**Dot-form keys.** `net.ipv4.ip_forward` ↔ `/proc/sys/net/ipv4/ip_forward`. The same naming `sysctl(8)` and `/etc/sysctl.d/*.conf` use. Strict validation (one segment per dot, `[A-Za-z0-9_-]+` per segment) rules out empty keys, leading/trailing/consecutive dots, slashes, whitespace, NUL, and the `..` traversal case before any path touches procfs.
+
+**Weak typing on values.** Sysctls don't have a machine-readable schema — most are integers, some are strings (`kernel.hostname`), some are space-separated tuples (`kernel.printk` is `"4 4 1 7"`). We don't try to schema them: `read/1` returns the trimmed binary; `read_int/1` and `read_ints/1` are convenience parsers for the common cases; `write/2` accepts integers, binaries, and lists of integers (rendered space-separated).
+
+**Per-namespace vs global.** The kernel routes each `/proc/sys/...` read or write through the *calling task's* namespace context:
+
+| Subtree | Owning namespace |
+|---|---|
+| `net.*` | network |
+| `kernel.hostname`, `kernel.domainname` | UTS |
+| `kernel.shm*`, `kernel.msg*`, `kernel.sem`, `fs.mqueue.*` | IPC |
+| `vm.*`, `fs.file-max`, `kernel.printk`, most else | global (host-only) |
+
+Trying to traverse `/proc/<pid>/root/proc/sys/...` from the host to read another namespace's value does **not** work — the kernel resolves against the *reader's* namespace, not the path.
+
+**Cross-namespace via `:in`.** Every verb takes an `:in :: :self | {:pid, n} | {:path, p}` option, same shape as `Linx.Mount`. With `{:pid, n}`, `Linx.Sysctl.Native` opens the target's `/proc/<n>/ns/{user,mnt,uts,ipc,net}` stack and `setns(2)`s into each one on a throwaway pthread, then performs the I/O, then exits. Same-namespace fds are filtered out via inode comparison (so a workload spawned with only `[:net, :uts]` doesn't trip `EINVAL` on the user/mnt/ipc setns calls).
+
+```elixir
+iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net, :uts])
+iex> receive do {:linx_process, :ready, _} -> :ok end
+iex> {:ok, host_pid} = P.host_pid(c)
+iex> P.proceed(c)
+
+# The container sees one value; the host sees another, independently.
+iex> :ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+iex> Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
+{:ok, 1}
+iex> Sysctl.read_int("net.ipv4.ip_forward")
+{:ok, 0}
+```
+
+**Subtree walking.** `list/0` returns every readable scalar under `/proc/sys/` as `[%Linx.Sysctl.Entry{}]` sorted by key (~1500 entries on a typical host). `list/1` takes a dot-form prefix to narrow the walk — `list("net.ipv4")` is the subtree; `list("kernel.ostype")` on a leaf returns a single-element list. Both verbs take the same `:in` option as the others.
+
+**Composition at the checkpoint.** `:in` is lifecycle-agnostic — it works equally well at the `Linx.Process` checkpoint between `:ready` and `proceed/1` (configure the container's hostname / forwarding / TCP buffers before its first instruction) and against a fully running container post-`proceed/1`. The Nerves use case — flipping a host-level knob from an embedded Elixir release — needs only the `:self` path; no NIF involvement on that side.
+
+**Errors as structs.** `%Linx.Sysctl.Error{key, path, operation, errno, code}` with `Exception` impl. The `:operation` atom distinguishes I/O failures (`:read`, `:write`, `:list`) from namespace-acquisition failures (`:open_ns`, `:unshare`, `:setns`, `:thread`) — only seen with `:in: {:pid, _}`. Caller-side input mistakes use tagged tuples (`{:bad_key, _}`, `{:bad_value, _}`, `{:bad_in, _}`) distinct from kernel rejections.
+
+**Deferred** — `sysctl.conf` / `/etc/sysctl.d/*.conf` parsing (belongs in a consumer); a `with_sysctl/2` rollback helper (one-screen consumer module on top of `read` + `write`); streaming `list/0..1` (built when a consumer's profile demands it); per-key typed schemas (kernel exposes none).
+
+More in [`docs/sysctl/EXAMPLES.md`](docs/sysctl/EXAMPLES.md).
+
 ### `Linx.Netlink` — netlink sockets, rtnetlink
 
 An `AF_NETLINK` client with the rtnetlink family fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
@@ -751,7 +838,7 @@ Three kinds of top-level module, named for what they organize:
 | Kind | When | Examples |
 |---|---|---|
 | **Mechanism layer** | A coherent transport with shared infrastructure (codec, framing, error handling, …). | `Linx.Netlink` |
-| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup`, `Linx.Mount`, `Linx.User`, `Linx.Capabilities`, `Linx.Seccomp` |
+| **Subsystem concept** | A grouping of kernel operations that work together for one purpose. Mirrors how Linux man-page section 7 names things. | `Linx.Process`, `Linx.Tty`, `Linx.Cgroup`, `Linx.Mount`, `Linx.User`, `Linx.Capabilities`, `Linx.Seccomp`, `Linx.Sysctl` |
 | **Value type** | A domain primitive that flows through the mechanisms. Top level. | `Linx.IP`, `Linx.MAC` |
 
 Naming rule of thumb: name a module after a mechanism only when the mechanism has shared shape worth factoring out. Otherwise name it after the kernel subsystem or concept. `Namespace` isn't a subsystem — it's a cross-cutting flag on `clone(2)` — so it doesn't get its own module; the *operations* live where they belong.
@@ -766,7 +853,8 @@ Each subsystem owns its docs under `docs/<subsystem>/` — `EXAMPLES.md` (iex-st
 - **Within `Linx.User`** — `newuidmap(1)` / `newgidmap(1)` integration for unprivileged multi-range maps via `/etc/subuid` / `/etc/subgid` (required for true `runc rootless`-parity).
 - **Within `Linx.Capabilities`** — file capabilities (`security.capability` xattrs on binaries; the `setcap(8)` / `getcap(8)` surface), `SECBIT_*` securebits, per-thread cap reads via `/proc/<pid>/task/<tid>/status`.
 - **Within `Linx.Seccomp`** — per-argument matching (`allow_if(:openat, &(&1.flags == :rdonly))` — the S1.5 surface), multi-arch routing for cross-arch workloads, `SECCOMP_USER_NOTIF` for userspace decision handlers, and richer filter introspection.
-- **First hex release** — pulling the existing eight subsystems together; HexDocs hosting; a CHANGELOG settling onto semantic versioning.
+- **Within `Linx.Sysctl`** — a `sysctl.conf` / `/etc/sysctl.d/*.conf` parser+applier (consumer-side, not in Linx itself); a `with_sysctl/2` transactional helper that snapshots and restores on exit; streaming `list/0..1` for callers that want to walk `/proc/sys/` without materialising the ~1500-entry list.
+- **First hex release** — pulling the existing nine subsystems together; HexDocs hosting; a CHANGELOG settling onto semantic versioning.
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.
 
