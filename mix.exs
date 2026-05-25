@@ -76,7 +76,11 @@ defmodule Linx.MixProject do
         "docs/seccomp/EXAMPLES.md",
         "docs/seccomp/PLAN.md",
         "docs/seccomp/COVERAGE.md",
-        "docs/seccomp/REFERENCES.md"
+        "docs/seccomp/REFERENCES.md",
+        "docs/sysctl/EXAMPLES.md",
+        "docs/sysctl/PLAN.md",
+        "docs/sysctl/COVERAGE.md",
+        "docs/sysctl/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
       groups_for_extras: [
@@ -128,6 +132,12 @@ defmodule Linx.MixProject do
           "docs/seccomp/COVERAGE.md",
           "docs/seccomp/REFERENCES.md"
         ],
+        "Sysctl — guides": ["docs/sysctl/EXAMPLES.md"],
+        "Sysctl — design": [
+          "docs/sysctl/PLAN.md",
+          "docs/sysctl/COVERAGE.md",
+          "docs/sysctl/REFERENCES.md"
+        ],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [
@@ -172,6 +182,9 @@ defmodule Linx.MixProject do
           Linx.Seccomp.Builder,
           Linx.Seccomp.Error,
           Linx.Seccomp.Filter
+        ],
+        Sysctl: [
+          Linx.Sysctl
         ],
         "Netlink core": [
           Linx.Netlink,
