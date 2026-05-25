@@ -204,6 +204,22 @@ defmodule Linx.NFT.TokenizerTest do
     end
   end
 
+  describe "time-suffixed integers" do
+    test "Ns / Nm / Nh / Nd / Nw produce :time tokens in seconds" do
+      assert [{:time, 30, _}] = tokens!("30s")
+      assert [{:time, 60, _}] = tokens!("1m")
+      assert [{:time, 3600, _}] = tokens!("1h")
+      assert [{:time, 86_400, _}] = tokens!("1d")
+      assert [{:time, 604_800, _}] = tokens!("1w")
+    end
+
+    test "letter must not be followed by an identifier char" do
+      # `10ms` is an integer followed by an identifier (`ms`), not
+      # a time literal — we don't recognise sub-second units yet.
+      assert [{:integer, 10, _}, {:identifier, "ms", _}] = tokens!("10ms")
+    end
+  end
+
   describe "IPv6 / CIDR / MAC" do
     test "full IPv6 literal" do
       assert [{:ipv6, "fe80:0:0:0:0:0:0:1", _}] = tokens!("fe80:0:0:0:0:0:0:1")

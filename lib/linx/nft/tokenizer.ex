@@ -301,6 +301,12 @@ defmodule Linx.NFT.Tokenizer do
       <<"@", rest::binary>> -> emit_punct(state, :at, rest, 1)
       <<"$", rest::binary>> -> emit_punct(state, :dollar, rest, 1)
 
+      # A `.` that's followed by whitespace, identifier, or EOF —
+      # type concatenation as in `type ipv4_addr . inet_service`.
+      # The `.` inside numeric/address literals is consumed earlier
+      # by `read_numeric_or_address` / `read_identifier`.
+      <<".", rest::binary>> -> emit_punct(state, :dot, rest, 1)
+
       # ----------- Numeric literals -----------
       <<"0x", _::binary>> -> read_hex_integer(state)
       <<"0X", _::binary>> -> read_hex_integer(state)
@@ -687,12 +693,59 @@ defmodule Linx.NFT.Tokenizer do
 
   # First char is `[0-9]` — could be plain int, IPv4, CIDR, or
   # MAC/IPv6 (rare since MAC/IPv6 normally start with hex letters,
-  # but `10::1` or `12:34:...` qualify).
+  # but `10::1` or `12:34:...` qualify), or a time-suffixed
+  # literal like `5m` / `1h` / `30s`.
+  #
+  # We peek the leading run of decimal digits first; if those are
+  # followed by `s|m|h|d|w` and then a non-identifier byte, it's a
+  # time literal (the `d`/`s`/etc. would otherwise be eaten by the
+  # numeric/address scan since they're all hex digits). Anything
+  # else falls back to the standard address/integer classification.
   defp read_numeric_or_address(state) do
-    {chars, rest} = take_while(state.source, &numeric_addr_char?/1)
-    {chars, rest, width} = maybe_consume_cidr_suffix(chars, rest)
-    classify_address_or_integer(chars, rest, width, state)
+    {decimal, rest} = take_while(state.source, &digit?/1)
+
+    case rest do
+      <<unit, after_unit::binary>>
+      when unit in [?s, ?m, ?h, ?d, ?w] ->
+        if ident_char?(peek_byte(after_unit)) do
+          continue_address_scan(decimal, rest, state)
+        else
+          emit_time_literal(decimal, unit, after_unit, state)
+        end
+
+      _ ->
+        continue_address_scan(decimal, rest, state)
+    end
   end
+
+  defp continue_address_scan(prefix, rest, state) do
+    {more, rest2} = take_while(rest, &numeric_addr_char?/1)
+    full = prefix <> more
+    {full, rest3, width} = maybe_consume_cidr_suffix(full, rest2)
+    classify_address_or_integer(full, rest3, width, state)
+  end
+
+  defp emit_time_literal(decimal, unit, after_unit, state) do
+    seconds = String.to_integer(decimal) * time_multiplier(unit)
+    meta = current_meta(state)
+    width = byte_size(decimal) + 1
+
+    %{
+      state
+      | tokens: [{:time, seconds, meta} | state.tokens],
+        source: after_unit,
+        column: state.column + width
+    }
+  end
+
+  defp peek_byte(<<c, _::binary>>), do: c
+  defp peek_byte(<<>>), do: 0
+
+  defp time_multiplier(?s), do: 1
+  defp time_multiplier(?m), do: 60
+  defp time_multiplier(?h), do: 3600
+  defp time_multiplier(?d), do: 86400
+  defp time_multiplier(?w), do: 604_800
 
   # Identifier-or-IPv6/MAC. Letter-leading; if all-hex and followed
   # by `:hex...`, switch to address mode (rewind would be more
