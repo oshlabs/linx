@@ -11,11 +11,11 @@ user *inside* their own namespace — e.g. as `root` inside a
 container's user ns — but writes from the BEAM to the host's
 namespace still need real root.
 
-> 🟢 **S0–S1 shipped.** `supported?/0`, `read/1`, `read_int/1`,
-> `read_ints/1`, `write/2`, and the `%Linx.Sysctl.Error{}` struct
-> are in. Subtree walking lands in S2; the cross-namespace `:in`
-> option lands in S3. See `PLAN.md` for the roadmap and
-> `COVERAGE.md` for what's in / out.
+> 🟢 **S0–S2 shipped.** `supported?/0`, `read/1`, `read_int/1`,
+> `read_ints/1`, `write/2`, `list/0`, `list/1`, plus the
+> `%Linx.Sysctl.Entry{}` and `%Linx.Sysctl.Error{}` value types
+> are in. The cross-namespace `:in` option lands in S3. See
+> `PLAN.md` for the roadmap and `COVERAGE.md` for what's in / out.
 
 ## Detecting sysctl support
 
@@ -187,6 +187,103 @@ iex> Exception.message(err)
 "sysctl write \"net.ipv4.ip_forward\" failed on /proc/sys/net/ipv4/ip_forward: eacces (errno 13)"
 ```
 
-## (Will land with S2 — subtree walking + Entry)
+## Walking the sysctl tree
+
+`list/0` walks all of `/proc/sys/` recursively and returns
+`{:ok, [%Linx.Sysctl.Entry{}, ...]}` sorted by key. On a typical
+Linux host this is ~1500 entries:
+
+```elixir
+iex> {:ok, all} = Linx.Sysctl.list()
+iex> length(all)
+1487
+
+iex> Enum.take(all, 3)
+[
+  #Linx.Sysctl.Entry<abi.vsyscall32 = "1">,
+  #Linx.Sysctl.Entry<crypto.fips_enabled = "0">,
+  #Linx.Sysctl.Entry<debug.exception-trace = "1">
+]
+
+iex> Enum.find(all, & &1.key == "kernel.ostype")
+#Linx.Sysctl.Entry<kernel.ostype = "Linux">
+```
+
+Entries with restrictive permissions (write-only, root-only reads)
+are silently skipped — the returned list is "everything I could
+see from this process", not "everything the kernel exposes".
+For complete coverage as an unprivileged caller, run `Linx.Sysctl`
+from a context with sufficient privilege (or check the missing
+keys individually with `read/1`).
+
+`list/1` walks a subtree by dot-form prefix — useful for narrowing
+down to a specific namespace's knobs:
+
+```elixir
+iex> {:ok, net} = Linx.Sysctl.list("net.ipv4")
+iex> length(net)
+156
+
+iex> Enum.take(net, 4)
+[
+  #Linx.Sysctl.Entry<net.ipv4.cipso_cache_bucket_size = "10">,
+  #Linx.Sysctl.Entry<net.ipv4.cipso_cache_enable = "1">,
+  #Linx.Sysctl.Entry<net.ipv4.cipso_rbm_optfmt = "0">,
+  #Linx.Sysctl.Entry<net.ipv4.cipso_rbm_strictvalid = "1">
+]
+```
+
+`list/1` is convenient for "is this knob present on this kernel?"
+without having to remember whether a particular dot-form name is a
+directory or a file — if you pass a leaf key, you get back a
+single-element list:
+
+```elixir
+iex> Linx.Sysctl.list("kernel.ostype")
+{:ok, [#Linx.Sysctl.Entry<kernel.ostype = "Linux">]}
+
+iex> Linx.Sysctl.list("linx.does.not.exist")
+{:error,
+ %Linx.Sysctl.Error{
+   key: "linx.does.not.exist",
+   path: "/proc/sys/linx/does/not/exist",
+   operation: :list,
+   errno: :enoent,
+   code: 2
+ }}
+```
+
+### The `Entry` value type
+
+Each `%Linx.Sysctl.Entry{}` carries the dot-form `:key` and the
+trimmed-binary `:value`. Both fields are `@enforce_keys`-required:
+
+```elixir
+iex> [first | _] = elem(Linx.Sysctl.list("net.ipv4"), 1)
+iex> first.key
+"net.ipv4.cipso_cache_bucket_size"
+iex> first.value
+"10"
+```
+
+The `Inspect` impl truncates values over 60 bytes for legibility
+when looking at large lists — the underlying `:value` field is
+never modified, so pattern matching on `:value` always gives you
+the full string. The 60-byte limit comfortably accommodates the
+tuple-shaped knobs (`kernel.printk`'s 4 ints, `tcp_rmem`'s 3 ints)
+and the occasional descriptive string; only pathological cases
+hit the truncation.
+
+### Caveat: dots in leaf names
+
+A small number of sysctl files have dots in their leaf names —
+notably the per-interface `net.ipv4.conf.<iface>.*` knobs when the
+interface name itself contains dots (a VLAN like `eth0.10`). For
+those entries the dot-form key produced by `list/0..1` reads
+correctly in the output but isn't unambiguously round-trippable
+back to a unique procfs path (the string `net.ipv4.conf.eth0.10.proxy_arp`
+could in principle resolve to two different files). The value
+field is always faithful; consumers that need to act on a specific
+file by interface name should keep the procfs path side-channel.
 
 ## (Will land with S3 — cross-namespace via `:in`)

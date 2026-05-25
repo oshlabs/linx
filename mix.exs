@@ -185,6 +185,7 @@ defmodule Linx.MixProject do
         ],
         Sysctl: [
           Linx.Sysctl,
+          Linx.Sysctl.Entry,
           Linx.Sysctl.Error
         ],
         "Netlink core": [

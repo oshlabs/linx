@@ -38,9 +38,9 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `list/0` | ⬜ | S2 — walks all of `/proc/sys/`, skips unreadable nodes |
-| `list/1` | ⬜ | S2 — subtree by dot-form prefix, e.g. `list("net.ipv4")` |
-| `Linx.Sysctl.Entry` value type | ⬜ | S2 — `%{key, value}` with compact Inspect |
+| `list/0` | ✅ | S2 — walks all of `/proc/sys/`, skips unreadable nodes, sorted by key |
+| `list/1` | ✅ | S2 — subtree by dot-form prefix; leaf-prefix returns single-element list |
+| `Linx.Sysctl.Entry` value type | ✅ | S2 — `%{key, value}` with compact Inspect (60-byte value truncation) |
 
 ## Cross-namespace
 

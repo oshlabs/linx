@@ -2,6 +2,7 @@ defmodule Linx.SysctlTest do
   use ExUnit.Case, async: true
 
   alias Linx.Sysctl
+  alias Linx.Sysctl.Entry
   alias Linx.Sysctl.Error
 
   describe "supported?/0" do
@@ -153,16 +154,55 @@ defmodule Linx.SysctlTest do
     end
   end
 
-  describe "S2 stubs" do
-    # list/0 and list/1 still return {:error, :not_yet_implemented}
-    # until S2 lands.
+  describe "Linx.Sysctl.Entry" do
+    test "struct enforces both :key and :value" do
+      assert_raise ArgumentError, fn ->
+        struct!(Entry, key: "net.ipv4.ip_forward")
+      end
 
-    test "list/0" do
-      assert {:error, :not_yet_implemented} = Sysctl.list()
+      assert_raise ArgumentError, fn ->
+        struct!(Entry, value: "0")
+      end
+
+      e = struct!(Entry, key: "net.ipv4.ip_forward", value: "0")
+      assert e.key == "net.ipv4.ip_forward"
+      assert e.value == "0"
     end
 
-    test "list/1" do
-      assert {:error, :not_yet_implemented} = Sysctl.list("net.ipv4")
+    test "Inspect renders the key = value form for short values" do
+      e = %Entry{key: "net.ipv4.ip_forward", value: "0"}
+      assert inspect(e) == ~s(#Linx.Sysctl.Entry<net.ipv4.ip_forward = "0">)
+    end
+
+    test "Inspect handles tuple-shaped values verbatim (tabs preserved)" do
+      e = %Entry{key: "kernel.printk", value: "4\t4\t1\t7"}
+      assert inspect(e) == ~s(#Linx.Sysctl.Entry<kernel.printk = "4\\t4\\t1\\t7">)
+    end
+
+    test "Inspect truncates values over 60 bytes with `...`" do
+      long = String.duplicate("x", 100)
+      e = %Entry{key: "fake.long", value: long}
+
+      rendered = inspect(e)
+      assert String.starts_with?(rendered, ~s(#Linx.Sysctl.Entry<fake.long = "))
+      # 60 'x' then '...' then closing '">'
+      assert rendered ==
+               ~s(#Linx.Sysctl.Entry<fake.long = "#{String.duplicate("x", 60)}...">)
+    end
+  end
+
+  describe "list/1 — plain (no procfs walk)" do
+    test "rejects malformed prefix as {:bad_key, ...}" do
+      assert {:error, {:bad_key, "net..ipv4"}} = Sysctl.list("net..ipv4")
+      assert {:error, {:bad_key, ""}} = Sysctl.list("")
+    end
+
+    test "nonexistent prefix returns %Error{errno: :enoent, operation: :list}" do
+      assert {:error, %Error{} = err} = Sysctl.list("linx.does.not.exist")
+      assert err.key == "linx.does.not.exist"
+      assert err.path == "/proc/sys/linx/does/not/exist"
+      assert err.operation == :list
+      assert err.errno == :enoent
     end
   end
 
@@ -207,6 +247,56 @@ defmodule Linx.SysctlTest do
 
       assert :ok = Sysctl.write("net.ipv4.ip_forward", before)
       assert {:ok, ^before} = Sysctl.read_int("net.ipv4.ip_forward")
+    end
+  end
+
+  describe "S2 integration — list/0 + list/1 against real /proc/sys/" do
+    @describetag :integration
+
+    # Real walks of /proc/sys/. Reads only; no host state mutated.
+    # list/0 on a typical host returns ~1500 entries; the test
+    # checks for stable, always-present anchors (kernel.ostype,
+    # vm.swappiness) rather than asserting an exact count.
+
+    test "list/0 returns a non-empty list including kernel.ostype" do
+      assert {:ok, all} = Sysctl.list()
+      assert is_list(all)
+      assert length(all) > 100
+      assert Enum.all?(all, &match?(%Entry{}, &1))
+
+      ostype = Enum.find(all, &(&1.key == "kernel.ostype"))
+      assert ostype, "expected kernel.ostype in list/0 output"
+      assert ostype.value == "Linux"
+    end
+
+    test "list/0 returns entries sorted by key" do
+      assert {:ok, all} = Sysctl.list()
+      keys = Enum.map(all, & &1.key)
+      assert keys == Enum.sort(keys)
+    end
+
+    test "list/1 with a subtree prefix returns only that subtree" do
+      assert {:ok, net} = Sysctl.list("net.ipv4")
+      assert length(net) > 10
+      assert Enum.all?(net, &String.starts_with?(&1.key, "net.ipv4."))
+    end
+
+    test "list/1 sorts subtree entries by key" do
+      assert {:ok, net} = Sysctl.list("net.ipv4")
+      keys = Enum.map(net, & &1.key)
+      assert keys == Enum.sort(keys)
+    end
+
+    test "list/1 on a leaf returns a single-element list" do
+      assert {:ok, [%Entry{key: "kernel.ostype", value: "Linux"}]} =
+               Sysctl.list("kernel.ostype")
+    end
+
+    test "list/1 stays within the named subtree (no leakage)" do
+      # net.core is a sibling of net.ipv4; list("net.ipv4") must
+      # not include any net.core.* entries.
+      assert {:ok, net} = Sysctl.list("net.ipv4")
+      refute Enum.any?(net, &String.starts_with?(&1.key, "net.core."))
     end
   end
 end

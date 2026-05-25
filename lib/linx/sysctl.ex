@@ -89,13 +89,14 @@ defmodule Linx.Sysctl do
 
   ## Status
 
-  S0–S1 shipped. `supported?/0`, host-side `read/1`, `read_int/1`,
-  `read_ints/1`, and `write/2` with structured `%Linx.Sysctl.Error{}`
-  results are in. Subtree walking lands in S2 and the cross-namespace
-  `:in` option lands in S3. See `docs/sysctl/PLAN.md` for the
-  roadmap.
+  S0–S2 shipped. `supported?/0`, host-side `read/1`, `read_int/1`,
+  `read_ints/1`, `write/2`, subtree walking via `list/0` / `list/1`
+  returning `[%Linx.Sysctl.Entry{}]`, and structured
+  `%Linx.Sysctl.Error{}` results are in. The cross-namespace `:in`
+  option lands in S3. See `docs/sysctl/PLAN.md` for the roadmap.
   """
 
+  alias Linx.Sysctl.Entry
   alias Linx.Sysctl.Error
 
   @procsys "/proc/sys"
@@ -313,26 +314,122 @@ defmodule Linx.Sysctl do
 
   @doc """
   Walks `/proc/sys/` and returns every readable scalar as a list of
-  `%Linx.Sysctl.Entry{}` structs.
+  `%Linx.Sysctl.Entry{}` structs, sorted by key.
 
-  Unreadable nodes (some sysctls return `EPERM` for unprivileged
-  callers) are silently skipped — the returned list is "everything
-  I could see", not "everything that exists".
+  Unreadable nodes (some sysctls return `EACCES` / `EPERM` for
+  unprivileged callers, write-only knobs return `EIO`) are silently
+  skipped — the returned list is "everything I could see", not
+  "everything that exists". On a typical Linux host expect ~1500
+  entries.
 
-  Lands in S2.
+  ## Examples
+
+      iex> {:ok, all} = Linx.Sysctl.list()
+      iex> Enum.find(all, & &1.key == "kernel.ostype")
+      #Linx.Sysctl.Entry<kernel.ostype = "Linux">
+
+  Note: a few sysctl files have dots in their leaf names (interface
+  names like `eth0.10` for VLANs). For those entries the dot-form
+  key isn't unambiguously round-trippable back to a single procfs
+  path. The string is still a faithful representation of where the
+  value came from; consumers that need to act on those should keep
+  the procfs path side-channel.
   """
-  @spec list() :: {:ok, [term()]} | {:error, term()}
-  def list, do: {:error, :not_yet_implemented}
+  @spec list() :: {:ok, [Entry.t()]} | {:error, term()}
+  def list, do: {:ok, @procsys |> walk() |> Enum.sort_by(& &1.key)}
 
   @doc """
   Walks a subtree of `/proc/sys/` named by a dot-form key prefix.
 
   `list("net.ipv4")` returns every readable scalar under
-  `/proc/sys/net/ipv4/`. The trailing `*` is implicit; globs are
-  not accepted.
+  `/proc/sys/net/ipv4/`, sorted by key. The trailing `*` is
+  implicit; globs are not accepted.
 
-  Lands in S2.
+  If the prefix names a leaf rather than a subtree (e.g.
+  `list("kernel.ostype")`), the result is a single-element list
+  containing that entry — convenient if a caller doesn't know in
+  advance whether a given dot-form name is a directory or a file.
+
+  ## Examples
+
+      iex> {:ok, net} = Linx.Sysctl.list("net.ipv4")
+      iex> Enum.all?(net, &String.starts_with?(&1.key, "net.ipv4."))
+      true
+
+      iex> Linx.Sysctl.list("kernel.ostype")  # leaf, not subtree
+      {:ok, [#Linx.Sysctl.Entry<kernel.ostype = "Linux">]}
+
+      iex> Linx.Sysctl.list("linx.does.not.exist")
+      {:error,
+       %Linx.Sysctl.Error{
+         key: "linx.does.not.exist",
+         path: "/proc/sys/linx/does/not/exist",
+         operation: :list,
+         errno: :enoent,
+         code: 2
+       }}
   """
-  @spec list(key()) :: {:ok, [term()]} | {:error, term()}
-  def list(_key_prefix), do: {:error, :not_yet_implemented}
+  @spec list(key()) ::
+          {:ok, [Entry.t()]} | {:error, Error.t() | {:bad_key, term()}}
+  def list(prefix) when is_binary(prefix) do
+    with {:ok, path} <- resolve_key(prefix) do
+      cond do
+        File.dir?(path) ->
+          {:ok, path |> walk() |> Enum.sort_by(& &1.key)}
+
+        File.regular?(path) ->
+          case File.read(path) do
+            {:ok, data} ->
+              {:ok, [%Entry{key: prefix, value: String.trim_trailing(data)}]}
+
+            {:error, posix} ->
+              {:error, Error.from_posix(posix, prefix, path, :list)}
+          end
+
+        true ->
+          {:error, Error.from_posix(:enoent, prefix, path, :list)}
+      end
+    end
+  end
+
+  # Recursive walker. Skips unreadable directories and unreadable
+  # files silently per the PLAN ("everything I could see"). Builds
+  # an unsorted list of %Entry{}; callers Enum.sort_by it at the
+  # top level.
+  defp walk(root), do: walk(root, [])
+
+  defp walk(root, acc) do
+    case File.ls(root) do
+      {:ok, names} ->
+        Enum.reduce(names, acc, fn name, acc ->
+          path = Path.join(root, name)
+
+          cond do
+            File.dir?(path) ->
+              walk(path, acc)
+
+            File.regular?(path) ->
+              case File.read(path) do
+                {:ok, data} ->
+                  [%Entry{key: path_to_key(path), value: String.trim_trailing(data)} | acc]
+
+                {:error, _posix} ->
+                  acc
+              end
+
+            true ->
+              acc
+          end
+        end)
+
+      {:error, _posix} ->
+        acc
+    end
+  end
+
+  defp path_to_key(path) do
+    path
+    |> Path.relative_to(@procsys)
+    |> String.replace("/", ".")
+  end
 end
