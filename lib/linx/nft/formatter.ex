@@ -264,7 +264,30 @@ defmodule Linx.NFT.Formatter do
     do_format_exprs(rest, ["meta #{key} @#{name}" | acc])
   end
 
-  # ---- ct + cmp ----
+  # ---- ct state (compiler emits bitwise + cmp_neq/eq_0 — the
+  # kernel-correct bitmask check pattern). Decode by reading the
+  # bitwise mask back into a list of state names and inverting the
+  # cmp op (cmp_neq_0 means "user wrote :eq", cmp_eq_0 means
+  # "user wrote :neq").
+  defp do_format_exprs(
+         [
+           %Expr{name: :ct, data: %{key: :state}},
+           %Expr{name: :bitwise, data: %{mask: mask}},
+           %Expr{name: :cmp, data: %{op: cmp_op, value: cmp_v}}
+           | rest
+         ],
+         acc
+       ) do
+    bits = :binary.decode_unsigned(mask)
+    states = bits_to_ct_states(bits)
+    user_op = invert_ct_cmp_op(cmp_op, :binary.decode_unsigned(cmp_v))
+    rhs = if length(states) == 1, do: Enum.at(states, 0), else: "{ #{Enum.join(states, ", ")} }"
+    do_format_exprs(rest, [stmt("ct state", render_op(user_op), rhs) | acc])
+  end
+
+  # Fallback for pulled-from-kernel ct state rules that may use
+  # the older ct + cmp shape directly (older kernels / older nft
+  # output).
   defp do_format_exprs(
          [
            %Expr{name: :ct, data: %{key: :state}},
@@ -290,6 +313,10 @@ defmodule Linx.NFT.Formatter do
     rhs = :binary.decode_unsigned(v)
     do_format_exprs(rest, [stmt("ct #{key}", render_op(op), Integer.to_string(rhs)) | acc])
   end
+
+  defp invert_ct_cmp_op(:neq, 0), do: :eq
+  defp invert_ct_cmp_op(:eq, 0), do: :neq
+  defp invert_ct_cmp_op(other, _), do: other
 
   # ---- verdicts ----
   defp do_format_exprs([%Expr{name: :immediate, data: %Verdict{} = v} | rest], acc) do

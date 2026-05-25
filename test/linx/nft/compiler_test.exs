@@ -248,7 +248,7 @@ defmodule Linx.NFT.CompilerTest do
       assert :binary.part(ifname, 0, 4) == "eth0"
     end
 
-    test "ct state established accept" do
+    test "ct state established accept (single state → bitwise + cmp_neq_0)" do
       rs =
         compile!("""
         table inet t {
@@ -260,9 +260,76 @@ defmodule Linx.NFT.CompilerTest do
 
       assert [
                %Expr{name: :ct, data: %{key: :state}},
-               %Expr{name: :cmp, data: %{op: :eq}},
+               %Expr{name: :bitwise, data: %{mask: mask}},
+               %Expr{name: :cmp, data: %{op: :neq, value: <<0::big-32>>}},
                %Expr{name: :immediate, data: %Verdict{kind: :accept}}
              ] = rule.expressions
+
+      # Just one bit set in the mask: the ESTABLISHED bit.
+      assert :binary.decode_unsigned(mask) > 0
+    end
+
+    test "ct state inline-set { established, related } accept" do
+      rs =
+        compile!("""
+        table inet t {
+          chain c { ct state { established, related } accept }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :ct, data: %{key: :state}},
+               %Expr{name: :bitwise, data: %{mask: mask}},
+               %Expr{name: :cmp, data: %{op: :neq, value: <<0::big-32>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+
+      # Two bits OR'd together.
+      bits = :binary.decode_unsigned(mask)
+      assert bits == Bitwise.bor(Linx.Netfilter.Wire.ct_state_bits(:established), Linx.Netfilter.Wire.ct_state_bits(:related))
+    end
+
+    test "ct state comma-no-braces established,related accept" do
+      rs =
+        compile!("""
+        table inet t {
+          chain c { ct state established,related accept }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :ct, data: %{key: :state}},
+               %Expr{name: :bitwise, data: %{mask: mask}},
+               %Expr{name: :cmp, data: %{op: :neq, value: <<0::big-32>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+
+      bits = :binary.decode_unsigned(mask)
+      assert bits == Bitwise.bor(Linx.Netfilter.Wire.ct_state_bits(:established), Linx.Netfilter.Wire.ct_state_bits(:related))
+    end
+
+    test "ct state != invalid drop (inverted op → bitwise + cmp_eq_0)" do
+      rs =
+        compile!("""
+        table inet t {
+          chain c { ct state != invalid drop }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :ct, data: %{key: :state}},
+               %Expr{name: :bitwise, data: %{mask: mask}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<0::big-32>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :drop}}
+             ] = rule.expressions
+
+      assert :binary.decode_unsigned(mask) == Linx.Netfilter.Wire.ct_state_bits(:invalid)
     end
   end
 

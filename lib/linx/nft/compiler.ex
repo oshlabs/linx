@@ -391,6 +391,19 @@ defmodule Linx.NFT.Compiler do
     Expr.lookup(name)
   end
 
+  # ct state with multiple values is a bitmask OR plus bitwise-AND
+  # match, NOT a set lookup. Handle before the generic set_inline /
+  # list catchalls below.
+  defp compile_rhs({:set_inline, elems, meta}, op, :ct_state, state) do
+    bits = ct_state_bits_from_elems!(elems, state, meta)
+    ct_state_match(op, bits)
+  end
+
+  defp compile_rhs({:list, elems, meta}, op, :ct_state, state) do
+    bits = ct_state_bits_from_elems!(elems, state, meta)
+    ct_state_match(op, bits)
+  end
+
   defp compile_rhs({:set_inline, elems, _}, _op, kind, state) do
     set_key_type = set_key_type_for(kind)
     values = Enum.map(elems, &literal_for_set!(&1, set_key_type, state))
@@ -457,8 +470,44 @@ defmodule Linx.NFT.Compiler do
   end
 
   defp compile_rhs({:identifier, name, meta}, op, :ct_state, state) do
+    # ct state matching is a bitmask check: a packet's state field
+    # has at most one bit set, but `ct state X` semantically means
+    # "X bit is set", so the kernel-correct shape is
+    # bitwise-AND with the state's bit, then cmp_neq_zero. For
+    # `ct state != X`, invert the cmp op (cmp_eq_zero).
     bits = ct_state_bits!(String.split(name, ","), state, meta)
-    Expr.cmp(op, <<bits::big-32>>)
+    ct_state_match(op, bits)
+  end
+
+  defp ct_state_bits_from_elems!(elems, state, fallback_meta) do
+    Enum.reduce(elems, 0, fn elem, acc ->
+      case elem do
+        {:identifier, name, _} ->
+          case safe_ct_state_bits(String.to_atom(name)) do
+            nil -> raise_at!(state, value_meta(elem) || fallback_meta, "compiler: unknown ct state `#{name}`")
+            n -> bor(acc, n)
+          end
+
+        other ->
+          raise_at!(state, value_meta(other) || fallback_meta,
+            "compiler: ct state element must be a state name, got #{inspect(other)}"
+          )
+      end
+    end)
+  end
+
+  defp ct_state_match(:eq, bits) do
+    [
+      Expr.bitwise(<<bits::big-32>>, <<0::big-32>>),
+      Expr.cmp(:neq, <<0::big-32>>)
+    ]
+  end
+
+  defp ct_state_match(:neq, bits) do
+    [
+      Expr.bitwise(<<bits::big-32>>, <<0::big-32>>),
+      Expr.cmp(:eq, <<0::big-32>>)
+    ]
   end
 
   defp compile_rhs({:identifier, name, _meta}, op, :ifname, _state) do
