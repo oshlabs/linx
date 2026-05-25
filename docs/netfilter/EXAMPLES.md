@@ -233,9 +233,101 @@ Same shape as every Linx subsystem: BEAM owns the resource;
 BEAM crash → kernel reaps it. The unique Linx shape that no other
 firewall manager exposes naturally.
 
-## (Will land with N3 — NAT chains + NAT expressions)
+## DNAT port-forward (N3)
 
-## (Will land with N3 — NAT chains + NAT expressions)
+Forward incoming TCP/8080 to an internal host's TCP/80. The
+`Expr.dnat_to/3` helper handles register allocation transparently
+— it returns a list of `%Expr{}` (immediate-load of address,
+immediate-load of port, the nat expression) which `Rule.build`
+flattens into the rule's expression list.
+
+```elixir
+alias Linx.Netfilter.{Expr, Rule, Ruleset}
+
+ruleset =
+  Ruleset.new()
+  |> Ruleset.add_table!(:inet, "fwd", flags: [:owner])
+  |> Ruleset.add_chain!("fwd", "prerouting",
+       type: :nat, hook: :prerouting, priority: :dstnat)
+  |> Ruleset.add_rule!("fwd", "prerouting",
+       Rule.build!([
+         Expr.payload(:tcp_dport),
+         Expr.cmp(:eq, <<8080::big-16>>),
+         Expr.dnat_to({10, 0, 0, 5}, 80)
+       ]))
+
+:ok = Linx.Netfilter.push(sock, ruleset)
+```
+
+`dnat_to/3` accepts addresses as IPv4 4-tuples, IPv6 8-tuples,
+raw binaries, strings (parsed via `Linx.IP.parse/1`), or
+`%Linx.IP{}` structs.
+
+## Masquerade (N3)
+
+Source-NAT to the outgoing interface's primary address — the
+right shape when the public IP isn't known at rule-write time
+(DHCP-assigned WAN, PPP links). Only valid in postrouting chains.
+
+```elixir
+Ruleset.new()
+|> Ruleset.add_table!(:inet, "nat", flags: [:owner])
+|> Ruleset.add_chain!("nat", "postrouting",
+     type: :nat, hook: :postrouting, priority: :srcnat)
+|> Ruleset.add_rule!("nat", "postrouting",
+     Rule.build!([Expr.masquerade()]))
+```
+
+Add `flags: [:random]` or `:fully_random` to randomize port
+selection; `:persistent` to keep the same client on the same
+outbound port for connection stability.
+
+## Hairpin NAT (N3)
+
+The DNAT-then-SNAT pattern for "talk to my public address from
+inside the LAN and have it reach the internal service correctly".
+Composes from primitives — two NAT rules in two chains:
+
+```elixir
+Ruleset.new()
+|> Ruleset.add_table!(:inet, "hairpin", flags: [:owner])
+|> Ruleset.add_chain!("hairpin", "prerouting",
+     type: :nat, hook: :prerouting, priority: :dstnat)
+|> Ruleset.add_chain!("hairpin", "postrouting",
+     type: :nat, hook: :postrouting, priority: :srcnat)
+|> Ruleset.add_rule!("hairpin", "prerouting",
+     Rule.build!([
+       Expr.payload(:tcp_dport),
+       Expr.cmp(:eq, <<8080::big-16>>),
+       Expr.dnat_to({10, 0, 0, 5}, 80)
+     ]))
+|> Ruleset.add_rule!("hairpin", "postrouting",
+     Rule.build!([
+       Expr.payload(:ip_daddr),
+       Expr.cmp(:eq, <<10, 0, 0, 5>>),
+       Expr.payload(:tcp_dport),
+       Expr.cmp(:eq, <<80::big-16>>),
+       Expr.snat_to({192, 168, 1, 1})
+     ]))
+```
+
+## Redirect to local port (N3)
+
+DNAT to the local machine on a different port — the right shape
+for transparent proxies or port-shifting on a single host.
+
+```elixir
+Ruleset.new()
+|> Ruleset.add_table!(:inet, "proxy", flags: [:owner])
+|> Ruleset.add_chain!("proxy", "prerouting",
+     type: :nat, hook: :prerouting, priority: :dstnat)
+|> Ruleset.add_rule!("proxy", "prerouting",
+     Rule.build!([
+       Expr.payload(:tcp_dport),
+       Expr.cmp(:eq, <<80::big-16>>),
+       Expr.redirect(port: 8080)
+     ]))
+```
 
 ## (Will land with N4 — sets, maps, vmaps, dynamic sets)
 

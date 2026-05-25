@@ -129,8 +129,16 @@ defmodule Linx.Netfilter.Rule do
     end
   end
 
+  # Flattens one level of nesting so that helpers returning a list
+  # of `%Expr{}` (e.g. `Expr.dnat_to/3`, `Expr.masquerade/1`) can be
+  # dropped straight into a rule's expression list without manual
+  # `++` splicing.
   defp normalize_expressions(expressions) do
     expressions
+    |> Enum.flat_map(fn
+      list when is_list(list) -> list
+      other -> [other]
+    end)
     |> Enum.reduce_while({:ok, []}, fn item, {:ok, acc} ->
       case normalize_one(item) do
         {:ok, expr} -> {:cont, {:ok, [expr | acc]}}

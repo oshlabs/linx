@@ -192,6 +192,9 @@ defmodule Linx.Netfilter.Decoder do
   defp expr_name_atom("lookup"), do: :lookup
   defp expr_name_atom("reject"), do: :reject
   defp expr_name_atom("counter"), do: :counter
+  defp expr_name_atom("nat"), do: :nat
+  defp expr_name_atom("masq"), do: :masq
+  defp expr_name_atom("redir"), do: :redir
   defp expr_name_atom(other) when is_binary(other), do: other
 
   defp decode_expr_data(_name, nil), do: nil
@@ -277,6 +280,47 @@ defmodule Linx.Netfilter.Decoder do
     bytes = get_u64_be(attrs, nfta_counter_bytes(), 0)
     packets = get_u64_be(attrs, nfta_counter_packets(), 0)
     %{packets: packets, bytes: bytes}
+  end
+
+  defp decode_expr_data(:nat, bin) do
+    attrs = Attr.decode(bin)
+    type_int = get_u32_be(attrs, nfta_nat_type(), 0)
+    family_int = get_u32_be(attrs, nfta_nat_family(), 0)
+    flags_int = get_u32_be(attrs, nfta_nat_flags(), 0)
+
+    type = if type_int == nft_nat_dnat(), do: :dnat, else: :snat
+
+    %{
+      type: type,
+      family: Wire.family_atom(family_int),
+      reg_addr_min: get_u32_be(attrs, nfta_nat_reg_addr_min(), nil),
+      reg_addr_max: get_u32_be(attrs, nfta_nat_reg_addr_max(), nil),
+      reg_proto_min: get_u32_be(attrs, nfta_nat_reg_proto_min(), nil),
+      reg_proto_max: get_u32_be(attrs, nfta_nat_reg_proto_max(), nil),
+      flags: Wire.nat_flags_atoms(flags_int)
+    }
+  end
+
+  defp decode_expr_data(:masq, bin) do
+    attrs = Attr.decode(bin)
+    flags_int = get_u32_be(attrs, nfta_masq_flags(), 0)
+
+    %{
+      flags: Wire.nat_flags_atoms(flags_int),
+      reg_proto_min: get_u32_be(attrs, nfta_masq_reg_proto_min(), nil),
+      reg_proto_max: get_u32_be(attrs, nfta_masq_reg_proto_max(), nil)
+    }
+  end
+
+  defp decode_expr_data(:redir, bin) do
+    attrs = Attr.decode(bin)
+    flags_int = get_u32_be(attrs, nfta_redir_flags(), 0)
+
+    %{
+      flags: Wire.nat_flags_atoms(flags_int),
+      reg_proto_min: get_u32_be(attrs, nfta_redir_reg_proto_min(), nil),
+      reg_proto_max: get_u32_be(attrs, nfta_redir_reg_proto_max(), nil)
+    }
   end
 
   defp decode_expr_data(_name, bin), do: bin

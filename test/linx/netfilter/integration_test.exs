@@ -423,6 +423,216 @@ defmodule Linx.Netfilter.IntegrationTest do
       assert n2 in names
     end
 
+    test "DNAT port-forward: tcp dport 8080 → 10.0.0.5:80" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Chain, Encoder, Expr, Rule, Ruleset}
+
+      table_name = unique_name("nat_dnat")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "prerouting",
+          type: :nat,
+          hook: :prerouting,
+          priority: :dstnat
+        )
+        |> Ruleset.add_rule!(table_name, "prerouting",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<8080::big-16>>),
+            Expr.dnat_to({10, 0, 0, 5}, 80)
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/type nat hook prerouting priority dstnat/
+      assert nft_out =~ ~r/dnat .* 10\.0\.0\.5(:80)?/
+    end
+
+    test "masquerade postrouting" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Chain, Encoder, Expr, Rule, Ruleset}
+
+      table_name = unique_name("nat_masq")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "postrouting",
+          type: :nat,
+          hook: :postrouting,
+          priority: :srcnat
+        )
+        |> Ruleset.add_rule!(table_name, "postrouting",
+          Rule.build!([Expr.masquerade()])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/type nat hook postrouting priority srcnat/
+      assert nft_out =~ ~r/masquerade/
+    end
+
+    test "masquerade with :random flag" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset}
+
+      table_name = unique_name("nat_masq_random")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "postrouting",
+          type: :nat,
+          hook: :postrouting,
+          priority: :srcnat
+        )
+        |> Ruleset.add_rule!(table_name, "postrouting",
+          Rule.build!([Expr.masquerade(flags: [:random])])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/masquerade .*random/
+    end
+
+    test "redirect to local port" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset}
+
+      table_name = unique_name("nat_redir")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "prerouting",
+          type: :nat,
+          hook: :prerouting,
+          priority: :dstnat
+        )
+        |> Ruleset.add_rule!(table_name, "prerouting",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<80::big-16>>),
+            Expr.redirect(port: 8080)
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      assert nft_out =~ ~r/redirect/
+      assert nft_out =~ ~r/8080/
+    end
+
+    test "hairpin NAT: DNAT in prerouting + SNAT in postrouting" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset}
+
+      table_name = unique_name("nat_hairpin")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "prerouting",
+          type: :nat,
+          hook: :prerouting,
+          priority: :dstnat
+        )
+        |> Ruleset.add_chain!(table_name, "postrouting",
+          type: :nat,
+          hook: :postrouting,
+          priority: :srcnat
+        )
+        |> Ruleset.add_rule!(table_name, "prerouting",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<8080::big-16>>),
+            Expr.dnat_to({10, 0, 0, 5}, 80)
+          ])
+        )
+        |> Ruleset.add_rule!(table_name, "postrouting",
+          Rule.build!([
+            Expr.payload(:ip_daddr),
+            Expr.cmp(:eq, <<10, 0, 0, 5>>),
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<80::big-16>>),
+            Expr.snat_to({192, 168, 1, 1})
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+
+      {nft_out, 0} =
+        System.cmd("nft", ["list", "table", "inet", table_name], stderr_to_stdout: true)
+
+      # Both chains and both NAT rules present.
+      assert nft_out =~ ~r/chain prerouting/
+      assert nft_out =~ ~r/chain postrouting/
+      assert nft_out =~ ~r/dnat .* 10\.0\.0\.5/
+      assert nft_out =~ ~r/snat .* 192\.168\.1\.1/
+    end
+
+    test "NAT round-trip via pull/2" do
+      {:ok, sock} = Nfnl.open()
+      on_exit(fn -> Socket.close(sock) end)
+
+      alias Linx.Netfilter.{Expr, Rule, Ruleset}
+
+      table_name = unique_name("nat_roundtrip")
+
+      ruleset =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, table_name, flags: [:owner])
+        |> Ruleset.add_chain!(table_name, "prerouting",
+          type: :nat,
+          hook: :prerouting,
+          priority: :dstnat
+        )
+        |> Ruleset.add_rule!(table_name, "prerouting",
+          Rule.build!([
+            Expr.payload(:tcp_dport),
+            Expr.cmp(:eq, <<8080::big-16>>),
+            Expr.dnat_to({10, 0, 0, 5}, 80)
+          ])
+        )
+
+      assert :ok = Netfilter.push(sock, ruleset)
+      assert {:ok, pulled} = Netfilter.pull(sock, {:inet, table_name})
+
+      [{:inet, ^table_name, t}] = Ruleset.tables(pulled)
+      assert t.chains["prerouting"].type == :nat
+      assert t.chains["prerouting"].hook == :prerouting
+
+      [rule] = t.chains["prerouting"].rules
+      # Expressions: payload + cmp + 2 immediates (addr, port) + nat
+      assert length(rule.expressions) == 5
+      assert Enum.any?(rule.expressions, &match?(%Expr{name: :nat, data: %{type: :dnat}}, &1))
+    end
+
     test "jump verdict to a regular chain" do
       {:ok, sock} = Nfnl.open()
       on_exit(fn -> Socket.close(sock) end)

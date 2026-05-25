@@ -294,6 +294,245 @@ defmodule Linx.Netfilter.Expr do
     }
   end
 
+  # ===========================================================
+  # N3 — NAT family (nat / masquerade / redirect)
+  # ===========================================================
+
+  @doc """
+  Low-level NAT expression. Most callers want `dnat_to/2` or
+  `snat_to/2` — those construct the accompanying immediate-load
+  expressions automatically. Use `nat/2` directly when you need
+  fine control over register choices, ranges, or flags.
+
+  Required:
+
+    * `:type` — `:dnat` or `:snat`.
+    * `:family` — `:ip` | `:ip6`. Required even in an `:inet`
+      table; the NAT expression needs to know the address size.
+
+  Optional:
+
+    * `:reg_addr_min` — register holding the min (or only) target
+      address. Defaults to `nil` (no address remap — only
+      meaningful for SNAT in some configs).
+    * `:reg_addr_max` — register holding the max address of a
+      range. `nil` for single-address NAT.
+    * `:reg_proto_min` / `:reg_proto_max` — port range registers.
+    * `:flags` — `[:random, :fully_random, :persistent, :netmap]`.
+      The encoder automatically sets `:map_ips` when address regs
+      are present and `:proto_specified` when port regs are
+      present.
+  """
+  @spec nat(atom(), keyword()) :: t()
+  def nat(type, opts \\ []) when type in [:dnat, :snat] and is_list(opts) do
+    %__MODULE__{
+      name: :nat,
+      data: %{
+        type: type,
+        family: Keyword.get(opts, :family, :ip),
+        reg_addr_min: Keyword.get(opts, :reg_addr_min),
+        reg_addr_max: Keyword.get(opts, :reg_addr_max),
+        reg_proto_min: Keyword.get(opts, :reg_proto_min),
+        reg_proto_max: Keyword.get(opts, :reg_proto_max),
+        flags: Keyword.get(opts, :flags, [])
+      }
+    }
+  end
+
+  @doc """
+  Builds a DNAT statement — destination NAT to `addr` (and
+  optionally `port`).
+
+  Returns a **list** of `%Expr{}`: an immediate-load of the
+  address into a register, an optional immediate-load of the port,
+  then the nat expression itself. `Rule.build/2` flattens nested
+  lists, so this composes naturally:
+
+      Rule.build([
+        Expr.payload(:tcp_dport),
+        Expr.cmp(:eq, <<8080::big-16>>),
+        Expr.dnat_to({10, 0, 0, 5}, 80)
+      ])
+
+  `addr` may be:
+
+    * an IPv4 4-tuple — `{10, 0, 0, 5}`.
+    * an IPv6 8-tuple — `{0xfc00, 0, 0, 0, 0, 0, 0, 1}`.
+    * a raw binary — 4 bytes for IPv4, 16 for IPv6.
+    * a `%Linx.IP{}` struct.
+    * a string — `"10.0.0.5"` / `"fc00::1"` (parsed via `Linx.IP.parse/1`).
+
+  `port` is a non-negative integer (encoded big-endian 16-bit), or
+  `nil` for address-only NAT.
+
+  Options:
+
+    * `:flags` — passed through to `nat/2` (`:random`, `:persistent`, …).
+    * `:reg_addr` / `:reg_port` — override the default register
+      choice (`1` for addr, `2` for port).
+  """
+  @spec dnat_to(addr_input(), pos_integer() | nil, keyword()) :: [t()]
+  def dnat_to(addr, port \\ nil, opts \\ []), do: nat_helper(:dnat, addr, port, opts)
+
+  @doc """
+  Builds an SNAT statement — source NAT to `addr` (and optionally
+  `port`). Same shape as `dnat_to/3`.
+
+  SNAT is meaningful in postrouting chains; the kernel rejects
+  SNAT in prerouting / output.
+  """
+  @spec snat_to(addr_input(), pos_integer() | nil, keyword()) :: [t()]
+  def snat_to(addr, port \\ nil, opts \\ []), do: nat_helper(:snat, addr, port, opts)
+
+  @typedoc """
+  Address-input forms accepted by `dnat_to/3` / `snat_to/3`.
+  """
+  @type addr_input ::
+          {0..255, 0..255, 0..255, 0..255}
+          | {0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF}
+          | <<_::32>>
+          | <<_::128>>
+          | String.t()
+          | Linx.IP.t()
+
+  defp nat_helper(type, addr, port, opts) do
+    {addr_bin, family} = normalize_addr(addr)
+    reg_addr = Keyword.get(opts, :reg_addr, 1)
+    reg_port = Keyword.get(opts, :reg_port, 2)
+    flags = Keyword.get(opts, :flags, [])
+
+    immediates =
+      [immediate_load(addr_bin, reg_addr)] ++
+        if port, do: [immediate_load(<<port::big-16>>, reg_port)], else: []
+
+    nat_opts =
+      [
+        family: family,
+        reg_addr_min: reg_addr,
+        flags: flags
+      ] ++ if port, do: [reg_proto_min: reg_port], else: []
+
+    immediates ++ [nat(type, nat_opts)]
+  end
+
+  defp immediate_load(bin, dreg) when is_binary(bin) do
+    %__MODULE__{name: :immediate, data: %{dreg: dreg, value: bin}}
+  end
+
+  defp normalize_addr({a, b, c, d}) when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255,
+    do: {<<a, b, c, d>>, :ip}
+
+  defp normalize_addr({a, b, c, d, e, f, g, h})
+       when a in 0..0xFFFF and b in 0..0xFFFF and c in 0..0xFFFF and d in 0..0xFFFF and
+              e in 0..0xFFFF and f in 0..0xFFFF and g in 0..0xFFFF and h in 0..0xFFFF,
+       do: {<<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>, :ip6}
+
+  defp normalize_addr(<<_::32>> = bin), do: {bin, :ip}
+  defp normalize_addr(<<_::128>> = bin), do: {bin, :ip6}
+
+  defp normalize_addr(%Linx.IP{family: :inet, bytes: bin}), do: {bin, :ip}
+  defp normalize_addr(%Linx.IP{family: :inet6, bytes: bin}), do: {bin, :ip6}
+
+  defp normalize_addr(string) when is_binary(string) do
+    case Linx.IP.parse(string) do
+      {:ok, ip} -> normalize_addr(ip)
+      {:error, _} -> raise ArgumentError, "invalid NAT address: #{inspect(string)}"
+    end
+  end
+
+  defp normalize_addr(other),
+    do: raise(ArgumentError, "invalid NAT address: #{inspect(other)}")
+
+  @doc """
+  Masquerade expression — SNAT to the outgoing interface's primary
+  address. The kernel resolves the address at packet-traversal
+  time, which makes this the right choice for setups where the
+  outbound IP isn't known at rule-write time (DHCP-assigned WAN,
+  PPP links).
+
+  Only valid in postrouting chains.
+
+  Options:
+
+    * `:flags` — `[:random, :fully_random, :persistent]`.
+    * `:port_min` / `:port_max` — masquerade with a specific
+      port-range remap (rare; kernel default reuses the original
+      source port).
+  """
+  @spec masquerade(keyword()) :: t() | [t()]
+  def masquerade(opts \\ []) when is_list(opts) do
+    flags = Keyword.get(opts, :flags, [])
+    port_min = Keyword.get(opts, :port_min)
+    port_max = Keyword.get(opts, :port_max)
+    reg_proto = Keyword.get(opts, :reg_proto, 1)
+
+    cond do
+      is_nil(port_min) ->
+        %__MODULE__{
+          name: :masq,
+          data: %{flags: flags, reg_proto_min: nil, reg_proto_max: nil}
+        }
+
+      is_nil(port_max) or port_max == port_min ->
+        [
+          immediate_load(<<port_min::big-16>>, reg_proto),
+          %__MODULE__{
+            name: :masq,
+            data: %{flags: flags, reg_proto_min: reg_proto, reg_proto_max: nil}
+          }
+        ]
+
+      true ->
+        [
+          immediate_load(<<port_min::big-16>>, reg_proto),
+          immediate_load(<<port_max::big-16>>, reg_proto + 1),
+          %__MODULE__{
+            name: :masq,
+            data: %{flags: flags, reg_proto_min: reg_proto, reg_proto_max: reg_proto + 1}
+          }
+        ]
+    end
+  end
+
+  @doc """
+  Redirect expression — DNAT to the local machine, optionally
+  changing the destination port. The kernel uses the input
+  interface's address as the new destination, which makes this
+  the right choice for transparent proxies / port-shifting on a
+  single host.
+
+  Only valid in prerouting / output chains.
+
+  Options:
+
+    * `:port` — redirect to this port (16-bit). Omit to keep the
+      original port.
+    * `:flags` — `[:random, :fully_random]`.
+  """
+  @spec redirect(keyword()) :: t() | [t()]
+  def redirect(opts \\ []) when is_list(opts) do
+    port = Keyword.get(opts, :port)
+    flags = Keyword.get(opts, :flags, [])
+    reg_proto = Keyword.get(opts, :reg_proto, 1)
+
+    case port do
+      nil ->
+        %__MODULE__{
+          name: :redir,
+          data: %{flags: flags, reg_proto_min: nil, reg_proto_max: nil}
+        }
+
+      p when is_integer(p) and p in 0..0xFFFF ->
+        [
+          immediate_load(<<p::big-16>>, reg_proto),
+          %__MODULE__{
+            name: :redir,
+            data: %{flags: flags, reg_proto_min: reg_proto, reg_proto_max: nil}
+          }
+        ]
+    end
+  end
+
   defimpl Inspect do
     def inspect(
           %Linx.Netfilter.Expr{name: :immediate, data: %Linx.Netfilter.Verdict{} = v},

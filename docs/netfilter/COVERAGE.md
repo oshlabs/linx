@@ -74,11 +74,13 @@ A living doc — update as primitives ship. Status legend:
 
 | Feature | Status | Notes |
 |---|---|---|
-| `type nat` chain support | ⬜ | N3 |
-| `Expr.nat/2` (dnat / snat with address + port ranges, flags) | ⬜ | N3 |
-| `Expr.masquerade/1` | ⬜ | N3 |
-| `Expr.redirect/1` | ⬜ | N3 |
-| Hairpin NAT (DNAT + SNAT pattern) | ⬜ | N3 — documented in EXAMPLES |
+| `type nat` chain support | ✅ | N3 — chain validator allows it in ip/ip6/inet; restricted to nat-applicable hooks |
+| `Expr.nat/2` (low-level dnat / snat with register references + flags) | ✅ | N3 |
+| `Expr.dnat_to/3` / `Expr.snat_to/3` (high-level: addr + optional port → list of expressions) | ✅ | N3 — accepts IPv4/IPv6 tuples, binaries, strings, `%Linx.IP{}` |
+| `Expr.masquerade/1` | ✅ | N3 — flags `:random` / `:fully_random` / `:persistent`; port-range option |
+| `Expr.redirect/1` | ✅ | N3 — optional `:port` and flags |
+| Hairpin NAT (DNAT + SNAT pattern) | ✅ | N3 — composes naturally with the pipeline DSL; tested |
+| `Rule.build` flattens nested list expressions | ✅ | N3 — `Expr.dnat_to/3` etc. drop into a rule's expression list directly |
 
 ## Sets / maps / vmaps
 

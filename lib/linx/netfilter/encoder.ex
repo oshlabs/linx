@@ -449,8 +449,101 @@ defmodule Linx.Netfilter.Encoder do
     ]
   end
 
+  defp encode_expr_data(:nat, %{
+         type: type,
+         family: family,
+         reg_addr_min: reg_addr_min,
+         reg_addr_max: reg_addr_max,
+         reg_proto_min: reg_proto_min,
+         reg_proto_max: reg_proto_max,
+         flags: flags
+       }) do
+    type_int =
+      case type do
+        :snat -> nft_nat_snat()
+        :dnat -> nft_nat_dnat()
+      end
+
+    family_int = Wire.family_num(family)
+
+    # Auto-set the convention flags: MAP_IPS when address regs are
+    # set, PROTO_SPECIFIED when port regs are set. The kernel
+    # actually decides what to remap based on which REG attrs are
+    # present, but libnftnl always sets these flags too — so we
+    # match for compatibility.
+    auto_flags =
+      flags
+      |> maybe_append(reg_addr_min != nil, :map_ips)
+      |> maybe_append(reg_proto_min != nil, :proto_specified)
+
+    flags_int = Wire.nat_flags_int(auto_flags)
+
+    [
+      {nfta_nat_type(), Wire.u32_be(type_int)},
+      {nfta_nat_family(), Wire.u32_be(family_int)}
+    ]
+    |> maybe_add(not is_nil(reg_addr_min), fn ->
+      {nfta_nat_reg_addr_min(), Wire.u32_be(reg_addr_min)}
+    end)
+    |> maybe_add(not is_nil(reg_addr_max), fn ->
+      {nfta_nat_reg_addr_max(), Wire.u32_be(reg_addr_max)}
+    end)
+    |> maybe_add(not is_nil(reg_proto_min), fn ->
+      {nfta_nat_reg_proto_min(), Wire.u32_be(reg_proto_min)}
+    end)
+    |> maybe_add(not is_nil(reg_proto_max), fn ->
+      {nfta_nat_reg_proto_max(), Wire.u32_be(reg_proto_max)}
+    end)
+    |> maybe_add(flags_int != 0, fn ->
+      {nfta_nat_flags(), Wire.u32_be(flags_int)}
+    end)
+  end
+
+  defp encode_expr_data(:masq, %{
+         flags: flags,
+         reg_proto_min: reg_proto_min,
+         reg_proto_max: reg_proto_max
+       }) do
+    auto_flags = maybe_append(flags, reg_proto_min != nil, :proto_specified)
+    flags_int = Wire.nat_flags_int(auto_flags)
+
+    []
+    |> maybe_add(flags_int != 0, fn ->
+      {nfta_masq_flags(), Wire.u32_be(flags_int)}
+    end)
+    |> maybe_add(not is_nil(reg_proto_min), fn ->
+      {nfta_masq_reg_proto_min(), Wire.u32_be(reg_proto_min)}
+    end)
+    |> maybe_add(not is_nil(reg_proto_max), fn ->
+      {nfta_masq_reg_proto_max(), Wire.u32_be(reg_proto_max)}
+    end)
+  end
+
+  defp encode_expr_data(:redir, %{
+         flags: flags,
+         reg_proto_min: reg_proto_min,
+         reg_proto_max: reg_proto_max
+       }) do
+    auto_flags = maybe_append(flags, reg_proto_min != nil, :proto_specified)
+    flags_int = Wire.nat_flags_int(auto_flags)
+
+    []
+    |> maybe_add(not is_nil(reg_proto_min), fn ->
+      {nfta_redir_reg_proto_min(), Wire.u32_be(reg_proto_min)}
+    end)
+    |> maybe_add(not is_nil(reg_proto_max), fn ->
+      {nfta_redir_reg_proto_max(), Wire.u32_be(reg_proto_max)}
+    end)
+    |> maybe_add(flags_int != 0, fn ->
+      {nfta_redir_flags(), Wire.u32_be(flags_int)}
+    end)
+  end
+
   # Unknown expression — emit empty data; kernel will reject.
   defp encode_expr_data(_name, _data), do: []
+
+  defp maybe_append(list, true, item), do: list ++ [item]
+  defp maybe_append(list, false, _item), do: list
 
   defp default_reject_code(:tcp_reset), do: nil
   defp default_reject_code(_), do: 3

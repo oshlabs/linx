@@ -214,6 +214,38 @@ defmodule Linx.Netfilter.Wire do
   defmacro nfta_counter_packets, do: 2
   defmacro nfta_counter_pad, do: 3
 
+  # NFTA_NAT_* (nft_nat expression)
+  defmacro nfta_nat_type, do: 1
+  defmacro nfta_nat_family, do: 2
+  defmacro nfta_nat_reg_addr_min, do: 3
+  defmacro nfta_nat_reg_addr_max, do: 4
+  defmacro nfta_nat_reg_proto_min, do: 5
+  defmacro nfta_nat_reg_proto_max, do: 6
+  defmacro nfta_nat_flags, do: 7
+
+  # NFT_NAT_* — NAT direction
+  defmacro nft_nat_snat, do: 0
+  defmacro nft_nat_dnat, do: 1
+
+  # NFTA_MASQ_* (nft_masq expression)
+  defmacro nfta_masq_flags, do: 1
+  defmacro nfta_masq_reg_proto_min, do: 2
+  defmacro nfta_masq_reg_proto_max, do: 3
+
+  # NFTA_REDIR_* (nft_redir expression)
+  defmacro nfta_redir_reg_proto_min, do: 1
+  defmacro nfta_redir_reg_proto_max, do: 2
+  defmacro nfta_redir_flags, do: 3
+
+  # NF_NAT_RANGE_* — flag bitmask for NAT/masquerade/redirect
+  defmacro nf_nat_range_map_ips, do: 0x01
+  defmacro nf_nat_range_proto_specified, do: 0x02
+  defmacro nf_nat_range_proto_random, do: 0x04
+  defmacro nf_nat_range_persistent, do: 0x08
+  defmacro nf_nat_range_proto_random_fully, do: 0x10
+  defmacro nf_nat_range_proto_offset, do: 0x20
+  defmacro nf_nat_range_netmap, do: 0x40
+
   # ===========================================================
   # Mapping helpers (atom → integer / vice versa)
   # ===========================================================
@@ -587,6 +619,57 @@ defmodule Linx.Netfilter.Wire do
       :inv, acc -> acc ||| 1
       _, acc -> acc
     end)
+  end
+
+  # ===========================================================
+  # NAT flags (NF_NAT_RANGE_*)
+  # ===========================================================
+
+  @doc """
+  Maps a NAT-flags list to the u32 bitmask the kernel expects in
+  `NFTA_NAT_FLAGS` / `NFTA_MASQ_FLAGS` / `NFTA_REDIR_FLAGS`.
+
+  Accepted atoms:
+
+    * `:random` — randomize port selection (`NF_NAT_RANGE_PROTO_RANDOM`).
+    * `:fully_random` — fully randomize, including per-connection
+      (`NF_NAT_RANGE_PROTO_RANDOM_FULLY`).
+    * `:persistent` — same client gets same NAT mapping
+      (`NF_NAT_RANGE_PERSISTENT`).
+    * `:netmap` — preserve the host portion of the address while
+      remapping the network portion (`NF_NAT_RANGE_NETMAP`, 5.0+).
+
+  Note: `:map_ips` and `:proto_specified` are usually set by the
+  encoder based on whether addresses / ports are provided, not by
+  the caller.
+  """
+  @spec nat_flags_int([atom()]) :: non_neg_integer()
+  def nat_flags_int(flags) when is_list(flags) do
+    import Bitwise
+
+    Enum.reduce(flags, 0, fn
+      :map_ips, acc -> acc ||| 0x01
+      :proto_specified, acc -> acc ||| 0x02
+      :random, acc -> acc ||| 0x04
+      :persistent, acc -> acc ||| 0x08
+      :fully_random, acc -> acc ||| 0x10
+      :netmap, acc -> acc ||| 0x40
+      _, acc -> acc
+    end)
+  end
+
+  @doc "Decodes a NAT-flags u32 bitmask into a list of atoms."
+  @spec nat_flags_atoms(non_neg_integer()) :: [atom()]
+  def nat_flags_atoms(flags) when is_integer(flags) do
+    import Bitwise
+
+    []
+    |> append_if((flags &&& 0x01) != 0, :map_ips)
+    |> append_if((flags &&& 0x02) != 0, :proto_specified)
+    |> append_if((flags &&& 0x04) != 0, :random)
+    |> append_if((flags &&& 0x08) != 0, :persistent)
+    |> append_if((flags &&& 0x10) != 0, :fully_random)
+    |> append_if((flags &&& 0x40) != 0, :netmap)
   end
 
   # ===========================================================
