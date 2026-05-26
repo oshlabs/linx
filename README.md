@@ -27,68 +27,68 @@ Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Wi
 Linx's value isn't any single subsystem — it's that they all hook into the same `Linx.Process` *checkpoint*, the window between `clone(2)` and `execve(2)` where the child is parked. Inside that window a workload's identity, resource ceiling, network, privileges, and syscall surface are all decided at once, before its first instruction.
 
 ```elixir
-iex> alias Linx.{Process, User, Cgroup, Capabilities, Seccomp}
-iex> alias Linx.Netlink.Rtnl
+alias Linx.{Process, User, Cgroup, Capabilities, Seccomp}
+alias Linx.Netlink.Rtnl
 
-iex> {:ok, c} =
-...>   Process.spawn(
-...>     argv: ["/usr/sbin/nginx"],
-...>     namespaces: [:net, :pid, :user],
-...>     no_new_privs: true
-...>   )
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = Process.host_pid(c)
+{:ok, c} =
+  Process.spawn(
+    argv: ["/usr/sbin/nginx"],
+    namespaces: [:net, :pid, :user],
+    no_new_privs: true
+  )
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = Process.host_pid(c)
 
 # Identity:  root inside ↔ this uid outside.
-iex> my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
-iex> my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integer()
-iex> :ok = User.setup_maps(host_pid,
-...>         uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
+my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
+my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integer()
+:ok = User.setup_maps(host_pid,
+        uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
 
 # Resources: 256 MiB / half a CPU.
-iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/nginx-42")
-iex> :ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
-iex> :ok = Cgroup.set_cpu_max(cg, {50_000, 100_000})
-iex> :ok = Cgroup.add_process(cg, host_pid)
+{:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/nginx-42")
+:ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
+:ok = Cgroup.set_cpu_max(cg, {50_000, 100_000})
+:ok = Cgroup.add_process(cg, host_pid)
 
 # Network:   a macvlan with an address and a default route.
-iex> {:ok, host_sock} = Rtnl.open()
-iex> :ok = Rtnl.Link.create_macvlan(host_sock, "ct0", "eth0", :bridge)
-iex> :ok = Rtnl.Link.move_to_netns(host_sock, "ct0", host_pid)
-iex> {:ok, ns} = Rtnl.open({:pid, host_pid})
-iex> :ok = Rtnl.Link.set_up(ns, "ct0")
-iex> :ok = Rtnl.Address.add(ns, "ct0", "10.0.0.5", 24)
-iex> :ok = Rtnl.Route.add_default(ns, "10.0.0.1")
+{:ok, host_sock} = Rtnl.open()
+:ok = Rtnl.Link.create_macvlan(host_sock, "ct0", "eth0", :bridge)
+:ok = Rtnl.Link.move_to_netns(host_sock, "ct0", host_pid)
+{:ok, ns} = Rtnl.open({:pid, host_pid})
+:ok = Rtnl.Link.set_up(ns, "ct0")
+:ok = Rtnl.Address.add(ns, "ct0", "10.0.0.5", 24)
+:ok = Rtnl.Route.add_default(ns, "10.0.0.1")
 
 # Firewall:  default drop, allow established + ssh; rules vanish when we do.
-iex> {:ok, ct_nfnl} = Linx.Netlink.Nfnl.open({:pid, host_pid})
-iex> :ok = Linx.Netfilter.push(ct_nfnl, ~NFT"""
-...>   table inet guard {
-...>     chain input {
-...>       type filter hook input priority 0
-...>       policy drop
-...>       ct state established accept
-...>       tcp dport 22 accept
-...>     }
-...>   }
-...> """)
+{:ok, ct_nfnl} = Linx.Netlink.Nfnl.open({:pid, host_pid})
+:ok = Linx.Netfilter.push(ct_nfnl, ~NFT"""
+  table inet guard {
+    chain input {
+      type filter hook input priority 0
+      policy drop
+      ct state established accept
+      tcp dport 22 accept
+    }
+  }
+""")
 
 # Privilege: only cap_net_bind_service.
-iex> all = Linx.Capabilities.Constants.all()
-iex> :ok = Capabilities.drop_bounding(c,
-...>         MapSet.difference(all, MapSet.new([:cap_net_bind_service])))
+all = Linx.Capabilities.Constants.all()
+:ok = Capabilities.drop_bounding(c,
+        MapSet.difference(all, MapSet.new([:cap_net_bind_service])))
 
 # Syscalls:  only what nginx actually needs.
-iex> nginx_syscalls = ~w(read write openat close fstat brk mmap munmap mprotect
-...>                     socket bind listen accept4 setsockopt getsockopt
-...>                     rt_sigaction rt_sigprocmask rt_sigreturn exit_group
-...>                     epoll_pwait epoll_ctl epoll_create1 clock_gettime futex)a
-iex> {:ok, filter} = Seccomp.allow_list(nginx_syscalls, default: :kill_process)
-iex> :ok = Seccomp.install(c, filter)
+nginx_syscalls = ~w(read write openat close fstat brk mmap munmap mprotect
+                    socket bind listen accept4 setsockopt getsockopt
+                    rt_sigaction rt_sigprocmask rt_sigreturn exit_group
+                    epoll_pwait epoll_ctl epoll_create1 clock_gettime futex)a
+{:ok, filter} = Seccomp.allow_list(nginx_syscalls, default: :kill_process)
+:ok = Seccomp.install(c, filter)
 
 # Release the workload. Every constraint above is in force from
 # the moment execve(2) runs.
-iex> :ok = Process.proceed(c)
+:ok = Process.proceed(c)
 ```
 
 The subsystems are independent — you can spawn without namespaces, use netlink without spawning, drop caps without seccomp. They compose cleanly because they share one primitive (the checkpoint), not because there's a framework holding them together. The sections below walk through each subsystem in isolation; the "Going further" recipes that follow show progressively richer compositions, each layering one more subsystem onto a base spawn.
@@ -98,26 +98,26 @@ The subsystems are independent — you can spawn without namespaces, use netlink
 A workload spawned with `:user` in the namespaces list gets its own user namespace, but until uid/gid maps are written it sees itself as `nobody`/`nogroup` — the kernel's default. `Linx.User.setup_maps/2` writes the maps from the host while the child is parked at the checkpoint — picking the mapping that makes the workload think it's `root` while staying unprivileged outside:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.User
+alias Linx.Process, as: P
+alias Linx.User
 
-iex> {:ok, c} =
-...>   P.spawn(
-...>     argv: ["/bin/bash"],
-...>     namespaces: [:user, :mount, :pid, :uts, :ipc],
-...>     stdio: :pty
-...>   )
+{:ok, c} =
+  P.spawn(
+    argv: ["/bin/bash"],
+    namespaces: [:user, :mount, :pid, :uts, :ipc],
+    stdio: :pty
+  )
 
-iex> receive do {:linx_process, :ready, _child_view} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+receive do {:linx_process, :ready, _child_view} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # "root inside ↔ me outside" -- the canonical rootless mapping.
-iex> my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
-iex> my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integer()
-iex> :ok = User.setup_maps(host_pid, uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
+my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
+my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integer()
+:ok = User.setup_maps(host_pid, uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
 
-iex> P.proceed(c)
-iex> Linx.Tty.attach(:controlling, c)
+P.proceed(c)
+Linx.Tty.attach(:controlling, c)
 ```
 
 Now `whoami` inside the attached bash reports `root`; `id` shows `uid=0(root) gid=0(root)`; the prompt renders as `[root@... /]#` (the `#` is bash's signal that EUID == 0). Outside, the BEAM is still uid 1000 — the kernel maps `uid 0 inside` ↔ `uid 1000 outside` per the `setup_maps` call.
@@ -131,24 +131,24 @@ Now `whoami` inside the attached bash reports `root`; `id` shows `uid=0(root) gi
 A workload spawned with `:pid` and `:mount` namespaces inherits the host's mount table — so `/proc` still reflects the host, and `ps` inside the container shows host PIDs rather than the namespace's. Remount `/proc` inside the child's namespace at the checkpoint and `ps` sees only what lives inside:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Mount
+alias Linx.Process, as: P
+alias Linx.Mount
 
-iex> {:ok, c} =
-...>   P.spawn(
-...>     argv: ["/bin/bash"],
-...>     namespaces: [:mount, :pid, :uts, :ipc, :user],
-...>     stdio: :pty
-...>   )
+{:ok, c} =
+  P.spawn(
+    argv: ["/bin/bash"],
+    namespaces: [:mount, :pid, :uts, :ipc, :user],
+    stdio: :pty
+  )
 
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # Mount a fresh /proc inside the child's mount namespace.
-iex> :ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+:ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
 
-iex> P.proceed(c)
-iex> Linx.Tty.attach(:controlling, c)
+P.proceed(c)
+Linx.Tty.attach(:controlling, c)
 ```
 
 Now `ps` inside the attached bash shows only the workload's own processes (PID 1 = bash, plus whatever it spawns). The `:in` option works the same way for `umount/2`, `bind/3`, `remount/2`, `move/2`, and `pivot_root/3` — they all operate on the target namespace via the kernel's setns mechanism.
@@ -160,35 +160,35 @@ Now `ps` inside the attached bash shows only the workload's own processes (PID 1
 `Linx.Netlink` lets you configure the child's network from the host *while the child is parked at the checkpoint between `clone()` and `execve()`* — build a virtual link, hand it to the child, add an address and route, then proceed:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Netlink.Rtnl
-iex> alias Linx.Netlink.Rtnl.{Address, Link, Route}
-iex> alias Linx.Tty
+alias Linx.Process, as: P
+alias Linx.Netlink.Rtnl
+alias Linx.Netlink.Rtnl.{Address, Link, Route}
+alias Linx.Tty
 
-iex> {:ok, c} =
-...>   P.spawn(
-...>     argv: ["/bin/bash"],
-...>     namespaces: [:net, :mount, :pid, :uts, :ipc],
-...>     stdio: :pty
-...>   )
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+{:ok, c} =
+  P.spawn(
+    argv: ["/bin/bash"],
+    namespaces: [:net, :mount, :pid, :uts, :ipc],
+    stdio: :pty
+  )
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # Host-side: build a macvlan off eth0 and hand it to the child as ct0.
-iex> {:ok, host} = Rtnl.open()
-iex> :ok = Link.create_macvlan(host, "ct0", "eth0", :bridge)
-iex> :ok = Link.move_to_netns(host, "ct0", host_pid)
+{:ok, host} = Rtnl.open()
+:ok = Link.create_macvlan(host, "ct0", "eth0", :bridge)
+:ok = Link.move_to_netns(host, "ct0", host_pid)
 
 # Inside the child's still-fresh netns: configure ct0 and a default route.
-iex> {:ok, ns} = Rtnl.open({:pid, host_pid})
-iex> :ok = Link.set_up(ns, "lo")
-iex> :ok = Address.add(ns, "ct0", "10.0.0.5", 24)
-iex> :ok = Link.set_up(ns, "ct0")
-iex> :ok = Route.add_default(ns, "10.0.0.1")
+{:ok, ns} = Rtnl.open({:pid, host_pid})
+:ok = Link.set_up(ns, "lo")
+:ok = Address.add(ns, "ct0", "10.0.0.5", 24)
+:ok = Link.set_up(ns, "ct0")
+:ok = Route.add_default(ns, "10.0.0.1")
 
 # Release the child -- it execs bash now, with a fully configured network.
-iex> P.proceed(c)
-iex> Tty.attach(:controlling, c)
+P.proceed(c)
+Tty.attach(:controlling, c)
 ```
 
 ### Going further: firewall the container's veth peer from the host
@@ -205,38 +205,38 @@ ruleset itself is built with the `~NFT` sigil — real nft syntax
 parsed at compile time:
 
 ```elixir
-iex> import Linx.NFT, only: [sigil_NFT: 2]
-iex> alias Linx.Process, as: P
-iex> alias Linx.Netlink.{Nfnl, Rtnl}
-iex> alias Linx.Netfilter
+import Linx.NFT, only: [sigil_NFT: 2]
+alias Linx.Process, as: P
+alias Linx.Netlink.{Nfnl, Rtnl}
+alias Linx.Netfilter
 
-iex> {:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], namespaces: [:net])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+{:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], namespaces: [:net])
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # Veth pair, peer in the child's netns.
-iex> {:ok, host_rtnl} = Rtnl.open()
-iex> :ok = Rtnl.Link.create_veth(host_rtnl, "ct0a", "ct0b")
-iex> :ok = Rtnl.Link.move_to_netns(host_rtnl, "ct0b", host_pid)
-iex> :ok = Rtnl.Link.set_up(host_rtnl, "ct0a")
-iex> :ok = Rtnl.Address.add(host_rtnl, "ct0a", "10.0.0.1", 24)
+{:ok, host_rtnl} = Rtnl.open()
+:ok = Rtnl.Link.create_veth(host_rtnl, "ct0a", "ct0b")
+:ok = Rtnl.Link.move_to_netns(host_rtnl, "ct0b", host_pid)
+:ok = Rtnl.Link.set_up(host_rtnl, "ct0a")
+:ok = Rtnl.Address.add(host_rtnl, "ct0a", "10.0.0.1", 24)
 
 # Host-side firewall governing the veth — only TCP/80 + established
 # may reach the container; everything else dropped.
-iex> {:ok, host_nfnl} = Nfnl.open()
-iex> :ok = Netfilter.push(host_nfnl, ~NFT"""
-...>   table inet ct0a_guard {
-...>     chain forward {
-...>       type filter hook forward priority 0
-...>       policy drop
+{:ok, host_nfnl} = Nfnl.open()
+:ok = Netfilter.push(host_nfnl, ~NFT"""
+  table inet ct0a_guard {
+    chain forward {
+      type filter hook forward priority 0
+      policy drop
 
-...>       ct state established accept
-...>       oifname "ct0a" tcp dport 80 accept
-...>     }
-...>   }
-...> """)
+      ct state established accept
+      oifname "ct0a" tcp dport 80 accept
+    }
+  }
+""")
 
-iex> P.proceed(c)
+P.proceed(c)
 ```
 
 Now nginx in the container can only see established flows and
@@ -254,27 +254,27 @@ persist: true)` for "static policy that survives the BEAM."
 The same checkpoint window is where `Linx.Cgroup` slots in. Create a cgroup, set limits, place the child's host pid, then proceed:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Cgroup
+alias Linx.Process, as: P
+alias Linx.Cgroup
 
-iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], namespaces: [:net, :pid])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+{:ok, c} = P.spawn(argv: ["/bin/bash"], namespaces: [:net, :pid])
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # Build the cgroup and apply limits while the workload is parked.
-iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-iex> :ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)   # 256 MiB
-iex> :ok = Cgroup.set_pids_max(cg, 100)
-iex> :ok = Cgroup.set_cpu_max(cg, {50_000, 100_000})       # half a CPU
-iex> :ok = Cgroup.add_process(cg, host_pid)
+{:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+:ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)   # 256 MiB
+:ok = Cgroup.set_pids_max(cg, 100)
+:ok = Cgroup.set_cpu_max(cg, {50_000, 100_000})       # half a CPU
+:ok = Cgroup.add_process(cg, host_pid)
 
 # Release -- the workload execs already constrained.
-iex> P.proceed(c)
-:ok
+P.proceed(c)
+# => :ok
 
 # At any point you can read live counters as a struct:
-iex> Cgroup.stats(cg)
-{:ok, #Linx.Cgroup.Stats<cpu=0.4s mem=8MiB pids=3>}
+Cgroup.stats(cg)
+# => {:ok, #Linx.Cgroup.Stats<cpu=0.4s mem=8MiB pids=3>}
 ```
 
 `Linx.Process` itself has no awareness of cgroups; the checkpoint is the only coupling, exactly the way `Linx.Netlink` integration works. Limits are in force from the moment of `execve`.
@@ -284,23 +284,23 @@ iex> Cgroup.stats(cg)
 The same checkpoint slot also accepts `Linx.Capabilities` write verbs. Drop everything the workload doesn't need from the kernel's perspective — bounding (one-way ceiling), the three thread sets, or the ambient set — before it ever starts:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Capabilities
+alias Linx.Process, as: P
+alias Linx.Capabilities
 
-iex> {:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+{:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"])
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # Strip everything except cap_net_bind_service from bounding.
-iex> all = Linx.Capabilities.Constants.all()
-iex> keep = MapSet.new([:cap_net_bind_service])
-iex> :ok = Capabilities.drop_bounding(c, MapSet.difference(all, keep))
+all = Linx.Capabilities.Constants.all()
+keep = MapSet.new([:cap_net_bind_service])
+:ok = Capabilities.drop_bounding(c, MapSet.difference(all, keep))
 
-iex> P.proceed(c)
-iex> receive do {:linx_process, :running} -> :ok end
+P.proceed(c)
+receive do {:linx_process, :running} -> :ok end
 
-iex> {:ok, state} = Capabilities.read(host_pid)
-iex> state.bounding
+{:ok, state} = Capabilities.read(host_pid)
+state.bounding
 #MapSet<[:cap_net_bind_service]>
 ```
 
@@ -313,25 +313,25 @@ After `proceed/1`, nginx runs with exactly the one capability it needs to bind a
 The same checkpoint slot also accepts `Linx.Seccomp.install/2`. Build a cBPF filter from atoms — allow-list (everything not listed gets `:kill_process` by default) or deny-list (everything not listed gets `:allow`, Docker-style) — and install it before the workload's first instruction:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Seccomp
+alias Linx.Process, as: P
+alias Linx.Seccomp
 
-iex> {:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], no_new_privs: true)
-iex> receive do {:linx_process, :ready, _} -> :ok end
+{:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], no_new_privs: true)
+receive do {:linx_process, :ready, _} -> :ok end
 
 # An allow-list of the syscalls a workload actually uses. Anything
 # else (an attacker pivoting to execve, ptrace, kexec_load, ...)
 # fires :kill_process by default and dies with SIGSYS.
-iex> {:ok, filter} = Seccomp.allow_list(
-...>   ~w(read write openat close fstat brk mmap munmap mprotect
-...>      accept4 bind listen socket connect setsockopt getsockopt
-...>      rt_sigaction rt_sigprocmask rt_sigreturn exit_group)a,
-...>   default: :kill_process
-...> )
+{:ok, filter} = Seccomp.allow_list(
+  ~w(read write openat close fstat brk mmap munmap mprotect
+     accept4 bind listen socket connect setsockopt getsockopt
+     rt_sigaction rt_sigprocmask rt_sigreturn exit_group)a,
+  default: :kill_process
+)
 
-iex> :ok = Seccomp.install(c, filter)
-iex> P.proceed(c)
-iex> receive do {:linx_process, :running} -> :ok end
+:ok = Seccomp.install(c, filter)
+P.proceed(c)
+receive do {:linx_process, :running} -> :ok end
 ```
 
 The filter is a `%Linx.Seccomp.Filter{}` value — composable, introspectable, the same shape regardless of whether you built it with `allow_list/2` / `deny_list/2`, the `Linx.Seccomp.Builder` DSL, or `Linx.Seccomp.from_rules/1` (the data-layer seam external policy adapters like Docker `seccomp.json` parsers will use). Kernel rejections of denied syscalls arrive as `{:linx_process, :signaled, 31}` (SIGSYS) for `:kill_process` actions, or just propagate as the appropriate errno to the workload for `{:errno, :eperm}`-style actions.
@@ -345,24 +345,24 @@ The filter is a `%Linx.Seccomp.Filter{}` value — composable, introspectable, t
 The same checkpoint slot also accepts `Linx.Sysctl.write/3` with `in: {:pid, host_pid}`. Set per-namespace sysctls — `kernel.hostname`, `net.ipv4.ip_forward`, `net.ipv4.tcp_rmem`, the per-IPC-ns `kernel.shm*` limits — directly in the child's namespace stack while the workload is parked. The kernel routes the write through the *target's* namespace context, not the BEAM's; the BEAM's own values are unchanged.
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Sysctl
+alias Linx.Process, as: P
+alias Linx.Sysctl
 
-iex> {:ok, c} =
-...>   P.spawn(argv: ["/usr/sbin/nginx"],
-...>           namespaces: [:net, :uts, :ipc])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+{:ok, c} =
+  P.spawn(argv: ["/usr/sbin/nginx"],
+          namespaces: [:net, :uts, :ipc])
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # Give the container its own hostname + enable IP forwarding +
 # bump TCP buffers, all before nginx ever starts. None of this
 # touches the host's /proc/sys values.
-iex> :ok = Sysctl.write("kernel.hostname", "ct-web-01", in: {:pid, host_pid})
-iex> :ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
-iex> :ok = Sysctl.write("net.ipv4.tcp_rmem", [4096, 262_144, 16_777_216],
-...>                    in: {:pid, host_pid})
+:ok = Sysctl.write("kernel.hostname", "ct-web-01", in: {:pid, host_pid})
+:ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+:ok = Sysctl.write("net.ipv4.tcp_rmem", [4096, 262_144, 16_777_216],
+                   in: {:pid, host_pid})
 
-iex> P.proceed(c)
+P.proceed(c)
 ```
 
 A small NIF (`c_src/linx_sysctl.c`) opens the target's `/proc/<pid>/ns/{user,mnt,uts,ipc,net}` stack and `setns(2)`s into each one on a throwaway pthread, performs the file I/O, and exits — the same setns-on-a-throwaway-pthread pattern `Linx.Mount` and `Linx.Netlink` use. Same-namespace fds are filtered out via inode comparison (so a workload spawned with only `[:net, :uts]` doesn't trip `EINVAL` on the unchanged user/mnt/ipc setns calls). The `:in` option is lifecycle-agnostic — the same call works just as well after `proceed/1` against a fully running container.
@@ -380,13 +380,13 @@ The Linux process-lifecycle surface: `clone(2)` with namespace flags, `setns(2)`
 The actual syscalls run in a small external C agent — a Port, not a NIF — because `clone()` / `fork()` / `unshare()` inside the multithreaded BEAM corrupts the VM. A checkpoint protocol over fd 3/4 lets the orchestrator do host-side setup before the child execs.
 
 ```elixir
-iex> alias Linx.Process, as: P
+alias Linx.Process, as: P
 
 # Plain spawn (no namespaces) -- equivalent to fork+exec.
-iex> {:ok, c} = P.spawn(argv: ["/bin/echo", "hello"])
-iex> P.proceed(c)
-iex> P.wait(c)
-{:ok, {:exited, 0}}
+{:ok, c} = P.spawn(argv: ["/bin/echo", "hello"])
+P.proceed(c)
+P.wait(c)
+# => {:ok, {:exited, 0}}
 ```
 
 Every `spawn` returns a session — a GenServer pid that owns the child. The session sends lifecycle events to its owner and ends with exactly one terminal event:
@@ -403,12 +403,12 @@ The **checkpoint** is what makes the host/child cooperation work: the child bloc
 `host_pid/1` is the verb you'll reach for to address the workload from outside — every cross-namespace primitive in Linx (`Linx.Mount`'s `:in: {:pid, _}`, `Linx.User.setup_maps/2`, `Linx.Cgroup.add_process/2`) wants a host pid.
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "30"], namespaces: [:net])
-iex> receive do {:linx_process, :ready, host_pid} -> host_pid end
+{:ok, c} = P.spawn(argv: ["/bin/sleep", "30"], namespaces: [:net])
+receive do {:linx_process, :ready, host_pid} -> host_pid end
 
 # ... host-side setup happens here ...
 
-iex> P.proceed(c)
+P.proceed(c)
 ```
 
 Available namespace atoms: `:net`, `:mount`, `:pid`, `:uts`, `:ipc`, `:user`, `:cgroup`, `:time`. All but `:user` need `CAP_SYS_ADMIN`.
@@ -417,7 +417,7 @@ Available namespace atoms: `:net`, `:mount`, `:pid`, `:uts`, `:ipc`, `:user`, `:
 
 ```elixir
 # probe lives inside ct's namespaces; sees only ct's interfaces
-iex> {:ok, probe} = P.enter(ct_pid, argv: ["/bin/sh", "-c", "ip -o link | wc -l"])
+{:ok, probe} = P.enter(ct_pid, argv: ["/bin/sh", "-c", "ip -o link | wc -l"])
 ```
 
 **Stdio plumbing.** By default the workload inherits the BEAM's fds 0/1/2. The `:stdio` option chooses something else:
@@ -432,27 +432,27 @@ iex> {:ok, probe} = P.enter(ct_pid, argv: ["/bin/sh", "-c", "ip -o link | wc -l"
 The per-fd keyword form lets each fd get its own treatment:
 
 ```elixir
-iex> {:ok, c} = P.spawn(
-...>   argv: ["/bin/echo", "captured"],
-...>   stdio: [stdout: {:connect_unix, "/tmp/cap.sock"}, stderr: :devnull]
-...> )
+{:ok, c} = P.spawn(
+  argv: ["/bin/echo", "captured"],
+  stdio: [stdout: {:connect_unix, "/tmp/cap.sock"}, stderr: :devnull]
+)
 ```
 
 With `:pty`, reads arrive as `{:linx_process, :pty_out, bytes}` events in the owner's mailbox; writes go through `pty_write/2`:
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
-iex> P.proceed(c)
-iex> P.pty_write(c, "hello\n")
-iex> receive do {:linx_process, :pty_out, b} -> b end
-"hello\r\nhello\r\n"   # PTY echoes the input, then cat writes it back
+{:ok, c} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
+P.proceed(c)
+P.pty_write(c, "hello\n")
+receive do {:linx_process, :pty_out, b} -> b end
+# => "hello\r\nhello\r\n"   # PTY echoes the input, then cat writes it back
 ```
 
 `pty_set_winsize/2` configures the PTY's window size — either before `proceed/1` (so the workload sees the right size from the moment it `execve`s) or post-running (so a runtime update reaches the workload as `SIGWINCH`):
 
 ```elixir
-iex> P.pty_set_winsize(c, {24, 80, 0, 0})  # rows, cols, xpix, ypix
-:ok
+P.pty_set_winsize(c, {24, 80, 0, 0})  # rows, cols, xpix, ypix
+# => :ok
 ```
 
 More in [`docs/process/EXAMPLES.md`](docs/process/EXAMPLES.md).
@@ -462,11 +462,11 @@ More in [`docs/process/EXAMPLES.md`](docs/process/EXAMPLES.md).
 The kernel's terminal surface: opening `/dev/tty`, manipulating `termios(3)` (raw / save / restore), tty ioctls for window size, plus an `attach/2` byte-pumping helper that composes with `Linx.Process`'s `:pty` stdio directive.
 
 ```elixir
-iex> alias Linx.Tty
-iex> {:ok, fd, saved} = Tty.open_controlling_raw()
-iex> Tty.window_size(fd)
-{:ok, #Linx.Tty.WindowSize<132x42>}
-iex> :ok = Tty.restore_and_close(fd, saved)
+alias Linx.Tty
+{:ok, fd, saved} = Tty.open_controlling_raw()
+Tty.window_size(fd)
+# => {:ok, #Linx.Tty.WindowSize<132x42>}
+:ok = Tty.restore_and_close(fd, saved)
 ```
 
 The `Saved` blob is the original `termios` state, returned so the terminal can be restored exactly. `restore_and_close/2` is idempotent against already-closed fds, so wrapping callers with `try/after` is structurally safe — the user's terminal can never be left in raw mode.
@@ -528,13 +528,13 @@ More in [`docs/tty/EXAMPLES.md`](docs/tty/EXAMPLES.md).
 The kernel's resource-control surface, talking to `/sys/fs/cgroup` directly. Pure Elixir file I/O — no NIF, no Port, no `:os.cmd` to `cgcreate`. cgroupfs *is* the API.
 
 ```elixir
-iex> alias Linx.Cgroup
-iex> Cgroup.supported?()
-true
+alias Linx.Cgroup
+Cgroup.supported?()
+# => true
 
-iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-iex> :ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
-iex> :ok = Cgroup.add_process(cg, host_pid)
+{:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+:ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
+:ok = Cgroup.add_process(cg, host_pid)
 ```
 
 The path is the handle — `create/1` returns `{:ok, path}` and every other verb takes a path. There's no opaque struct or GenServer wrapping a cgroup; cgroupfs already provides the identity. `create/1` is **idempotent** against EEXIST; `destroy/1` succeeds only when the cgroup is empty (the kernel enforces this with `EBUSY`).
@@ -552,8 +552,8 @@ Plus `freeze/1` / `thaw/1` for `cgroup.freeze` (no controller delegation require
 **Counters as a struct** — `stats/1` returns a `%Linx.Cgroup.Stats{}` with a compact `Inspect`:
 
 ```elixir
-iex> Linx.Cgroup.stats(cg)
-{:ok, #Linx.Cgroup.Stats<cpu=12.3s mem=42MiB pids=3>}
+Linx.Cgroup.stats(cg)
+# => {:ok, #Linx.Cgroup.Stats<cpu=12.3s mem=42MiB pids=3>}
 ```
 
 Each field is `nil` if its controller isn't delegated to the parent or the kernel is too old to expose it — so the struct works gracefully even on minimal setups.
@@ -561,11 +561,11 @@ Each field is `nil` if its controller isn't delegated to the parent or the kerne
 **Errors as structs** — `%Linx.Cgroup.Error{path, operation, errno, code}` everywhere, never raw `{:error, :enoent}` tuples. Pattern-match on `:errno` and `:operation` for specific failures; the `Exception` impl makes `raise` and `Exception.message/1` work.
 
 ```elixir
-iex> case Linx.Cgroup.destroy(cg) do
-...>   :ok -> :destroyed
-...>   {:error, %Linx.Cgroup.Error{errno: :ebusy}} -> :still_has_processes
-...>   {:error, %Linx.Cgroup.Error{errno: :enoent}} -> :already_gone
-...> end
+case Linx.Cgroup.destroy(cg) do
+  :ok -> :destroyed
+  {:error, %Linx.Cgroup.Error{errno: :ebusy}} -> :still_has_processes
+  {:error, %Linx.Cgroup.Error{errno: :enoent}} -> :already_gone
+end
 ```
 
 **Composition with `Linx.Process`** happens at the existing checkpoint between `:ready` and `proceed/1`, as in the headline composition at the top of this doc. `Linx.Process` has zero awareness of cgroups; cgroupfs is enough.
@@ -577,18 +577,18 @@ More in [`docs/cgroup/EXAMPLES.md`](docs/cgroup/EXAMPLES.md).
 `mount(2)`, `umount2(2)`, `pivot_root(2)`, and a pure-Elixir parser for `/proc/<pid>/mountinfo`. Plus convenience verbs for the most common shapes — `bind/3`, `remount/2`, `move/3` — and a cross-namespace `:in` option that operates on any process's mount namespace, not just the BEAM's.
 
 ```elixir
-iex> alias Linx.Mount
+alias Linx.Mount
 
 # Read the mount table as %Linx.Mount.Entry{} structs.
-iex> {:ok, mounts} = Mount.list()
-iex> Enum.find(mounts, & &1.mount_point == "/")
+{:ok, mounts} = Mount.list()
+Enum.find(mounts, & &1.mount_point == "/")
 #Linx.Mount.Entry<ext4 on / (rw,relatime)>
 
 # Mount, bind, remount, move, umount -- all with optional flags.
-iex> :ok = Mount.mount("none", "/mnt/scratch", "tmpfs", flags: [:nosuid, :nodev])
-iex> :ok = Mount.bind("/data/cache", "/mnt/scratch/cache")
-iex> :ok = Mount.remount("/mnt/scratch", flags: [:bind, :ro])
-iex> :ok = Mount.umount("/mnt/scratch", flags: [:detach])
+:ok = Mount.mount("none", "/mnt/scratch", "tmpfs", flags: [:nosuid, :nodev])
+:ok = Mount.bind("/data/cache", "/mnt/scratch/cache")
+:ok = Mount.remount("/mnt/scratch", flags: [:bind, :ro])
+:ok = Mount.umount("/mnt/scratch", flags: [:detach])
 ```
 
 **Full flag catalog** — 21 mount flag atoms (`:ro`, `:nosuid`, `:nodev`, `:noexec`, `:bind`, `:rec`, propagation atoms `:private` / `:shared` / `:slave` / `:unbindable`, `:relatime` / `:strictatime` / `:lazytime`, …) and 4 umount flag atoms (`:force`, `:detach`, `:expire`, `:no_follow`), mapped to the kernel's `MS_*` / `MNT_*` / `UMOUNT_*` constants.
@@ -597,11 +597,11 @@ iex> :ok = Mount.umount("/mnt/scratch", flags: [:detach])
 
 ```elixir
 # Hot-mount a volume into a running container, no restart needed.
-iex> :ok = Mount.bind("/data/cache", "/cache", in: {:pid, container_pid})
+:ok = Mount.bind("/data/cache", "/cache", in: {:pid, container_pid})
 
 # Or pivot a rootfs at checkpoint, before the workload runs.
-iex> :ok = Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
-iex> :ok = Mount.pivot_root(rootfs, Path.join(rootfs, "old_root"), in: {:pid, host_pid})
+:ok = Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
+:ok = Mount.pivot_root(rootfs, Path.join(rootfs, "old_root"), in: {:pid, host_pid})
 ```
 
 The NIF wraps each cross-namespace call with the standard `unshare(CLONE_FS)` + `setns(CLONE_NEWNS)` dance on a throwaway pthread — the BEAM's scheduler threads never enter the target namespace.
@@ -615,16 +615,16 @@ More in [`docs/mount/EXAMPLES.md`](docs/mount/EXAMPLES.md).
 The procfs surface that turns a workload spawned with `:user` from a kernel-default `nobody` into a properly-mapped identity — typically the rootless trick where the workload thinks it's `root` while staying unprivileged outside.
 
 ```elixir
-iex> alias Linx.User
+alias Linx.User
 
-iex> User.supported?()
-true
+User.supported?()
+# => true
 
 # Write uid/gid maps from the host while the child is parked.
-iex> :ok = User.setup_maps(host_pid,
-...>   uid: [{0, my_host_uid, 1}],
-...>   gid: [{0, my_host_gid, 1}]
-...> )
+:ok = User.setup_maps(host_pid,
+  uid: [{0, my_host_uid, 1}],
+  gid: [{0, my_host_gid, 1}]
+)
 ```
 
 Pure Elixir file I/O on `/proc/<pid>/{uid_map,gid_map,setgroups}` — no NIF, no Port, no `:in` option (uid/gid maps are written via the host's view of procfs). Smallest subsystem in the library by a wide margin.
@@ -643,14 +643,14 @@ Pure Elixir file I/O on `/proc/<pid>/{uid_map,gid_map,setgroups}` — no NIF, no
 **Read side** for inspection:
 
 ```elixir
-iex> User.read_uid_map(host_pid)
-{:ok, [#Linx.User.Map<0 -> 1000>]}
+User.read_uid_map(host_pid)
+# => {:ok, [#Linx.User.Map<0 -> 1000>]}
 
-iex> User.read_uid_map(other_pid)  # multi-range identity (runc-style)
-{:ok, [
-  #Linx.User.Map<0 -> 0>,
-  #Linx.User.Map<1..65535 -> 100000..165535>
-]}
+User.read_uid_map(other_pid)  # multi-range identity (runc-style)
+# => {:ok, [
+# =>   #Linx.User.Map<0 -> 0>,
+# =>   #Linx.User.Map<1..65535 -> 100000..165535>
+# => ]}
 ```
 
 **Each mapping** is a `{inside_id, outside_id, length}` triple. The kernel writes are **write-once** per user namespace — plan the mapping fully before calling. `%Linx.User.Map{}` round-trips cleanly back to the input tuple shape.
@@ -666,16 +666,16 @@ More in [`docs/user/EXAMPLES.md`](docs/user/EXAMPLES.md).
 The kernel's five per-thread capability sets (effective, permitted, inheritable, bounding, ambient) and the syscalls that read and manipulate them. Pure-Elixir read side from `/proc/<pid>/status`; agent-side write side through new checkpoint-window commands in the `Linx.Process` C agent.
 
 ```elixir
-iex> alias Linx.Capabilities
+alias Linx.Capabilities
 
-iex> Capabilities.supported?()
-true
+Capabilities.supported?()
+# => true
 
-iex> {:ok, state} = Capabilities.read(:self)
-{:ok, #Linx.Capabilities.State<eff=0 prm=0 inh=0 bnd=41 amb=0>}
+{:ok, state} = Capabilities.read(:self)
+# => {:ok, #Linx.Capabilities.State<eff=0 prm=0 inh=0 bnd=41 amb=0>}
 
-iex> MapSet.member?(state.bounding, :cap_net_admin)
-true
+MapSet.member?(state.bounding, :cap_net_admin)
+# => true
 ```
 
 **MapSets of `:cap_*` atoms.** Cap sets are 64-bit kernel bitmasks; in Elixir they're `MapSet`s of `:cap_*` atoms (`:cap_net_admin`, `:cap_sys_admin`, …). Set operations (`MapSet.union/2`, `MapSet.difference/2`) come for free; the bitmask conversion is isolated to `Linx.Capabilities.Constants`.
@@ -683,10 +683,10 @@ true
 **Read side** — `read/1` parses `/proc/<pid>/status` into a `%Linx.Capabilities.State{}`:
 
 ```elixir
-iex> {:ok, state} = Capabilities.read(host_pid)
-iex> state.effective
+{:ok, state} = Capabilities.read(host_pid)
+state.effective
 #MapSet<[]>
-iex> state.bounding
+state.bounding
 #MapSet<[:cap_chown, :cap_dac_override, ...]>
 ```
 
@@ -726,43 +726,43 @@ More in [`docs/capabilities/EXAMPLES.md`](docs/capabilities/EXAMPLES.md).
 The kernel's `seccomp(2)` surface: per-thread cBPF programs that gate every syscall the workload makes. Pure-Elixir cBPF compiler (no `libseccomp` linkage); agent-side install via the same `Linx.Process` checkpoint that `Linx.Capabilities` uses.
 
 ```elixir
-iex> alias Linx.Seccomp
+alias Linx.Seccomp
 
-iex> Seccomp.supported?()
-true
-iex> Seccomp.arch()
-:x86_64
+Seccomp.supported?()
+# => true
+Seccomp.arch()
+# => :x86_64
 ```
 
 **Two-layer API.** The sugar layer is `allow_list/2`, `deny_list/2`, and the `Linx.Seccomp.Builder` DSL — for filters constructed in code. The data layer is `from_rules/1` / `to_rules/1` — the seam external consumers like Silo will use to translate JSON profiles (or any other external policy representation) into Linx filters. Linx itself never sees JSON.
 
 ```elixir
 # Sugar -- allow-list with kill_process default (the secure shape).
-iex> {:ok, filter} = Seccomp.allow_list(
-...>   ~w(read write openat close exit_group)a,
-...>   default: :kill_process
-...> )
+{:ok, filter} = Seccomp.allow_list(
+  ~w(read write openat close exit_group)a,
+  default: :kill_process
+)
 #Linx.Seccomp.Filter<x86_64 5 syscalls, 11 BPF insns>
 
 # Sugar -- deny-list with EPERM default (the Docker shape).
-iex> {:ok, filter} = Seccomp.deny_list(
-...>   ~w(kexec_load init_module delete_module ptrace mount)a
-...> )
+{:ok, filter} = Seccomp.deny_list(
+  ~w(kexec_load init_module delete_module ptrace mount)a
+)
 
 # Data layer -- consumers translate from external policy and call this.
-iex> rules = [
-...>   {:allow, :read}, {:allow, :write},
-...>   {{:errno, :eperm}, :ptrace},
-...>   {:kill_process, :kexec_load}
-...> ]
-iex> {:ok, filter} = Seccomp.from_rules({rules, :allow})
+rules = [
+  {:allow, :read}, {:allow, :write},
+  {{:errno, :eperm}, :ptrace},
+  {:kill_process, :kexec_load}
+]
+{:ok, filter} = Seccomp.from_rules({rules, :allow})
 
 # DSL.
-iex> {:ok, filter} =
-...>   Seccomp.builder()
-...>   |> Linx.Seccomp.Builder.allow(:read)
-...>   |> Linx.Seccomp.Builder.deny(:ptrace, errno: :eperm)
-...>   |> Linx.Seccomp.Builder.build(default: :kill_process)
+{:ok, filter} =
+  Seccomp.builder()
+  |> Linx.Seccomp.Builder.allow(:read)
+  |> Linx.Seccomp.Builder.deny(:ptrace, errno: :eperm)
+  |> Linx.Seccomp.Builder.build(default: :kill_process)
 ```
 
 **Actions.** Each rule (and the default) is one of: `:allow`, `:kill_process`, `:kill_thread`, `:trap`, `:log`, or `{:errno, atom_or_int}`. Mix freely — most realistic filters allow the common syscalls, return EPERM for graceful-degradation cases (ptrace, process_vm_readv), and kill outright for the dangerous ones (kexec_load, init_module).
@@ -772,12 +772,12 @@ iex> {:ok, filter} =
 **Install at the checkpoint** (the headline composition with `Linx.Process`):
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], no_new_privs: true)
-iex> receive do {:linx_process, :ready, _} -> :ok end
+{:ok, c} = P.spawn(argv: ["/usr/sbin/nginx"], no_new_privs: true)
+receive do {:linx_process, :ready, _} -> :ok end
 
-iex> {:ok, filter} = Seccomp.allow_list(syscalls_nginx_needs)
-iex> :ok = Seccomp.install(c, filter)
-iex> P.proceed(c)
+{:ok, filter} = Seccomp.allow_list(syscalls_nginx_needs)
+:ok = Seccomp.install(c, filter)
+P.proceed(c)
 ```
 
 The filter is installed by the child agent (`apply_seccomp` in `c_src/linx_process.c`) right before `execve(2)` — so even `execve` itself is gated by the filter, which is what makes the contract airtight. `seccomp(SECCOMP_SET_MODE_FILTER)` needs `PR_SET_NO_NEW_PRIVS` (or `CAP_SYS_ADMIN`); pass `no_new_privs: true` to `spawn/1` for the principled posture, or let `install/2` auto-set it for you.
@@ -795,16 +795,16 @@ More in [`docs/seccomp/EXAMPLES.md`](docs/seccomp/EXAMPLES.md).
 The kernel's `/proc/sys/` surface — the same knobs `sysctl(8)` reads and writes (`net.ipv4.ip_forward`, `kernel.hostname`, `vm.swappiness`, `kernel.printk`, the per-protocol TCP tuning knobs, the per-IPC-namespace `kernel.shm*` limits, …). Pure-Elixir file I/O on the host path; a small NIF handles the cross-namespace case.
 
 ```elixir
-iex> alias Linx.Sysctl
+alias Linx.Sysctl
 
-iex> Sysctl.read("kernel.ostype")
-{:ok, "Linux"}
+Sysctl.read("kernel.ostype")
+# => {:ok, "Linux"}
 
-iex> Sysctl.read_int("net.ipv4.ip_forward")
-{:ok, 0}
+Sysctl.read_int("net.ipv4.ip_forward")
+# => {:ok, 0}
 
-iex> Sysctl.write("net.ipv4.ip_forward", 1)
-:ok
+Sysctl.write("net.ipv4.ip_forward", 1)
+# => :ok
 ```
 
 **Dot-form keys.** `net.ipv4.ip_forward` ↔ `/proc/sys/net/ipv4/ip_forward`. The same naming `sysctl(8)` and `/etc/sysctl.d/*.conf` use. Strict validation (one segment per dot, `[A-Za-z0-9_-]+` per segment) rules out empty keys, leading/trailing/consecutive dots, slashes, whitespace, NUL, and the `..` traversal case before any path touches procfs.
@@ -825,17 +825,17 @@ Trying to traverse `/proc/<pid>/root/proc/sys/...` from the host to read another
 **Cross-namespace via `:in`.** Every verb takes an `:in :: :self | {:pid, n} | {:path, p}` option, same shape as `Linx.Mount`. With `{:pid, n}`, `Linx.Sysctl.Native` opens the target's `/proc/<n>/ns/{user,mnt,uts,ipc,net}` stack and `setns(2)`s into each one on a throwaway pthread, then performs the I/O, then exits. Same-namespace fds are filtered out via inode comparison (so a workload spawned with only `[:net, :uts]` doesn't trip `EINVAL` on the user/mnt/ipc setns calls).
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net, :uts])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
-iex> P.proceed(c)
+{:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net, :uts])
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
+P.proceed(c)
 
 # The container sees one value; the host sees another, independently.
-iex> :ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
-iex> Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
-{:ok, 1}
-iex> Sysctl.read_int("net.ipv4.ip_forward")
-{:ok, 0}
+:ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
+# => {:ok, 1}
+Sysctl.read_int("net.ipv4.ip_forward")
+# => {:ok, 0}
 ```
 
 **Subtree walking.** `list/0` returns every readable scalar under `/proc/sys/` as `[%Linx.Sysctl.Entry{}]` sorted by key (~1500 entries on a typical host). `list/1` takes a dot-form prefix to narrow the walk — `list("net.ipv4")` is the subtree; `list("kernel.ostype")` on a leaf returns a single-element list. Both verbs take the same `:in` option as the others.
@@ -853,12 +853,12 @@ More in [`docs/sysctl/EXAMPLES.md`](docs/sysctl/EXAMPLES.md).
 An `AF_NETLINK` client with the rtnetlink (link / address / route / neighbour / rule / stats) and nfnetlink (the firewall transport, surfaced separately as `Linx.Netfilter`) families fleshed out. Pure-Elixir encode/decode over a `:socket` socket; a small NIF handles the one thing the BEAM can't do safely on its own — entering another network namespace on a throwaway thread.
 
 ```elixir
-iex> alias Linx.Netlink.Rtnl
-iex> alias Linx.Netlink.Rtnl.Link
+alias Linx.Netlink.Rtnl
+alias Linx.Netlink.Rtnl.Link
 
-iex> {:ok, sock} = Rtnl.open()
-iex> {:ok, links} = Link.list(sock)
-[#Linx.Netlink.Rtnl.Link<"lo" (1) UP MTU=65536>,
+{:ok, sock} = Rtnl.open()
+{:ok, links} = Link.list(sock)
+# => [#Linx.Netlink.Rtnl.Link<"lo" (1) UP MTU=65536>,
  #Linx.Netlink.Rtnl.Link<"eth0" (2) UP MTU=1500>, ...]
 ```
 
@@ -874,10 +874,10 @@ iex> {:ok, links} = Link.list(sock)
 **Sockets in another netns.** `Rtnl.open({:pid, child_pid})` opens the socket from inside the target's network namespace; the socket then belongs to that netns for its whole life (the BEAM only ever briefly entered the namespace on an isolated thread). This is what makes the headline composition work — configuring the child's network from the host while the child waits at the checkpoint.
 
 ```elixir
-iex> {:ok, ns} = Rtnl.open({:pid, 41234})
-iex> :ok = Link.set_up(ns, "lo")
-iex> :ok = Address.add(ns, "eth0", "10.0.0.5", 24)
-iex> :ok = Route.add_default(ns, "10.0.0.1")
+{:ok, ns} = Rtnl.open({:pid, 41234})
+:ok = Link.set_up(ns, "lo")
+:ok = Address.add(ns, "eth0", "10.0.0.5", 24)
+:ok = Route.add_default(ns, "10.0.0.1")
 ```
 
 **A codec DSL** (`use Linx.Netlink.Codec`) declares each message's wire format in one `codec do … end` block and generates the struct, `encode/1`, `decode/1`, and reflection.
@@ -891,23 +891,23 @@ More in [`docs/netlink/EXAMPLES.md`](docs/netlink/EXAMPLES.md).
 The kernel's nf_tables surface (the successor to iptables / ip6tables / ebtables / arptables), driven over `NETLINK_NETFILTER`. A `%Linx.Netfilter.Ruleset{}` is plain data — tables containing chains containing rules, plus sets / maps / vmaps / named objects. Four verbs in/out: `build` (pipeline DSL or `~NFT` sigil), `push/2` (write atomically), `pull/1..2` (read kernel state into a value), `diff/2` (compute the minimal patch between two rulesets).
 
 ```elixir
-iex> alias Linx.Netfilter
-iex> alias Linx.Netfilter.{Expr, Ruleset, Verdict}
-iex> alias Linx.Netlink.Nfnl
+alias Linx.Netfilter
+alias Linx.Netfilter.{Expr, Ruleset, Verdict}
+alias Linx.Netlink.Nfnl
 
-iex> {:ok, sock} = Nfnl.open()
+{:ok, sock} = Nfnl.open()
 
 # Pipeline DSL.
-iex> rs =
-...>   Ruleset.new()
-...>   |> Ruleset.add_table!(:inet, "myapp")
-...>   |> Ruleset.add_chain!("myapp", "input",
-...>        type: :filter, hook: :input, priority: 0, policy: :drop)
-...>   |> Ruleset.add_rule!("myapp", "input",
-...>        [Expr.payload(:tcp_dport), Expr.cmp(:eq, <<22::big-16>>),
-...>         Expr.immediate(Verdict.accept())])
+rs =
+  Ruleset.new()
+  |> Ruleset.add_table!(:inet, "myapp")
+  |> Ruleset.add_chain!("myapp", "input",
+       type: :filter, hook: :input, priority: 0, policy: :drop)
+  |> Ruleset.add_rule!("myapp", "input",
+       [Expr.payload(:tcp_dport), Expr.cmp(:eq, <<22::big-16>>),
+        Expr.immediate(Verdict.accept())])
 
-iex> :ok = Netfilter.push(sock, rs)
+:ok = Netfilter.push(sock, rs)
 ```
 
 **Three peer authoring surfaces, one value type.** The pipeline DSL above, the `~NFT` sigil, and `Linx.NFT.parse_file/1` all converge on the same `%Ruleset{}` via the same validator-setter functions — sigil-parsed and pipeline-constructed rulesets are interchangeable.
@@ -915,20 +915,20 @@ iex> :ok = Netfilter.push(sock, rs)
 **The `~NFT` sigil** is the headline ergonomic feature. Real nft syntax parsed at compile time, with compile-time error diagnostics keyed off the surrounding `.ex` file's line numbers:
 
 ```elixir
-iex> import Linx.NFT, only: [sigil_NFT: 2]
+import Linx.NFT, only: [sigil_NFT: 2]
 
-iex> rs = ~NFT"""
-...>   table inet myapp {
-...>     chain input {
-...>       type filter hook input priority 0
-...>       policy drop
-...>
-...>       ct state established accept
-...>       tcp dport 22 accept
-...>       ip saddr 10.0.0.0/8 accept
-...>     }
-...>   }
-...> """
+rs = ~NFT"""
+  table inet myapp {
+    chain input {
+      type filter hook input priority 0
+      policy drop
+
+      ct state established accept
+      tcp dport 22 accept
+      ip saddr 10.0.0.0/8 accept
+    }
+  }
+"""
 ```
 
 Interpolation works at value positions with runtime type-checking — `~NFT"tcp dport #{port} accept"` accepts an integer and encodes it into the right wire shape; passing a binary at runtime raises `ArgumentError` naming the expected kind. The mechanism mirrors Phoenix HEEx: uppercase sigil, our own tokenizer parses `#{...}` (Elixir doesn't, for uppercase sigils), and the macro dispatches to a runtime-emit path for interpolated bodies, a compile-time literal-`Ruleset` path for static ones. Zero runtime cost when there's no interpolation.
@@ -958,11 +958,11 @@ More in [`docs/netfilter/EXAMPLES.md`](docs/netfilter/EXAMPLES.md) — and `docs
 - **`Linx.IP`** — IPv4 or IPv6 address. The `~IP` sigil parses at compile time; `Inspect` round-trips back to the sigil. `Linx.IP.Subnet` adds `contains?/2`, `network/1`, `broadcast/1`.
 
   ```elixir
-  iex> ~IP"192.168.1.1"
   ~IP"192.168.1.1"
-  iex> {:ok, net} = Linx.IP.Subnet.parse("10.0.0.0/8")
-  iex> Linx.IP.Subnet.contains?(net, ~IP"10.5.3.1")
-  true
+  # => ~IP"192.168.1.1"
+  {:ok, net} = Linx.IP.Subnet.parse("10.0.0.0/8")
+  Linx.IP.Subnet.contains?(net, ~IP"10.5.3.1")
+  # => true
   ```
 
 - **`Linx.MAC`** — link-layer address. The `~MAC` sigil, same shape.
