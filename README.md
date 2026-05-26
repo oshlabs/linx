@@ -929,9 +929,48 @@ rs = ~NFT"""
     }
   }
 """
+# => %Linx.Netfilter.Ruleset{
+# =>   tables: %{
+# =>     {:inet, "myapp"} => %Linx.Netfilter.Table{
+# =>       family: :inet,
+# =>       name: "myapp",
+# =>       use_count: nil,
+# =>       handle: nil,
+# =>       flags: [],
+# =>       chains: %{
+# =>         "input" => %Linx.Netfilter.Chain{
+# =>           name: "input",
+# =>           table: "myapp",
+# =>           type: :filter,
+# =>           hook: :input,
+# =>           priority: 0,
+# =>           policy: :drop,
+# =>           device: nil,
+# =>           handle: nil,
+# =>           flags: [],
+# =>           rules: [
+# =>             #Linx.Netfilter.Rule<[ct, bitwise, cmp, immediate accept]>,
+# =>             #Linx.Netfilter.Rule<[payload, cmp, immediate accept]>,
+# =>             #Linx.Netfilter.Rule<[payload, bitwise, cmp, immediate accept]>
+# =>           ]
+# =>         }
+# =>       },
+# =>       sets: %{},
+# =>       maps: %{},
+# =>       objects: %{},
+# =>       flowtables: %{}
+# =>     }
+# =>   }
+# => }
 ```
 
-Interpolation works at value positions with runtime type-checking — `~NFT"tcp dport #{port} accept"` accepts an integer and encodes it into the right wire shape; passing a binary at runtime raises `ArgumentError` naming the expected kind. The mechanism mirrors Phoenix HEEx: uppercase sigil, our own tokenizer parses `#{...}` (Elixir doesn't, for uppercase sigils), and the macro dispatches to a runtime-emit path for interpolated bodies, a compile-time literal-`Ruleset` path for static ones. Zero runtime cost when there's no interpolation.
+Look at the `rules:` list — that's the real demonstration of what the sigil compiled to. Each `#Linx.Netfilter.Rule<…>` shows the actual `%Expr{}` sequence the kernel will see at the wire level:
+
+  * `[ct, bitwise, cmp, immediate accept]` — `ct state established` becomes the kernel-correct *bitwise-AND with the ESTABLISHED bit, then cmp_neq_0* pattern, not a naive `cmp_eq established_bit_value`. The same shape `nft list ruleset` emits.
+  * `[payload, cmp, immediate accept]` — `tcp dport 22` is one payload extract plus one comparison, exactly what you'd hand-write with the pipeline DSL.
+  * `[payload, bitwise, cmp, immediate accept]` — `ip saddr 10.0.0.0/8` expands to a payload load, a bitwise mask, and a comparison against the masked prefix.
+
+The `~NFT` sigil isn't a string-templating shortcut — it's a compile-time front-end onto the same `%Ruleset{}` value the pipeline DSL builds, going through the same validator-setter functions and producing the same `%Expr{}` graph. Interpolation works at value positions with runtime type-checking — `~NFT"tcp dport #{port} accept"` accepts an integer and encodes it into the right wire shape; passing a binary at runtime raises `ArgumentError` naming the expected kind. The mechanism mirrors Phoenix HEEx: uppercase sigil, our own tokenizer parses `#{...}` (Elixir doesn't, for uppercase sigils), and the macro dispatches to a runtime-emit path for interpolated bodies, a compile-time literal-`Ruleset` path for static ones. Zero runtime cost when there's no interpolation.
 
 **`:replace` vs `:reconcile`.** `push/2` defaults to `:replace` (tear down and rebuild the named tables — brief disruption to existing connections). `mode: :reconcile` computes the minimal patch between current kernel state and the desired ruleset and emits it as one batch, threading `NFTA_BATCH_GENID` for optimistic-concurrency CAS so Linx coexists cleanly with `nft` CLI / firewalld / kube-proxy / any other writer in the same netns. Per-rule `:tag` atoms double as stable diff identity (so reordering two rules in source doesn't produce spurious delete+create pairs) AND as the NFLOG event identity.
 
