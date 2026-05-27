@@ -21,9 +21,14 @@ A living doc — update as primitives ship. Status legend:
 | `restore_and_close/2` | ✅ | T1 — idempotent against already-closed |
 | `window_size/1` (`TIOCGWINSZ`) | ✅ | T1 |
 | `set_window_size/2` (`TIOCSWINSZ`) | ✅ | T1 |
-| `attach/2` | ✅ | T2 — byte pump; T4 — brackets pump with `:prim_tty.disable_reader/1` so iex's tty driver stops competing |
-| Initial winsize seed in `attach/2` | ✅ | T3 |
+| `attach(:controlling, _)` | ✅ | T2 — byte pump; T4 — brackets pump with `:prim_tty.disable_reader/1` so iex's tty driver stops competing |
+| Initial winsize seed in `attach(:controlling, _)` | ✅ | T3 |
 | SIGWINCH-driven runtime propagation | ✅ | T5 — `Linx.Tty.SigwinchHandler` gen_event on `:erl_signal_server`; OTP 28 made the NIF unnecessary |
+| `:no_local_tty` precondition guard on `:controlling` | ⏳ | T6.0 — refuse cleanly when GL is `ssh_cli` / `:remsh` instead of silently opening the BEAM's controlling tty |
+| `attach(:group_leader, _)` | ⏳ | T6.1 — pump via Erlang I/O protocol through `Process.group_leader/0`; works over SSH, `:remsh`, anywhere the user's terminal isn't a kernel tty |
+| Initial winsize seed in `attach(:group_leader, _)` | ⏳ | T6.1 — sourced from `:io.columns/0` / `:io.rows/0` instead of `TIOCGWINSZ` |
+| Polling resize in `attach(:group_leader, _)` | ⏳ | T6.1 — `:winsize_poll_ms` knob; event-driven follow-up deferred to T7 |
+| True-raw mode over SSH (ECHO/ICANON suppression) | ⬜ | T7 — needs `ssh_cli` state inspection or a custom SSH subsystem |
 
 ## Cross-subsystem (new verbs on `Linx.Process`)
 

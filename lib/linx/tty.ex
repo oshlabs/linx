@@ -38,6 +38,31 @@ defmodule Linx.Tty do
   `{:error, {:open, :enxio}}` — a typed error a caller can pattern-match
   on, not a crash.
 
+  ## `/dev/tty` is the BEAM's terminal, not necessarily yours
+
+  `:controlling` targets `/dev/tty` — the BEAM *process's* controlling
+  terminal. That is not always the terminal the *caller* is typing
+  into. The distinction matters in three environments:
+
+    * **SSH iex** (e.g. `ssh nerves-foo.local` → iex on a Nerves
+      device). Erlang's SSH daemon (`ssh_cli`) is a pure
+      I/O-protocol bridge; there is no kernel tty behind the SSH
+      session. `/dev/tty` inside the BEAM resolves to the BEAM's
+      actual controlling tty (on Nerves: the HDMI / UART console),
+      not the SSH session.
+    * **`:remsh`** (`iex --sname foo --remsh bar@host`). The iex
+      shell's group leader is an IO server living in the local
+      node; the remote BEAM has its own `/dev/tty` somewhere else.
+    * **Headless deployments where the BEAM's controlling tty is a
+      serial port the user can't physically reach.**
+
+  In those cases `attach(:controlling, _)` will silently grab the
+  wrong terminal. T6 (in progress, branch `tty-group-leader-attach`)
+  adds both a precondition guard returning `{:error, :no_local_tty}`
+  for these environments, and a sibling `attach(:group_leader,
+  session)` mode that pumps via the Erlang I/O protocol through the
+  caller's group leader. See `docs/tty/PLAN.md` § T6 for the design.
+
   ## Save and restore is mandatory
 
   Any operation that mutates the local terminal's state hands the
@@ -83,8 +108,10 @@ defmodule Linx.Tty do
 
   T0–T5 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
   window-size propagation, coexistence with `iex`'s tty driver, and
-  runtime SIGWINCH-driven resize updates. See `docs/tty/PLAN.md` for
-  the roadmap.
+  runtime SIGWINCH-driven resize updates. T6 is in progress on
+  branch `tty-group-leader-attach`: a sketch of `attach(:group_leader,
+  session)` for SSH / `:remsh` environments where `/dev/tty` is not
+  the caller's terminal. See `docs/tty/PLAN.md` for the roadmap.
   """
 
   alias Linx.Tty.Native

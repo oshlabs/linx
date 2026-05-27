@@ -63,6 +63,30 @@ The syscalls and concepts `Linx.Tty` exposes:
   goals (Erlang's interactive shell, not `docker attach`); included
   for completeness.
 
+## I/O protocol and group leaders (T6 / `attach(:group_leader, _)`)
+
+The SSH-compatible attach mode pumps bytes through the caller's
+group leader instead of `/dev/tty`. The references that shape that
+design:
+
+- [The Erlang I/O Protocol](https://www.erlang.org/doc/apps/stdlib/io_protocol.html)
+  — `{io_request, From, ReplyAs, Request}` /
+  `{io_reply, ReplyAs, Reply}`, the get_chars / put_chars / setopts
+  request shapes, and the contract every group leader implements.
+- [`:io`](https://www.erlang.org/doc/man/io.html) — public-API
+  wrappers (`get_chars/3`, `setopts/2`, `columns/1`, `rows/1`)
+  the pump uses.
+- [Erlang `ssh` user's guide — `ssh_cli`](https://www.erlang.org/doc/man/ssh_cli.html)
+  — the IO server / shell channel handler that fronts an SSH iex
+  session. The class of group leader we have to interoperate with
+  when an iex session is reached over SSH.
+- [`nerves_ssh`](https://github.com/nerves-project/nerves_ssh) —
+  the Nerves wrapper around `:ssh.daemon` that ships in the
+  default Nerves config. Composes `ssh_subsystem_fwup` (firmware
+  updates), an iex subsystem (the shell we attach into), and
+  authorized-key handling. Useful for understanding what process
+  hierarchy a Nerves SSH iex actually lives in.
+
 ## Why `/dev/tty` and not fd 0
 
 The reasoning lives in `docs/tty/PLAN.md` under "Guiding principles."
@@ -71,3 +95,10 @@ going through fd 0 would race the group leader and depend on its
 buffering behaviour. `/dev/tty` is the *controlling terminal*
 abstraction — every C program that wants direct terminal access (`vi`,
 `less`, `ssh`, `passwd`, …) opens it for exactly this reason.
+
+The trade-off shows up when `/dev/tty` is **not** the user's terminal —
+SSH, `:remsh`, embedded device consoles where the BEAM is wired to
+a serial port the user can't reach. T6's `attach(:group_leader, _)`
+is the deliberate "fall back to the group leader anyway" mode for
+those environments, with the corresponding loss of raw-mode fidelity
+(see PLAN.md § T6).

@@ -157,6 +157,42 @@ When the BEAM is not running under `user_drv` (escripts,
 non-shell apps, ssh-shell driver variants), the suspend is a
 no-op — there's no competing reader to worry about.
 
+### What `attach(:controlling, _)` does over SSH / `:remsh`
+
+`:controlling` targets the BEAM's *kernel-level* controlling
+terminal — `open("/dev/tty", ...)`. That fd is whatever tty the
+BEAM was launched against; it has nothing to do with how *you*
+got into the iex session. Two important corollaries:
+
+- **Local terminal emulator** (`iex -S mix` in your laptop's
+  terminal): `/dev/tty` is your terminal. Attach works as
+  expected. This is the happy path the rest of this document
+  assumes.
+- **SSH iex on Nerves** (`ssh my-pi.local` → iex): `/dev/tty` is
+  the **BEAM's controlling tty**, which on Nerves is the HDMI /
+  UART console — *not* your SSH session. Erlang's SSH daemon
+  (`ssh_cli`) is a pure I/O-protocol bridge with no kernel tty
+  behind it, so attach can't reach your remote terminal via
+  `:controlling`. The attempt opens the HDMI fd, runs the pump
+  against *it*, and your SSH iex blocks waiting for a workload
+  exit event the keyboard at the SSH end can never produce.
+
+T6 (in progress, branch `tty-group-leader-attach`) closes both
+loose ends:
+
+1. A precondition guard so `attach(:controlling, _)` over SSH
+   returns `{:error, :no_local_tty}` instead of silently grabbing
+   the HDMI console.
+2. A new mode `attach(:group_leader, session)` that pumps via
+   Erlang's I/O protocol through the caller's group leader — works
+   over SSH, `:remsh`, and anywhere the user's terminal is an
+   Erlang process rather than a kernel tty fd.
+
+Until T6 lands, the workarounds for attaching from a Nerves device
+are: plug a monitor + USB keyboard into the Pi and use the HDMI
+console (which *is* the BEAM's controlling tty), or wait for T6.1.
+See `docs/tty/PLAN.md` § T6 for the design.
+
 ### The owner requirement
 
 The pump waits for `{:linx_process, :pty_out, _}` in the caller's
