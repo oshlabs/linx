@@ -250,7 +250,14 @@ defmodule Linx.Tty do
   Implementation: set `:io.setopts(gl, echo: false)` so `:group`
   routes input through its `:dumb` state (byte-oriented, no line
   editor); spawn a reader sub-process that loops on
-  `:io.get_chars/3` and forwards bytes to the pump's mailbox;
+  `:io.get_chars(:standard_io, ~c"", 1)` and forwards bytes to
+  the pump's mailbox. `N = 1` is intentional: `:group`'s
+  `:dumb` state runs `collect_chars` (non-eager), which waits
+  for *exactly* N chars before returning; the eager variant
+  (`collect_chars_eager`, which returns whatever's available)
+  is gated by `shell = noshell`, unreachable with an iex shell
+  attached. One byte per round-trip is sub-microsecond and
+  invisible at interactive speeds, including paste.
   pump output via `:io.put_chars(gl, bytes)`, which sends
   `{put_chars, :unicode, _}`. The unicode encoding is mandatory
   here — OTP's `ssh_cli` has no io_request clause for `:latin1`
@@ -391,7 +398,17 @@ defmodule Linx.Tty do
   end
 
   defp gl_reader_loop(parent) do
-    case :io.get_chars(:standard_io, ~c"", 1024) do
+    # `N = 1`, not a larger buffer size. With echo=false `:group`
+    # routes input through its `:dumb` state's `collect_chars`
+    # (non-eager) handler, which waits for *exactly* N chars before
+    # returning. The eager variant (`collect_chars_eager`) that
+    # returns on first byte is gated by `shell = noshell`, which we
+    # can't satisfy with an iex shell. So we ask for one byte per
+    # round-trip; each keystroke completes a `get_chars(1)`
+    # immediately, the pump forwards it, and we loop. One message
+    # round-trip per byte is sub-microsecond — fine for interactive
+    # use including paste.
+    case :io.get_chars(:standard_io, ~c"", 1) do
       :eof ->
         send(parent, {:linx_tty_gl, :eof})
 
