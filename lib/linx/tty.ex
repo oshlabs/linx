@@ -267,6 +267,20 @@ defmodule Linx.Tty do
   Both transient state changes (echo and prim_tty output mode)
   are restored unconditionally on exit via `try/after`, even on
   a raise inside the pump.
+
+  ### Ctrl-C handling
+
+  `ssh_cli` intercepts byte `\\x03` (Ctrl-C) from the SSH stream
+  and turns it into `exit(group, interrupt)` instead of passing
+  the byte through. The pump translates that back into a literal
+  `\\x03` byte to the workload's PTY in both shapes it can arrive:
+  as `{:error, :interrupted}` on the reader's pending
+  `:io.get_chars` (the common case), and as a direct
+  `{:EXIT, ^gl, :interrupt}` to the pump's mailbox (the race case
+  where the interrupt arrives between two reader round-trips).
+  The workload's PTY line discipline then turns the byte into
+  SIGINT for the foreground process group — the user-visible
+  "Ctrl-C interrupts the running command" behaviour.
   pump output via `:io.put_chars(gl, bytes)`, which sends
   `{put_chars, :unicode, _}`. The unicode encoding is mandatory
   here — OTP's `ssh_cli` has no io_request clause for `:latin1`
@@ -439,6 +453,19 @@ defmodule Linx.Tty do
       :eof ->
         send(parent, {:linx_tty_gl, :eof})
 
+      {:error, :interrupted} ->
+        # SSH Ctrl-C handling. `ssh_cli` (lib/ssh-5.5.2/src/ssh_cli.erl:408)
+        # intercepts byte `\x03` from the SSH stream and turns it into
+        # `exit(group, interrupt)` instead of passing the byte through.
+        # If we (the reader) have a pending `:io.get_chars` request,
+        # group.erl:511 replies `{error, interrupted}`. Translate that
+        # back into a literal `\x03` byte for the workload so the
+        # workload's PTY line discipline can turn it into SIGINT for
+        # the foreground process group -- the user-visible "Ctrl-C
+        # interrupts the running command" behaviour.
+        send(parent, {:linx_tty_gl, :data, <<3>>})
+        gl_reader_loop(parent)
+
       {:error, why} ->
         send(parent, {:linx_tty_gl, {:error, why}})
 
@@ -495,6 +522,16 @@ defmodule Linx.Tty do
 
       {:EXIT, ^reader, reason} ->
         {:error, {:gl_reader_exit, reason}}
+
+      {:EXIT, ^gl, :interrupt} ->
+        # Race case: ssh_cli intercepted ^C and exit'd us directly
+        # rather than via our reader's pending input request (see
+        # group.erl:507 -- the "input = undefined" handler). Happens
+        # in the tiny window between our reader's get_chars
+        # round-trips. Translate to a `\x03` byte for the workload
+        # so SIGINT propagation still works.
+        _ = Linx.Process.pty_write(session, <<3>>)
+        __pump_gl__(reader, gl, session, poll_ms, last_ws)
 
       {:linx_process, :exited, code} ->
         {:ok, {:exited, code}}

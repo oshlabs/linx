@@ -397,6 +397,33 @@ defmodule Linx.TtyTest do
       :ok = Linx.Process.signal(session, 9)
     end
 
+    test "translates {:EXIT, ^gl, :interrupt} into a <<3>> byte to the session" do
+      # The injected EXIT message should cause the pump to write <<3>>
+      # via Linx.Process.pty_write, which reaches the workload's PTY
+      # slave (cat). cat's PTY line discipline turns 0x03 into SIGINT
+      # for cat's foreground process group, killing cat. We assert the
+      # observable end of that chain: pump returns {:signaled, 2}
+      # (SIGINT) before our backup SIGTERM helper has a chance to fire.
+      {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = Linx.Process.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      gl = fake_gl(self())
+      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+
+      send(self(), {:EXIT, gl, :interrupt})
+
+      # Backup terminator in case the PTY line discipline doesn't
+      # actually deliver SIGINT (defensive; should never fire).
+      spawn_link(fn ->
+        Process.sleep(1_000)
+        :ok = Linx.Process.signal(session, 15)
+      end)
+
+      assert {:ok, {:signaled, 2}} = Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil)
+    end
+
     test "wraps reader-process exit as {:gl_reader_exit, reason}" do
       {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
       assert_receive {:linx_process, :ready, _}, 2_000
@@ -440,6 +467,38 @@ defmodule Linx.TtyTest do
       # (columns + rows) on the first poll.
       assert_received {:fake_gl_geometry, :columns}
       assert_received {:fake_gl_geometry, :rows}
+    end
+  end
+
+  describe "__gl_reader__/2 (T6.1)" do
+    test "translates {:error, :interrupted} from get_chars into a <<3>> byte" do
+      # ssh_cli intercepts ^C from the SSH stream and turns it into
+      # `exit(group, interrupt)` which group.erl translates into
+      # `{:error, :interrupted}` on the pending input request. The
+      # reader should translate that back into a literal 0x03 byte
+      # so the workload's PTY line discipline can turn it into
+      # SIGINT for the foreground process group.
+      test_pid = self()
+
+      # One-shot scripted GL: first get_chars replies :interrupted,
+      # second replies :eof. The reader exits naturally after :eof.
+      gl =
+        spawn_link(fn ->
+          receive do
+            {:io_request, from, reply_as, _req} ->
+              send(from, {:io_reply, reply_as, {:error, :interrupted}})
+          end
+
+          receive do
+            {:io_request, from, reply_as, _req} ->
+              send(from, {:io_reply, reply_as, :eof})
+          end
+        end)
+
+      _reader = spawn_link(Linx.Tty, :__gl_reader__, [test_pid, gl])
+
+      assert_receive {:linx_tty_gl, :data, <<3>>}, 1_000
+      assert_receive {:linx_tty_gl, :eof}, 1_000
     end
   end
 

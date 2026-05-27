@@ -890,6 +890,42 @@ timeout).
 handles backspace as expected. Vim and other TUIs should also
 render cleanly; covered by T6.2.
 
+##### T6.1.2 — Ctrl-C forwarding
+
+✅ **Shipped** alongside T6.1.1's final fix.
+
+The first T6.1.1 deploy worked for editing but broke `Ctrl-C`:
+the user pressed `^C` during a `sleep 30` and attach exited
+with `{:error, {:gl_reader, :interrupted}}` instead of just
+interrupting `sleep`.
+
+Root cause: `ssh_cli` (`ssh_cli.erl:408`) intercepts byte `\x03`
+from the SSH stream and turns it into `exit(group, interrupt)`
+instead of passing the byte through. `group.erl:507-514` then
+translates that into either `{:error, :interrupted}` on the
+pending input request (the reader's `:io.get_chars`) or
+`exit(shell, interrupt)` to the calling iex shell process
+(when no input request is pending — a tiny race window
+between reader round-trips).
+
+Fix: both paths convert back to a literal `\x03` byte and forward
+to the workload's PTY. The workload's line discipline then turns
+0x03 into SIGINT for the foreground process group, which is what
+users expect from Ctrl-C at a shell prompt.
+
+- Reader's `:io.get_chars` returning `{:error, :interrupted}` →
+  the reader sends `{:linx_tty_gl, :data, <<3>>}` to the pump
+  and loops, instead of forwarding the error.
+- Pump receives `{:EXIT, ^gl, :interrupt}` → writes `<<3>>` via
+  `Linx.Process.pty_write` and continues the pump loop.
+
+Both translations covered by `mix test` (37/37 tty): the pump
+test injects the EXIT message and observes the workload (cat)
+dies from SIGINT (`{:signaled, 2}`) before a backup SIGTERM
+fires; the reader test runs against a scripted GL that replies
+`:interrupted` then `:eof` and asserts a `<<3>>` data event
+arrives in the parent's mailbox.
+
 ##### T6.2 — Manual acceptance + docs
 
 - EXAMPLES.md: full "ssh in, attach to bash, type, exit" walkthrough.

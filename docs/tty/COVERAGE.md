@@ -28,7 +28,8 @@ A living doc — update as primitives ship. Status legend:
 | `attach(:group_leader, _)` | ✅ | T6.1 — pumps via Erlang I/O protocol through `Process.group_leader/0`; works over SSH, `:remsh`, and locally (universal mode). `:io.setopts(echo: false)` routes input through `:group`'s `:dumb` state for byte-oriented delivery |
 | Initial winsize seed in `attach(:group_leader, _)` | ✅ | T6.1 — sourced from `:io.columns/0` / `:io.rows/0` |
 | Polling resize in `attach(:group_leader, _)` | ✅ | T6.1 — default 1s poll, memoised so no work when geometry is stable |
-| Driver `:prim_tty` raw-output bracket | ✅ | T6.1.1 — `:sys.replace_state/2` on `ssh_cli` (or `user_drv` locally) flips `:prim_tty` to `output: :raw` for the pump's lifetime so workload bytes (`\b`, ANSI, etc.) pass through verbatim instead of being caret-rendered. Scans the driver's state record for any `:prim_tty`-shaped field — resilient to OTP record-layout reshuffles |
+| Driver `:prim_tty` raw-output bracket | ✅ | T6.1.1 — `:sys.replace_state/2` on `ssh_cli` (or `user_drv` locally) flips `:prim_tty`'s `options.output` map field to `:raw` (direct put_elem, not `:prim_tty.reinit/2` which crashes on SSH's `tty=undefined` state). Workload bytes (`\b`, ANSI, etc.) pass through verbatim instead of being caret-rendered |
+| Ctrl-C forwarding to workload | ✅ | T6.1.2 — `ssh_cli` swallows `\x03` and turns it into `exit(group, interrupt)`; the reader's `{:error, :interrupted}` and the pump's `{:EXIT, ^gl, :interrupt}` paths both translate back to a literal `<<3>>` byte to the workload's PTY, which the line discipline turns into SIGINT |
 
 ## Cross-subsystem (new verbs on `Linx.Process`)
 
