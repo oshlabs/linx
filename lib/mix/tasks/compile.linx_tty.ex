@@ -77,20 +77,28 @@ defmodule Mix.Tasks.Compile.LinxTty do
 
   # erl_nif.h ships in the ERTS include directory under the OTP root --
   # exactly the same lookup `compile.netlink_nif` uses, so both NIFs
-  # build against the same headers without coordination.
+  # build against the same headers without coordination. `ERTS_INCLUDE_DIR`
+  # (set by Nerves and similar cross-compile setups) wins when present so
+  # we pick the target Erlang's headers instead of the host's.
   defp erts_include_dir do
-    root = List.to_string(:code.root_dir())
-    version = List.to_string(:erlang.system_info(:version))
-    dir = Path.join([root, "erts-#{version}", "include"])
+    case System.get_env("ERTS_INCLUDE_DIR") do
+      env when is_binary(env) and env != "" ->
+        env
 
-    cond do
-      File.dir?(dir) ->
-        dir
+      _ ->
+        root = List.to_string(:code.root_dir())
+        version = List.to_string(:erlang.system_info(:version))
+        dir = Path.join([root, "erts-#{version}", "include"])
 
-      true ->
-        case Path.wildcard(Path.join(root, "erts-*/include")) do
-          [] -> Mix.raise("linx_tty: ERTS include dir not found under #{root}")
-          dirs -> dirs |> Enum.sort() |> List.last()
+        cond do
+          File.dir?(dir) ->
+            dir
+
+          true ->
+            case Path.wildcard(Path.join(root, "erts-*/include")) do
+              [] -> Mix.raise("linx_tty: ERTS include dir not found under #{root}")
+              dirs -> dirs |> Enum.sort() |> List.last()
+            end
         end
     end
   end

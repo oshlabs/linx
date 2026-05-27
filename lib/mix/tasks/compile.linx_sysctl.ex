@@ -77,20 +77,28 @@ defmodule Mix.Tasks.Compile.LinxSysctl do
     end
   end
 
-  # Same ERTS include lookup the other Linx NIF compilers use.
+  # Same ERTS include lookup the other Linx NIF compilers use --
+  # `ERTS_INCLUDE_DIR` (Nerves and friends) takes precedence over the
+  # host OTP layout.
   defp erts_include_dir do
-    root = List.to_string(:code.root_dir())
-    version = List.to_string(:erlang.system_info(:version))
-    dir = Path.join([root, "erts-#{version}", "include"])
+    case System.get_env("ERTS_INCLUDE_DIR") do
+      env when is_binary(env) and env != "" ->
+        env
 
-    cond do
-      File.dir?(dir) ->
-        dir
+      _ ->
+        root = List.to_string(:code.root_dir())
+        version = List.to_string(:erlang.system_info(:version))
+        dir = Path.join([root, "erts-#{version}", "include"])
 
-      true ->
-        case Path.wildcard(Path.join(root, "erts-*/include")) do
-          [] -> Mix.raise("linx_sysctl: ERTS include dir not found under #{root}")
-          dirs -> dirs |> Enum.sort() |> List.last()
+        cond do
+          File.dir?(dir) ->
+            dir
+
+          true ->
+            case Path.wildcard(Path.join(root, "erts-*/include")) do
+              [] -> Mix.raise("linx_sysctl: ERTS include dir not found under #{root}")
+              dirs -> dirs |> Enum.sort() |> List.last()
+            end
         end
     end
   end

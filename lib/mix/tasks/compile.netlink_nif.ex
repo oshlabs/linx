@@ -80,19 +80,29 @@ defmodule Mix.Tasks.Compile.NetlinkNif do
   # erl_nif.h ships in the ERTS include directory under the OTP root. The
   # exact erts-<version> is given by :erlang.system_info/1; the wildcard is a
   # fallback for unusual layouts.
+  #
+  # Cross-compile setups (notably Nerves) export `ERTS_INCLUDE_DIR` pointing
+  # at the *target* Erlang's headers; honour it before falling back to the
+  # host OTP layout so we don't compile against the wrong erl_nif.h.
   defp erts_include_dir do
-    root = List.to_string(:code.root_dir())
-    version = List.to_string(:erlang.system_info(:version))
-    dir = Path.join([root, "erts-#{version}", "include"])
+    case System.get_env("ERTS_INCLUDE_DIR") do
+      env when is_binary(env) and env != "" ->
+        env
 
-    cond do
-      File.dir?(dir) ->
-        dir
+      _ ->
+        root = List.to_string(:code.root_dir())
+        version = List.to_string(:erlang.system_info(:version))
+        dir = Path.join([root, "erts-#{version}", "include"])
 
-      true ->
-        case Path.wildcard(Path.join(root, "erts-*/include")) do
-          [] -> Mix.raise("netlink_nif: ERTS include dir not found under #{root}")
-          dirs -> dirs |> Enum.sort() |> List.last()
+        cond do
+          File.dir?(dir) ->
+            dir
+
+          true ->
+            case Path.wildcard(Path.join(root, "erts-*/include")) do
+              [] -> Mix.raise("netlink_nif: ERTS include dir not found under #{root}")
+              dirs -> dirs |> Enum.sort() |> List.last()
+            end
         end
     end
   end
