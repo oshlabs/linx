@@ -709,13 +709,28 @@ milestone per project convention.
 
 ##### T6.0 — Precondition guard
 
-- `Linx.Tty.Env.classify_caller_terminal/0`.
-- Wire into `attach(:controlling, _)`; return
-  `{:error, :no_local_tty}` for `:ssh` / `:remsh`.
-- `Linx.Tty.format_error/1` returns a human-readable string for
-  the new error atom.
-- **Tests:** unit tests against a fake group leader. Manual SSH
-  validation lives in EXAMPLES.md (under "What happens over SSH").
+✅ **Shipped** (`d86a8d4`'s child commit on the same branch).
+
+- `Linx.Tty.Env.classify_caller_terminal/0` and `/1` — walk the
+  caller's GL `"$ancestors"` and return `:ssh | :local_tty |
+  :unknown`. Conservative on uncertainty: returns `:local_tty`
+  when no SSH signal is present, so callers that work today
+  don't suddenly start refusing.
+- `Linx.Tty.attach(:controlling, _)` now branches on the
+  classification and returns `{:error, :no_local_tty}` when the
+  GL has SSH supervisors in its ancestor chain. `:local_tty`
+  and `:unknown` both take the existing path.
+- `Linx.Tty.format_error/1` renders `:no_local_tty` as a
+  human-readable string naming the SSH alternative; falls back
+  to `inspect/1` for other shapes.
+- **Tests** (plain `mix test`, no root): `Linx.Tty.Env` against
+  fixture GLs with synthesized `"$ancestors"` (both SSH and
+  non-SSH); dead-pid edge case → `:unknown`; the guard refusal
+  itself; `format_error/1` covers the new atom and falls
+  through for unknown shapes.
+- The `:remsh` classification is still future work — held in
+  the `:unknown` bucket (where current behaviour is preserved)
+  until we have a probe that names the signal.
 
 ##### T6.1 — `attach(:group_leader, session)`
 

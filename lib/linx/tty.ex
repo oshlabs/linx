@@ -56,12 +56,17 @@ defmodule Linx.Tty do
     * **Headless deployments where the BEAM's controlling tty is a
       serial port the user can't physically reach.**
 
-  In those cases `attach(:controlling, _)` will silently grab the
-  wrong terminal. T6 (in progress, branch `tty-group-leader-attach`)
-  adds both a precondition guard returning `{:error, :no_local_tty}`
-  for these environments, and a sibling `attach(:group_leader,
-  session)` mode that pumps via the Erlang I/O protocol through the
-  caller's group leader. See `docs/tty/PLAN.md` § T6 for the design.
+  In those cases the right thing varies by milestone. T6.0 (shipped
+  on branch `tty-group-leader-attach`) closes the silent-attach
+  trap: `attach(:controlling, _)` now refuses with
+  `{:error, :no_local_tty}` when the caller's group leader is
+  fronted by Erlang's SSH daemon (detected by `:ssh_sup` /
+  `:sshd_sup` in the GL's `"$ancestors"` chain). Call
+  `Linx.Tty.format_error/1` on that atom for a human-readable
+  hint. T6.1 (next) lands the sibling `attach(:group_leader,
+  session)` mode that pumps via the Erlang I/O protocol through
+  the caller's group leader, so attach works over SSH directly.
+  See `docs/tty/PLAN.md` § T6 for the design.
 
   ## Save and restore is mandatory
 
@@ -109,13 +114,15 @@ defmodule Linx.Tty do
   T0–T5 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
   window-size propagation, coexistence with `iex`'s tty driver, and
   runtime SIGWINCH-driven resize updates. T6 is in progress on
-  branch `tty-group-leader-attach`: a sketch of `attach(:group_leader,
-  session)` for SSH / `:remsh` environments where `/dev/tty` is not
-  the caller's terminal. See `docs/tty/PLAN.md` for the roadmap.
+  branch `tty-group-leader-attach` — T6.0 (the SSH-aware refusal
+  guard on `attach(:controlling, _)`, plus the
+  `Linx.Tty.format_error/1` helper) has shipped; T6.1 (the
+  `attach(:group_leader, _)` mode itself) is next. See
+  `docs/tty/PLAN.md` for the roadmap.
   """
 
   alias Linx.Tty.Native
-  alias Linx.Tty.{Saved, WindowSize}
+  alias Linx.Tty.{Env, Saved, WindowSize}
 
   @typedoc """
   An open file descriptor referring to a tty device. Integer — the
@@ -243,8 +250,35 @@ defmodule Linx.Tty do
   """
   @spec attach(:controlling, session()) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
-          | {:error, term()}
+          | {:error, :no_local_tty | term()}
   def attach(:controlling, session) when is_pid(session) do
+    # T6.0 guard: when the caller's terminal is fronted by Erlang's
+    # SSH daemon, /dev/tty is the BEAM's controlling tty (the HDMI /
+    # UART console on Nerves) -- *not* the SSH session. Refuse cleanly
+    # rather than silently pumping bytes to the wrong terminal.
+    case Env.classify_caller_terminal() do
+      :ssh -> {:error, :no_local_tty}
+      _ -> attach_controlling(session)
+    end
+  end
+
+  @doc """
+  Returns a human-readable description for error atoms `Linx.Tty`
+  returns. Currently covers `:no_local_tty` (the T6.0 guard's
+  refusal); falls back to `inspect/1` for any other shape so it can
+  be safely chained at error sites without losing information.
+  """
+  @spec format_error(term()) :: binary()
+  def format_error(:no_local_tty) do
+    "Your iex appears to be over SSH (or :remsh); /dev/tty inside the " <>
+      "BEAM is the BEAM's controlling terminal (e.g. the HDMI/UART " <>
+      "console on Nerves), not your remote session. Use " <>
+      "Linx.Tty.attach(:group_leader, session) instead (T6.1)."
+  end
+
+  def format_error(other), do: inspect(other)
+
+  defp attach_controlling(session) do
     with {:ok, fd, saved} <- open_controlling_raw() do
       # Pause Erlang's prim_tty reader so it stops competing with us
       # for /dev/tty reads. See the module doc's "Coexisting with

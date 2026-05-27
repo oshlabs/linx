@@ -2,6 +2,84 @@ defmodule Linx.TtyTest do
   use ExUnit.Case, async: true
 
   alias Linx.Tty
+  alias Linx.Tty.Env
+
+  describe "Env.classify_caller_terminal/1" do
+    test "classifies a GL with :ssh_sup in $ancestors as :ssh" do
+      gl = spawn_fake_gl(ancestors: [self(), :sshd_sup, :ssh_sup])
+      assert Env.classify_caller_terminal(gl) == :ssh
+      stop_fake_gl(gl)
+    end
+
+    test "classifies a GL with :sshd_sup but no :ssh_sup as :ssh" do
+      # nerves_ssh's wrapper supervisor is enough on its own.
+      gl = spawn_fake_gl(ancestors: [self(), :sshd_sup])
+      assert Env.classify_caller_terminal(gl) == :ssh
+      stop_fake_gl(gl)
+    end
+
+    test "classifies a GL with neither SSH supervisor as :local_tty" do
+      gl = spawn_fake_gl(ancestors: [self(), :kernel_sup])
+      assert Env.classify_caller_terminal(gl) == :local_tty
+      stop_fake_gl(gl)
+    end
+
+    test "classifies a GL with an empty $ancestors as :local_tty" do
+      gl = spawn_fake_gl(ancestors: [])
+      assert Env.classify_caller_terminal(gl) == :local_tty
+      stop_fake_gl(gl)
+    end
+
+    test "classifies a dead GL as :unknown" do
+      pid = spawn(fn -> :ok end)
+      # Wait for it to actually exit.
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _}, 500
+
+      assert Env.classify_caller_terminal(pid) == :unknown
+    end
+
+    test "zero-arity reads Process.group_leader/0" do
+      # In `mix test` the default group leader is ExUnit's IO server,
+      # which doesn't have SSH supervisors in its ancestor chain.
+      # We can't assert it's exactly :local_tty (depends on which
+      # IO server ExUnit installed), but we can assert it's NOT :ssh.
+      refute Env.classify_caller_terminal() == :ssh
+    end
+  end
+
+  describe "attach(:controlling, _) guard (T6.0)" do
+    test "refuses with :no_local_tty when called under an SSH-like GL" do
+      gl = spawn_fake_gl(ancestors: [self(), :sshd_sup, :ssh_sup])
+      original_gl = Process.group_leader()
+      Process.group_leader(self(), gl)
+
+      try do
+        # The guard runs before any /dev/tty access, so we should get
+        # the typed refusal even without a real session pid -- the
+        # function only requires the second arg be a pid for the
+        # is_pid/1 guard. We synthesise a session pid that we
+        # immediately ignore.
+        fake_session = spawn_link(fn -> Process.sleep(:infinity) end)
+        assert {:error, :no_local_tty} = Tty.attach(:controlling, fake_session)
+      after
+        Process.group_leader(self(), original_gl)
+        stop_fake_gl(gl)
+      end
+    end
+
+    test "format_error/1 explains the :no_local_tty refusal" do
+      msg = Tty.format_error(:no_local_tty)
+      assert is_binary(msg)
+      assert msg =~ "SSH"
+      assert msg =~ "attach(:group_leader, session)"
+    end
+
+    test "format_error/1 falls back to inspect for unknown shapes" do
+      assert Tty.format_error({:some, :tuple}) == "{:some, :tuple}"
+      assert Tty.format_error(:weird_atom) == ":weird_atom"
+    end
+  end
 
   describe "NIF scaffolding" do
     test "version/0 reflects the running milestone" do
@@ -264,6 +342,36 @@ defmodule Linx.TtyTest do
 
       assert {:ok, {:signaled, 15}} = Linx.Tty.__pump__(attach_port, session)
     end
+  end
+
+  # Spawn a process that parks in receive with the given
+  # $ancestors list installed in its process dictionary. Used by
+  # the Env tests to drive classify_caller_terminal/1 against
+  # fixture pids without depending on real SSH plumbing.
+  defp spawn_fake_gl(opts) do
+    ancestors = Keyword.get(opts, :ancestors, [])
+    parent = self()
+
+    pid =
+      spawn_link(fn ->
+        Process.put(:"$ancestors", ancestors)
+        send(parent, :ready)
+
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    assert_receive :ready, 500
+    pid
+  end
+
+  defp stop_fake_gl(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      send(pid, :stop)
+    end
+
+    :ok
   end
 
   # Read from `port` until `seen` contains `needle`, then signal the
