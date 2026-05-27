@@ -162,7 +162,7 @@ no-op — there's no competing reader to worry about.
 `:controlling` targets the BEAM's *kernel-level* controlling
 terminal — `open("/dev/tty", ...)`. That fd is whatever tty the
 BEAM was launched against; it has nothing to do with how *you*
-got into the iex session. Two important corollaries:
+got into the iex session.
 
 - **Local terminal emulator** (`iex -S mix` in your laptop's
   terminal): `/dev/tty` is your terminal. Attach works as
@@ -170,28 +170,80 @@ got into the iex session. Two important corollaries:
   assumes.
 - **SSH iex on Nerves** (`ssh my-pi.local` → iex): `/dev/tty` is
   the **BEAM's controlling tty**, which on Nerves is the HDMI /
-  UART console — *not* your SSH session. Erlang's SSH daemon
-  (`ssh_cli`) is a pure I/O-protocol bridge with no kernel tty
-  behind it, so attach can't reach your remote terminal via
-  `:controlling`. The attempt opens the HDMI fd, runs the pump
-  against *it*, and your SSH iex blocks waiting for a workload
-  exit event the keyboard at the SSH end can never produce.
+  UART console — *not* your SSH session. After T6.0 (shipped)
+  `attach(:controlling, _)` refuses cleanly with
+  `{:error, :no_local_tty}` here instead of silently grabbing the
+  HDMI console. `Linx.Tty.format_error/1` renders the atom as a
+  human-readable hint that names `attach(:group_leader, _)` as
+  the alternative.
 
-T6 (in progress, branch `tty-group-leader-attach`) closes both
-loose ends:
+### `attach(:group_leader, _)` — the universal mode (T6.1)
 
-1. A precondition guard so `attach(:controlling, _)` over SSH
-   returns `{:error, :no_local_tty}` instead of silently grabbing
-   the HDMI console.
-2. A new mode `attach(:group_leader, session)` that pumps via
-   Erlang's I/O protocol through the caller's group leader — works
-   over SSH, `:remsh`, and anywhere the user's terminal is an
-   Erlang process rather than a kernel tty fd.
+`:group_leader` pumps through the caller's
+`Process.group_leader/0` via Erlang's I/O protocol, so it works
+in any environment where the user's terminal is reachable
+through that GL — SSH, `:remsh`, and local iex alike.
 
-Until T6 lands, the workarounds for attaching from a Nerves device
-are: plug a monitor + USB keyboard into the Pi and use the HDMI
-console (which *is* the BEAM's controlling tty), or wait for T6.1.
-See `docs/tty/PLAN.md` § T6 for the design.
+```elixir
+# ssh nerves-foo.local
+iex> alias Linx.Process, as: P
+iex> alias Linx.Tty
+iex> {:ok, c} = P.spawn(
+...>   argv: ["/bin/bash"],
+...>   namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
+...>   stdio: :pty)
+iex> P.proceed(c)
+iex> Tty.attach(:group_leader, c)
+# Your SSH iex IS the bash inside the container until you exit.
+{:ok, {:exited, 0}}
+```
+
+What to expect inside the attached shell:
+
+- **Bash feels native.** Bash runs its own readline on top of the
+  workload-side PTY, so prompts, history (Bash's own), tab
+  completion, and Ctrl-A / Ctrl-E work as usual.
+- **`vim`, `top`, `htop`, `less` work.** Single keystrokes reach
+  the workload byte-by-byte (verified end-to-end by the T6
+  probes).
+- **Window resize lags up to ~1 second.** `:group_leader` mode
+  polls `:io.columns / :io.rows` rather than getting a SIGWINCH-
+  like event, so dragging your terminal corner mid-`vim` takes
+  a tick to redraw. T6.0+T6.1 default `:winsize_poll_ms = 1000`;
+  shells don't care, vim notices once. Future work may replace
+  the poll with a window-change hook.
+
+### Side effects of `:group_leader` mode, transient
+
+For the duration of the attach call:
+
+- The caller's `:io.setopts(:echo)` is flipped to `false` so
+  `:group` routes input through its `:dumb` state (byte-oriented).
+  iex's line editing — history recall via ↑/↓, expand_fun /
+  tab completion at the iex prompt — is bypassed; bytes go to
+  the workload's shell, not to iex's readline. Restored on
+  return.
+
+- The pump uses `try/after` to restore `echo` even if the pump
+  body raises. A crash inside attach can never leave your SSH
+  iex stuck in echo-off mode.
+
+### Local iex: `:group_leader` is also fine
+
+`:group_leader` works locally too — the GL is `:group` either
+way. Two practical differences vs `:controlling`:
+
+- **No real SIGWINCH propagation.** Resize lag of up to 1s as
+  noted above. `:controlling` (T5) gets event-driven SIGWINCH;
+  if you care about instant `vim` redraw on local iex, use it.
+- **No prim_tty wrestling.** `:controlling` has to disable
+  `prim_tty`'s reader (T4) so it doesn't compete for `/dev/tty`
+  reads. `:group_leader` reads through `:group` → user_drv →
+  prim_tty in series, no race, no need for the bracket.
+
+Pick `:controlling` locally when you want the snappiest resize
+behaviour. Pick `:group_leader` when you want one code path that
+works everywhere.
 
 ### The owner requirement
 

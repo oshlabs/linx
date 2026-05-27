@@ -25,10 +25,9 @@ A living doc — update as primitives ship. Status legend:
 | Initial winsize seed in `attach(:controlling, _)` | ✅ | T3 |
 | SIGWINCH-driven runtime propagation | ✅ | T5 — `Linx.Tty.SigwinchHandler` gen_event on `:erl_signal_server`; OTP 28 made the NIF unnecessary |
 | `:no_local_tty` precondition guard on `:controlling` | ✅ | T6.0 — `Linx.Tty.Env.classify_caller_terminal/0` sniffs the GL's `"$ancestors"` for `:ssh_sup` / `:sshd_sup`; `attach(:controlling, _)` refuses with `{:error, :no_local_tty}` over SSH. `Linx.Tty.format_error/1` describes the atom. |
-| `attach(:group_leader, _)` | ⏳ | T6.1 — pump via Erlang I/O protocol through `Process.group_leader/0`; works over SSH, `:remsh`, anywhere the user's terminal isn't a kernel tty |
-| Initial winsize seed in `attach(:group_leader, _)` | ⏳ | T6.1 — sourced from `:io.columns/0` / `:io.rows/0` instead of `TIOCGWINSZ` |
-| Polling resize in `attach(:group_leader, _)` | ⏳ | T6.1 — `:winsize_poll_ms` knob; event-driven follow-up deferred to T7 |
-| True-raw mode over SSH (ECHO/ICANON suppression) | ⬜ | T7 — needs `ssh_cli` state inspection or a custom SSH subsystem |
+| `attach(:group_leader, _)` | ✅ | T6.1 — pumps via Erlang I/O protocol through `Process.group_leader/0`; works over SSH, `:remsh`, and locally (universal mode). `:io.setopts(echo: false)` routes input through `:group`'s `:dumb` state for byte-oriented delivery |
+| Initial winsize seed in `attach(:group_leader, _)` | ✅ | T6.1 — sourced from `:io.columns/0` / `:io.rows/0` |
+| Polling resize in `attach(:group_leader, _)` | ✅ | T6.1 — default 1s poll, memoised so no work when geometry is stable |
 
 ## Cross-subsystem (new verbs on `Linx.Process`)
 

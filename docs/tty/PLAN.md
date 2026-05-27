@@ -41,7 +41,9 @@
 >
 > T6.1's mode-flip is therefore a one-liner of public `:io.setopts/2`
 > — no `:sys.replace_state`, no private gen_statem messages, no
-> OTP-internals coupling. Implementation can land directly.
+> OTP-internals coupling. **T6.0 and T6.1 have now shipped** on
+> `tty-group-leader-attach`; T6.2 (manual SSH acceptance + EXAMPLES.md
+> walkthrough) is the only remaining piece.
 
 ## Goal
 
@@ -733,6 +735,8 @@ milestone per project convention.
   until we have a probe that names the signal.
 
 ##### T6.1 — `attach(:group_leader, session)`
+
+✅ **Shipped.**
 
 The whole milestone, concretely:
 

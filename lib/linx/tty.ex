@@ -56,17 +56,20 @@ defmodule Linx.Tty do
     * **Headless deployments where the BEAM's controlling tty is a
       serial port the user can't physically reach.**
 
-  In those cases the right thing varies by milestone. T6.0 (shipped
-  on branch `tty-group-leader-attach`) closes the silent-attach
-  trap: `attach(:controlling, _)` now refuses with
-  `{:error, :no_local_tty}` when the caller's group leader is
-  fronted by Erlang's SSH daemon (detected by `:ssh_sup` /
-  `:sshd_sup` in the GL's `"$ancestors"` chain). Call
-  `Linx.Tty.format_error/1` on that atom for a human-readable
-  hint. T6.1 (next) lands the sibling `attach(:group_leader,
-  session)` mode that pumps via the Erlang I/O protocol through
-  the caller's group leader, so attach works over SSH directly.
-  See `docs/tty/PLAN.md` § T6 for the design.
+  Two pieces close those gaps:
+
+    * `attach(:controlling, _)` refuses with
+      `{:error, :no_local_tty}` when the caller's group leader is
+      fronted by Erlang's SSH daemon (detected by `:ssh_sup` /
+      `:sshd_sup` in the GL's `"$ancestors"` chain). Call
+      `Linx.Tty.format_error/1` on the atom for the hint.
+
+    * `attach(:group_leader, session)` (T6.1) pumps through the
+      caller's group leader instead of `/dev/tty`, working over
+      SSH, `:remsh`, and locally as a universal alternative to
+      `:controlling`. See `attach/2`'s docstring for the
+      mechanism (`:io.setopts(echo: false)` + a linked reader
+      sub-process + `IO.binwrite/2` for output + polled winsize).
 
   ## Save and restore is mandatory
 
@@ -113,11 +116,12 @@ defmodule Linx.Tty do
 
   T0–T5 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
   window-size propagation, coexistence with `iex`'s tty driver, and
-  runtime SIGWINCH-driven resize updates. T6 is in progress on
-  branch `tty-group-leader-attach` — T6.0 (the SSH-aware refusal
-  guard on `attach(:controlling, _)`, plus the
-  `Linx.Tty.format_error/1` helper) has shipped; T6.1 (the
-  `attach(:group_leader, _)` mode itself) is next. See
+  runtime SIGWINCH-driven resize updates. T6.0 + T6.1 shipped on
+  branch `tty-group-leader-attach`: the SSH-aware refusal guard on
+  `attach(:controlling, _)`, the `Linx.Tty.format_error/1` helper,
+  and the `attach(:group_leader, _)` mode that pumps via the
+  Erlang I/O protocol — works over SSH, `:remsh`, and locally as
+  a universal alternative to `:controlling`. See
   `docs/tty/PLAN.md` for the roadmap.
   """
 
@@ -219,17 +223,55 @@ defmodule Linx.Tty do
   end
 
   @doc """
-  Hands the BEAM's controlling terminal over to `session`'s PTY master
-  and pumps bytes both ways until the workload exits, then restores
+  Hands the caller's terminal over to `session`'s PTY master and
+  pumps bytes both ways until the workload exits, then restores
   the terminal.
 
-  `target` chooses which local tty the caller hands over. Today only
-  `:controlling` (open `/dev/tty`) is meaningful; future shapes may
-  accept an explicit fd.
+  `target` selects how the caller's terminal is reached:
+
+    * `:controlling` — open `/dev/tty` directly. Works wherever
+      the BEAM's controlling terminal is the user's terminal
+      (local iex on a terminal emulator, Nerves HDMI / UART
+      console). Refuses with `{:error, :no_local_tty}` when the
+      caller is over SSH (the T6.0 guard).
+
+    * `:group_leader` — pump through the caller's
+      `Process.group_leader/0` via Erlang's I/O protocol. Works
+      over SSH / `:remsh` and anywhere else the user's terminal
+      is an Erlang process rather than a kernel tty fd. Also
+      works on a local terminal; it's the universal mode.
 
   Returns the terminal event from the session — `{:ok, {:exited, n}}`,
-  `{:ok, {:signaled, n}}` — or `{:error, _}` for a setup failure or
-  a pre-exec workload error.
+  `{:ok, {:signaled, n}}` — or `{:error, _}` for a setup failure
+  or a pre-exec workload error.
+
+  ## `:group_leader` mode specifics
+
+  Implementation: set `:io.setopts(gl, echo: false)` so `:group`
+  routes input through its `:dumb` state (byte-oriented, no line
+  editor); spawn a reader sub-process that loops on
+  `:io.get_chars/3` and forwards bytes to the pump's mailbox;
+  pump output via `IO.binwrite/2`. Window size is seeded from
+  `:io.columns/0` + `:io.rows/0` and re-checked on a polling
+  timer (default 1s) since SSH has no SIGWINCH equivalent.
+
+  Side-effects worth knowing about, all transient (restored on
+  return, even on a raise inside the pump):
+
+    * The caller's `:echo` opt is flipped to `false`. iex's line
+      editing (history, completion, `^A`/`^E`, etc.) is bypassed
+      for the duration — bytes go to the workload, not the iex
+      readline. Expected; the workload's own shell does its
+      editing on the other side of the PTY.
+    * Window-size updates lag by up to `:winsize_poll_ms` (default
+      `1000`). Fine for shells, noticeable only when resizing
+      mid-`vim`.
+
+  Caveat: the SSH transport keeps the line-discipline of the
+  user's local terminal (your local `ssh` client puts your local
+  terminal in raw mode by default; if it didn't, no amount of
+  BEAM-side wrangling would deliver per-keystroke input). All
+  observed nerves_ssh paths are fine here.
 
   ## Owner requirement
 
@@ -248,9 +290,9 @@ defmodule Linx.Tty do
   unconditionally via `try/after`, even on a crash inside the loop,
   so a wedged terminal is structurally impossible.
   """
-  @spec attach(:controlling, session()) ::
+  @spec attach(:controlling | :group_leader, session()) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
-          | {:error, :no_local_tty | term()}
+          | {:error, :no_local_tty | :gl_eof | term()}
   def attach(:controlling, session) when is_pid(session) do
     # T6.0 guard: when the caller's terminal is fronted by Erlang's
     # SSH daemon, /dev/tty is the BEAM's controlling tty (the HDMI /
@@ -260,6 +302,10 @@ defmodule Linx.Tty do
       :ssh -> {:error, :no_local_tty}
       _ -> attach_controlling(session)
     end
+  end
+
+  def attach(:group_leader, session) when is_pid(session) do
+    attach_group_leader(session, _winsize_poll_ms = 1000)
   end
 
   @doc """
@@ -277,6 +323,148 @@ defmodule Linx.Tty do
   end
 
   def format_error(other), do: inspect(other)
+
+  defp attach_group_leader(session, winsize_poll_ms) do
+    gl = Process.group_leader()
+    saved_echo = Keyword.get(:io.getopts(gl), :echo, true)
+    saved_trap = Process.flag(:trap_exit, true)
+
+    try do
+      _ = :io.setopts(gl, echo: false)
+
+      initial_ws = seed_winsize(gl, session)
+      reader = spawn_link(__MODULE__, :__gl_reader__, [self(), gl])
+
+      try do
+        __pump_gl__(reader, gl, session, winsize_poll_ms, initial_ws)
+      after
+        # Reader is stuck in :io.get_chars; an exit signal unblocks it.
+        if Process.alive?(reader), do: Process.exit(reader, :shutdown)
+        # Drain its linked :EXIT message so we don't leak it past the
+        # trap_exit restore below.
+        receive do
+          {:EXIT, ^reader, _} -> :ok
+        after
+          200 -> :ok
+        end
+      end
+    after
+      # Only restore the field we touched. `:io.setopts/2` short-circuits
+      # on options it considers `:enotsup` (e.g. `terminal: false`), so
+      # restoring the whole `:io.getopts/0` result would silently drop
+      # later keys -- including the echo we care about.
+      _ = :io.setopts(gl, echo: saved_echo)
+      Process.flag(:trap_exit, saved_trap)
+    end
+  end
+
+  defp seed_winsize(gl, session) do
+    case {:io.columns(gl), :io.rows(gl)} do
+      {{:ok, cols}, {:ok, rows}} ->
+        ws = %WindowSize{rows: rows, cols: cols, xpixel: 0, ypixel: 0}
+        _ = Linx.Process.pty_set_winsize(session, ws)
+        ws
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc false
+  # Linked reader sub-process: synchronous `:io.get_chars/3` in a
+  # loop, translating each batch of bytes into a pump mailbox
+  # message. Exposed (under @doc false) so `spawn_link/3` can reach
+  # it as an MFA -- otherwise an anonymous fun would do.
+  @spec __gl_reader__(pid(), pid()) :: no_return()
+  def __gl_reader__(parent, gl) when is_pid(parent) and is_pid(gl) do
+    # Defensive: `spawn_link/3` already inherits the parent's GL,
+    # which is the GL we want, but set it explicitly so an unusual
+    # call site (e.g. tests) doesn't accidentally read from a
+    # different IO server.
+    Process.group_leader(self(), gl)
+    gl_reader_loop(parent)
+  end
+
+  defp gl_reader_loop(parent) do
+    case :io.get_chars(:standard_io, ~c"", 1024) do
+      :eof ->
+        send(parent, {:linx_tty_gl, :eof})
+
+      {:error, why} ->
+        send(parent, {:linx_tty_gl, {:error, why}})
+
+      bytes when is_binary(bytes) ->
+        send(parent, {:linx_tty_gl, :data, bytes})
+        gl_reader_loop(parent)
+
+      bytes when is_list(bytes) ->
+        send(parent, {:linx_tty_gl, :data, IO.iodata_to_binary(bytes)})
+        gl_reader_loop(parent)
+    end
+  end
+
+  @doc false
+  # The `:group_leader`-mode pump. Exposed (under @doc false) so tests
+  # can drive it directly without spinning up the full attach flow.
+  #
+  # `last_ws` is the most recently forwarded `Linx.Tty.WindowSize` (or
+  # `nil` if the initial seed failed or hasn't happened). The polling
+  # `after` clause forwards a new size only when it differs, so a quiet
+  # terminal generates no work beyond the periodic `:io` round-trips.
+  @spec __pump_gl__(pid(), pid(), session(), pos_integer(), WindowSize.t() | nil) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+          | {:error, term()}
+  def __pump_gl__(reader, gl, session, poll_ms, last_ws)
+      when is_pid(reader) and is_pid(gl) and is_pid(session) and is_integer(poll_ms) do
+    receive do
+      {:linx_tty_gl, :data, bytes} ->
+        _ = Linx.Process.pty_write(session, bytes)
+        __pump_gl__(reader, gl, session, poll_ms, last_ws)
+
+      {:linx_process, :pty_out, bytes} ->
+        IO.binwrite(gl, bytes)
+        __pump_gl__(reader, gl, session, poll_ms, last_ws)
+
+      {:linx_tty_gl, :eof} ->
+        {:error, :gl_eof}
+
+      {:linx_tty_gl, {:error, why}} ->
+        {:error, {:gl_reader, why}}
+
+      {:EXIT, ^reader, reason} ->
+        {:error, {:gl_reader_exit, reason}}
+
+      {:linx_process, :exited, code} ->
+        {:ok, {:exited, code}}
+
+      {:linx_process, :signaled, signum} ->
+        {:ok, {:signaled, signum}}
+
+      {:linx_process, :error, errno, stage} ->
+        {:error, %{errno: errno, stage: stage}}
+    after
+      poll_ms ->
+        new_ws = maybe_forward_winsize(gl, session, last_ws)
+        __pump_gl__(reader, gl, session, poll_ms, new_ws)
+    end
+  end
+
+  defp maybe_forward_winsize(gl, session, last_ws) do
+    case {:io.columns(gl), :io.rows(gl)} do
+      {{:ok, cols}, {:ok, rows}} ->
+        ws = %WindowSize{rows: rows, cols: cols, xpixel: 0, ypixel: 0}
+
+        if ws != last_ws do
+          _ = Linx.Process.pty_set_winsize(session, ws)
+          ws
+        else
+          last_ws
+        end
+
+      _ ->
+        last_ws
+    end
+  end
 
   defp attach_controlling(session) do
     with {:ok, fd, saved} <- open_controlling_raw() do
