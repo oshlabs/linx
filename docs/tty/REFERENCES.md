@@ -82,10 +82,15 @@ line-discipline lives in `:group`. References:
   the pump uses.
 - [`kernel`'s `:group` module](https://github.com/erlang/otp/blob/master/lib/kernel/src/group.erl)
   — the gen_statem that *is* the group leader, both locally and
-  over SSH. Its state record holds the `:cooked` mode atom that
-  causes line-buffering and is T6.1's central knob. Not formally
-  documented as public API; we couple to it the same way T4 couples
-  to `:prim_tty.disable_reader/1`.
+  over SSH. Three states: `:server` (idle), `:xterm` (rich line
+  editor with key_map / history; used when `echo=true`), `:dumb`
+  (byte-oriented; used when `echo=false` *or* `dumb=true`).
+  Reading the kernel-10.6.3 copy at
+  `~/.nerves/artifacts/nerves_system_rpi5-portable-2.0.3/staging/usr/lib/erlang/lib/kernel-10.6.3/src/group.erl`
+  was what unlocked T6.1's mechanism: the routing logic in
+  `server/3` (line 244) and `get_chars_dumb/5` (line 1152). No
+  OTP-internals coupling is required — `:io.setopts(echo: false)`
+  reaches the state field through documented public API.
 - [`kernel`'s `:user_drv` module](https://github.com/erlang/otp/blob/master/lib/kernel/src/user_drv.erl)
   — the supervisor for the `:group` + IO-driver pair, both locally
   (where it wraps `:prim_tty`) and over SSH (where it wraps an

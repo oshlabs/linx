@@ -19,15 +19,29 @@
 > + iex), inside `:remsh`, and anywhere else the user's terminal is
 > not the BEAM's controlling tty.
 >
-> The 2026-05-27 SSH probe on a Nerves rpi5 confirmed the GL is
-> `kernel`'s `:group` gen_statem (same module local iex uses, just
-> on top of an SSH transport rather than `/dev/tty`), that
-> `"$ancestors"` containing `:ssh_sup` / `:sshd_sup` is the
-> detection signal, and that line-buffering comes from `:group`'s
-> `:cooked` mode — not the SSH layer. One mechanism question
-> remains: which knob (`:io.setopts/2`, a private `:group` event,
-> or `:sys.replace_state/2`) flips `:cooked` cleanly. Sketch + probe
-> only on the branch; no implementation yet.
+> The 2026-05-27 SSH probes on a Nerves rpi5 (probe #1 + #2 + #3,
+> under `docs/tty/probes/`) plus a read of `kernel-10.6.3`'s
+> `group.erl` resolved the mechanism entirely:
+>
+>  * The GL is `kernel`'s `:group` gen_statem — same module local
+>    iex uses, just on top of an SSH transport rather than
+>    `/dev/tty`.
+>  * Detection: `"$ancestors"` in the GL's dictionary contains
+>    `:ssh_sup` (OTP `ssh` app top supervisor) and `:sshd_sup`
+>    (nerves_ssh's wrapper).
+>  * Line-buffering came from `:group` routing input requests to
+>    its `:xterm` state (the rich line editor with key_map and
+>    history) when `echo=true`. Setting `echo=false` routes through
+>    `:dumb` state instead, whose `get_chars_dumb` returns bytes
+>    immediately as the driver delivers them.
+>  * Probe #3 verified: with `:io.setopts(gl, echo: false)` set,
+>    `:io.get_chars(:standard_io, '', 1)` returned `<<"x">>` on a
+>    single keypress, no Enter required. SSH transport is
+>    byte-oriented.
+>
+> T6.1's mode-flip is therefore a one-liner of public `:io.setopts/2`
+> — no `:sys.replace_state`, no private gen_statem messages, no
+> OTP-internals coupling. Implementation can land directly.
 
 ## Goal
 
@@ -531,38 +545,58 @@ end
 protocol; no port involved. `IO.binwrite(gl, bytes)` for each
 chunk arriving on `{:linx_process, :pty_out, _}`.
 
-**Mode — `binary: true` is already on; the open knob is
-`:cooked`.** The probe confirmed `:io.getopts(gl)` returns
-`binary: true` by default in the nerves_ssh path, so reads come
-back as binaries with no setopts needed. The actual obstacle is
-that `:group`'s internal `mode` field is `:cooked`: it runs a
-full readline-style line editor (the `key_map` in the GL's
-process dictionary), echoes locally, and only releases bytes to
-the consumer after a line-terminator key. `:io.get_chars(_, '',
-1)` against a cooked `:group` returns the *first byte of the
-next finished line*, which is hopeless for an attach pump.
+**Mode — `:io.setopts(gl, echo: false)`, end of story.** The
+`group.erl` source (kernel-10.6.3, line 244) routes input
+requests inside `:server` state based on two fields:
 
-Flipping `:group` to non-cooked mode for the duration of attach
-is the central T6.1 sub-problem. Three candidate mechanisms, in
-order of preference:
+```erlang
+%% group.erl, server/3:
+{next_state,
+ if Data#state.dumb orelse not Data#state.echo -> dumb; true -> xterm end,
+ ...}
+```
 
-  1. **Public `:io.setopts/2` knob.** `{:terminal, false}`,
-     `{:echo, false}`, `{:line_history, false}` — singly or in
-     combination — may move `:group` out of cooked mode.
-     Pending the follow-up probe.
-  2. **Private message to the `:group` gen_statem.** Same
-     pattern as T4's `:prim_tty.disable_reader/1`: send `:group`
-     a cast/event that flips its internal `mode` field. Requires
-     finding the right message shape from `group.erl`.
-  3. **`:sys.replace_state/2` surgery.** Overwrite the `:cooked`
-     atom in the state record directly. Works regardless of
-     whether `:group` exposes a hook, but couples to the record
-     layout — same kind of OTP-internals dependency T4 already
-     accepts for `user_drv`.
+`echo=false` (or `dumb=true`) routes to the `:dumb` state. In
+`:dumb`, `get_chars_dumb/5` (line 1152) delivers bytes
+immediately as they arrive from the driver — no line editor, no
+buffering at the `:group` layer. Probe #3 verified end-to-end on
+nerves_ssh: a single keystroke returns `<<"x">>` from
+`get_chars(_, '', 1)` with no Enter.
 
-Echo suppression is a separate concern, also handled via one of
-the above. `:io.setopts(gl, [{:echo, false}])` is the documented
-path and very likely works on its own; the probe will confirm.
+`binary: true` is already the default on nerves_ssh (probe #1
+confirmed), so we only need to flip `echo`. Saving and restoring
+just that one field — *not* the full `:io.getopts/1` result —
+matters because `:io.setopts/2` short-circuits on options it
+considers `:enotsup` (e.g. `terminal: true|false`), so passing
+back the full opts list silently drops the echo restore.
+
+```elixir
+saved_echo = Keyword.get(:io.getopts(gl), :echo, true)
+
+try do
+  :io.setopts(gl, echo: false)
+  run_pump(...)
+after
+  :io.setopts(gl, echo: saved_echo)
+end
+```
+
+Side effects of `echo=false` worth noting:
+
+- `:group` stops echoing characters back through the driver
+  (line 1160 — the echo write is guarded by `Data#state.echo`).
+  That matches what we want anyway: the workload's PTY does its
+  own echo when bash/etc. configures `ECHO` on the slave side.
+- The local-edit features of `:xterm` state (history recall via
+  ↑/↓, line editing, tab completion) are bypassed for the
+  duration of attach. The remote terminal emulator and the
+  workload's readline (if any) take over. Expected.
+
+The richer `terminal_mode = raw` path in `:dumb` (line 258 —
+`collect_chars_eager`) is gated by `Data#state.shell = noshell`,
+which we can't satisfy without ripping out the iex shell. We
+don't need it: `collect_chars` in `:dumb` already gives us the
+behaviour we want.
 
 **Window size.** `:io.columns(gl)` and `:io.rows(gl)` return
 integers — the probe got `{:ok, 159}` / `{:ok, 56}`, matching
@@ -657,15 +691,14 @@ suddenly break. The error message names the alternative:
 #### Module structure (incremental)
 
 ```
-Linx.Tty                          — adds attach(:group_leader, _),
-                                    format_error/1 helper.
-Linx.Tty.GroupLeaderReader        — the linked reader sub-process
-                                    that translates :io.get_chars/3
-                                    into pump mailbox messages.
-Linx.Tty.Env                      — classify_caller_terminal/0 +
-                                    a small set of sniff helpers.
+Linx.Tty       — adds attach(:group_leader, _), the reader and
+                 pump helpers (private), format_error/1.
+Linx.Tty.Env   — classify_caller_terminal/0 + small sniff
+                 helpers driven by $ancestors.
 ```
 
+The reader and pump are two small private functions inside
+`Linx.Tty` — no separate module is warranted given the scale.
 No NIF changes. No new agent commands — the workload-side path
 (`pty_write`, `:pty_out`, `pty_set_winsize`) is unchanged.
 
@@ -686,40 +719,82 @@ milestone per project convention.
 
 ##### T6.1 — `attach(:group_leader, session)`
 
-- `Linx.Tty.GroupLeaderReader` (reader sub-process).
-- `Linx.Tty.attach(:group_leader, _)` — entry, set binary mode,
-  spawn reader, initial winsize forward, pump loop, teardown.
-- Pump loop (variant of `__pump__/3`):
-  ```elixir
+The whole milestone, concretely:
+
+```elixir
+def attach(:group_leader, session) when is_pid(session) do
+  gl = Process.group_leader()
+  saved_echo = Keyword.get(:io.getopts(gl), :echo, true)
+
+  try do
+    :io.setopts(gl, echo: false)
+
+    with {:ok, cols} <- :io.columns(gl),
+         {:ok, rows} <- :io.rows(gl) do
+      _ = Linx.Process.pty_set_winsize(session,
+            %WindowSize{rows: rows, cols: cols, xpixel: 0, ypixel: 0})
+    end
+
+    reader = spawn_link(__MODULE__, :__gl_reader__, [self(), gl])
+    __pump_gl__(reader, gl, session, _winsize_poll_ms = 1000)
+  after
+    :io.setopts(gl, echo: saved_echo)
+  end
+end
+
+def __gl_reader__(parent, gl) do
+  Process.group_leader(self(), gl)
+  gl_reader_loop(parent)
+end
+
+defp gl_reader_loop(parent) do
+  case :io.get_chars(:standard_io, ~c"", 1024) do
+    :eof          -> send(parent, {:linx_tty_gl, :eof})
+    {:error, why} -> send(parent, {:linx_tty_gl, {:error, why}})
+    bytes ->
+      send(parent, {:linx_tty_gl, :data, IO.iodata_to_binary(bytes)})
+      gl_reader_loop(parent)
+  end
+end
+
+def __pump_gl__(reader, gl, session, poll_ms) do
   receive do
     {:linx_tty_gl, :data, bytes} ->
       _ = Linx.Process.pty_write(session, bytes)
-      __pump_gl__(reader, gl, session, opts)
+      __pump_gl__(reader, gl, session, poll_ms)
 
     {:linx_process, :pty_out, bytes} ->
       IO.binwrite(gl, bytes)
-      __pump_gl__(reader, gl, session, opts)
+      __pump_gl__(reader, gl, session, poll_ms)
 
     {:linx_tty_gl, :eof} ->
-      {:error, :gl_eof}            # SSH disconnect, etc.
+      {:error, :gl_eof}
 
-    {:linx_process, :exited, code}    -> {:ok, {:exited, code}}
+    {:linx_process, :exited, code}     -> {:ok, {:exited, code}}
     {:linx_process, :signaled, signum} -> {:ok, {:signaled, signum}}
     {:linx_process, :error, errno, stage} ->
       {:error, %{errno: errno, stage: stage}}
   after
     poll_ms ->
-      maybe_forward_winsize(gl, session, &state)
-      __pump_gl__(reader, gl, session, opts)
+      maybe_forward_winsize(gl, session)
+      __pump_gl__(reader, gl, session, poll_ms)
   end
-  ```
-  The `after` clause is the polling-resize loop — folded into the
-  `receive` to avoid a second process.
+end
+```
+
+Plus a `maybe_forward_winsize/2` that re-reads `:io.columns / :io.rows`
+and forwards only on change (memoised per-pump).
+
 - **Tests:** plain `mix test` against a fake group leader (a
-  process that consumes `{io_request, …}` and emits
-  `{io_reply, …}`, just like the existing socketpair stand-in for
-  the `:controlling` path). Verify byte round-trip, eof
-  propagation, winsize forwarding on poll.
+  process that consumes `{io_request, …}` and emits `{io_reply,
+  …}`, just like the existing socketpair stand-in for the
+  `:controlling` path). Verify byte round-trip, eof propagation,
+  winsize forwarding on poll. Plus a regression test that the
+  `after` block restores `echo` even if the pump body raises.
+- **Manual acceptance** (in `EXAMPLES.md` under T6.2): SSH into a
+  Nerves device, spawn bash with `stdio: :pty`, attach via
+  `:group_leader`, type characters, run `vim`, drag the SSH
+  client's terminal corner, observe a clean redraw within ~1s.
 
 ##### T6.2 — Manual acceptance + docs
 
@@ -728,15 +803,17 @@ milestone per project convention.
   documented; the "Ctrl-C unwinds your local ssh, not the workload"
   surprise noted.
 
-#### Open questions — what the 2026-05-27 probe answered
+#### Open questions — resolved by the 2026-05-27 probe series
 
-The first SSH probe (`docs/tty/probes/T6_ssh_probe.exs`) answered
-two of the three original open questions:
+Recorded for posterity; all three are answered.
 
-1. **Does the SSH path line-buffer?** **Yes**, but the culprit is
-   `:group`'s `:cooked` mode, not ssh_cli. `:io.get_chars(_, ~c"",
-   1)` blocked until Enter; the returned byte was the trailing
-   newline of the line that `:group`'s editor finally released.
+1. **Does the SSH path line-buffer?** **Yes by default, fixable
+   trivially.** Probe #1 confirmed `:io.get_chars(_, '', 1)`
+   waits for Enter. Probe #3 confirmed it returns immediately
+   after `:io.setopts(gl, echo: false)`. `:group` routes through
+   its `:xterm` line editor when echo is on and through `:dumb`
+   when echo is off; `:dumb`'s `get_chars_dumb/5` is
+   byte-oriented.
 2. **Is there a stable SSH-detection signal?** **Yes**: the GL's
    `"$ancestors"` list contains `:ssh_sup` (OTP `ssh` app top
    supervisor) and `:sshd_sup` (nerves_ssh's wrapper). Cleanest
@@ -746,26 +823,9 @@ two of the three original open questions:
    from a `:remsh` session is the next data point. Not a
    blocker for T6.0/T6.1.
 
-The remaining unknown — and the only one blocking a clean
-T6.1 implementation — is **how to flip `:group` out of cooked
-mode**. The state record's mode field is the atom `:cooked` (the
-7th element of the inner `:state` tuple in `:sys.get_state(gl)`).
-Three candidate mechanisms are listed under "Mechanism / Mode"
-above; the follow-up probe will identify which one ships:
-
-```elixir
-# Slated for docs/tty/probes/T6_group_mode.exs
-gl = Process.group_leader()
-mode = fn -> :sys.get_state(gl, 500) |> elem(1) |> Tuple.to_list()
-             |> Enum.find(&(&1 in [:cooked, :raw])) end
-
-IO.inspect(mode.(), label: "initial")
-:io.setopts(gl, terminal: false)
-IO.inspect(mode.(), label: "after terminal: false")
-:io.setopts(gl, echo: false)
-IO.inspect(mode.(), label: "after echo: false")
-# … plus a get_chars(1) probe at each step, restored at the end.
-```
+Read `docs/tty/probes/T6_*.exs` for the probe scripts and
+captured terminal output. The `group.erl` cross-reference is
+under "References" — `kernel-10.6.3/src/group.erl`.
 
 #### Deferred — architected-for, not built in T6
 
@@ -775,22 +835,22 @@ IO.inspect(mode.(), label: "after echo: false")
   `:unknown` and the existing `:controlling` path runs — which
   is wrong over `:remsh` too, but at least it doesn't pretend to
   be the SSH solution.
-- **T7 — bytes-perfect raw mode over SSH.** Originally framed as
-  "go below ssh_cli." The probe reframes this: `:group` does
-  the line-discipline, ssh_cli is just transport. If a chosen
-  T6.1 mode flip leaves residual cooked-mode artefacts (special
-  keys, control codes), T7 is the deeper surgery on `:group` (or
-  on the user_drv equivalent above it) to clear them out.
-  Scope is much smaller than the original sketch suggested.
 - **Event-driven resize over SSH.** Replace polling with a hook
-  into the IO server's window-change handler (probably on the
-  user_drv pid sitting between `:group` and the SSH transport)
-  so resizes propagate within milliseconds, not seconds.
+  into the user_drv-equivalent's window-change handler so
+  resizes propagate within milliseconds, not seconds. T6.1 ships
+  with the 1s poll; this would mostly matter for users who
+  resize while inside `vim`.
 - **A first-class SSH-subsystem attach.** Skip the shell-channel
   layer entirely: expose `Linx.Tty.SshSubsystem` (an
   `ssh_server_channel`) that a consumer wires into their
   `:ssh.daemon` config. Cleanest architecturally, but pushes
   setup into every consumer; deferred until someone needs it.
+
+The earlier T7 "go below ssh_cli for true-raw mode" item is
+**dropped**: the probe series showed line-discipline lived in
+`:group`, not ssh_cli, and `:io.setopts(echo: false)` already
+gives byte-oriented input. There is no obvious additional
+fidelity to chase.
 
 #### Why not auto-fallback?
 
