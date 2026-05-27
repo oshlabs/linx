@@ -103,7 +103,7 @@ alias Linx.User
 
 {:ok, c} =
   P.spawn(
-    argv: ["/bin/bash"],
+    argv: ["/bin/sh"],
     namespaces: [:user, :mount, :pid, :uts, :ipc],
     stdio: :pty
   )
@@ -120,7 +120,7 @@ P.proceed(c)
 Linx.Tty.attach(:controlling, c)
 ```
 
-Now `whoami` inside the attached bash reports `root`; `id` shows `uid=0(root) gid=0(root)`; the prompt renders as `[root@... /]#` (the `#` is bash's signal that EUID == 0). Outside, the BEAM is still uid 1000 — the kernel maps `uid 0 inside` ↔ `uid 1000 outside` per the `setup_maps` call.
+Now `whoami` inside the attached shell reports `root`; `id` shows `uid=0(root) gid=0(root)`; the prompt renders as `# ` (sh's marker that EUID == 0 — non-root sees `$ `). Outside, the BEAM is still uid 1000 — the kernel maps `uid 0 inside` ↔ `uid 1000 outside` per the `setup_maps` call.
 
 `setup_maps/2` is the canonical "deny setgroups, then write uid_map, then write gid_map" sequence in one call. For finer control, the three primitives (`deny_setgroups/1`, `set_uid_map/2`, `set_gid_map/2`) are available individually.
 
@@ -136,7 +136,7 @@ alias Linx.Mount
 
 {:ok, c} =
   P.spawn(
-    argv: ["/bin/bash"],
+    argv: ["/bin/sh"],
     namespaces: [:mount, :pid, :uts, :ipc, :user],
     stdio: :pty
   )
@@ -151,11 +151,11 @@ P.proceed(c)
 Linx.Tty.attach(:controlling, c)
 ```
 
-Now `ps` inside the attached bash shows only the workload's own processes (PID 1 = bash, plus whatever it spawns). The `:in` option works the same way for `umount/2`, `bind/3`, `remount/2`, `move/2`, and `pivot_root/3` — they all operate on the target namespace via the kernel's setns mechanism.
+Now `ps` inside the attached shell shows only the workload's own processes (PID 1 = sh, plus whatever it spawns). The `:in` option works the same way for `umount/2`, `bind/3`, `remount/2`, `move/2`, and `pivot_root/3` — they all operate on the target namespace via the kernel's setns mechanism.
 
 > **Rootless caveat.** Mounting via `:in: {:pid, _}` requires the BEAM to have `CAP_SYS_ADMIN` in the child's user namespace. If the BEAM is itself root, that's automatic. If the BEAM is unprivileged *and* the child has its own `:user` namespace, the kernel returns `EPERM` — the workaround is to have the workload itself do the `/proc` remount after `execve` (where it has full caps in its own user ns). See `docs/mount/EXAMPLES.md`.
 
-### Going further: configure the container's network before bash starts
+### Going further: configure the container's network before the shell starts
 
 `Linx.Netlink` lets you configure the child's network from the host *while the child is parked at the checkpoint between `clone()` and `execve()`* — build a virtual link, hand it to the child, add an address and route, then proceed:
 
@@ -167,7 +167,7 @@ alias Linx.Tty
 
 {:ok, c} =
   P.spawn(
-    argv: ["/bin/bash"],
+    argv: ["/bin/sh"],
     namespaces: [:net, :mount, :pid, :uts, :ipc],
     stdio: :pty
   )
@@ -186,7 +186,7 @@ receive do {:linx_process, :ready, _} -> :ok end
 :ok = Link.set_up(ns, "ct0")
 :ok = Route.add_default(ns, "10.0.0.1")
 
-# Release the child -- it execs bash now, with a fully configured network.
+# Release the child -- it execs sh now, with a fully configured network.
 P.proceed(c)
 Tty.attach(:controlling, c)
 ```
@@ -257,7 +257,7 @@ The same checkpoint window is where `Linx.Cgroup` slots in. Create a cgroup, set
 alias Linx.Process, as: P
 alias Linx.Cgroup
 
-{:ok, c} = P.spawn(argv: ["/bin/bash"], namespaces: [:net, :pid])
+{:ok, c} = P.spawn(argv: ["/bin/sh"], namespaces: [:net, :pid])
 receive do {:linx_process, :ready, _} -> :ok end
 {:ok, host_pid} = P.host_pid(c)
 
@@ -471,13 +471,37 @@ Tty.window_size(fd)
 
 The `Saved` blob is the original `termios` state, returned so the terminal can be restored exactly. `restore_and_close/2` is idempotent against already-closed fds, so wrapping callers with `try/after` is structurally safe — the user's terminal can never be left in raw mode.
 
-The headliner is **`attach/2`**: given a `Linx.Process` session running under `stdio: :pty`, it hands the caller's controlling terminal over to the workload's PTY master and pumps bytes both ways until the workload exits, restoring the terminal unconditionally on return. Three quality-of-life pieces are baked in:
+The headliner is **`attach/2`**: given a `Linx.Process` session running under `stdio: :pty`, it pumps bytes between the workload's PTY master and the caller's terminal until the workload exits, restoring all transient state unconditionally on return. Two modes pick how the caller's terminal is reached:
 
-- **Coexistence with iex.** Erlang's `user_drv` / `prim_tty` driver reads `/dev/tty` to support type-ahead at the iex prompt. `attach/2` calls `:prim_tty.disable_reader/1` for its duration so keystrokes can't be split between the two readers.
-- **Initial window size.** The workload's PTY is sized from the local terminal at entry, so `vim` and `less` open at the right dimensions.
-- **Live resize.** Drag your terminal corner while inside the attached shell and the workload sees `SIGWINCH` with the new size in real time. A `:gen_event` handler registered on OTP's `:erl_signal_server` carries each resize through.
+- **`attach(:controlling, c)`** — `open("/dev/tty", ...)` directly. Works wherever the BEAM's controlling tty is the user's terminal (`iex -S mix` in a terminal emulator, Nerves HDMI / UART console). Event-driven `SIGWINCH` resize, snappiest behaviour. Refuses with `{:error, :no_local_tty}` over SSH instead of silently grabbing the wrong terminal.
+- **`attach(:group_leader, c)`** — pumps through `Process.group_leader/0` via Erlang's I/O protocol. Works over SSH, `:remsh`, and locally as a universal mode. Polled resize (~1 s). The headline mode for SSH-into-a-Nerves-device workflows.
 
-The end-to-end demo — spawn a rootless namespaced bash, attach our local terminal to it, run a few real commands inside, exit back to iex — verbatim transcript from an actual session:
+Quality-of-life features baked into `attach/2`:
+
+- **Coexistence with iex.** In `:controlling` mode, Erlang's `user_drv` / `prim_tty` driver already reads `/dev/tty` to support type-ahead at the iex prompt; `attach/2` calls `:prim_tty.disable_reader/1` for its duration so keystrokes can't be split between the two readers. In `:group_leader` mode, the equivalent issue (`prim_tty`'s cooked-mode line editor caret-rendering `\b` as `^(`, etc.) is solved by temporarily flipping `prim_tty`'s output mode to `:raw` via `:sys.replace_state/2` on the SSH channel handler.
+- **Initial window size.** Seeded from the local terminal at entry, so `vim` and `less` open at the right dimensions. `:controlling` reads `TIOCGWINSZ`; `:group_leader` reads `:io.columns/0` + `:io.rows/0`.
+- **Live resize.** `:controlling` propagates `SIGWINCH` via a `:gen_event` handler on OTP's `:erl_signal_server` for sub-millisecond redraws. `:group_leader` polls geometry on a 1-second cadence (no SSH-side SIGWINCH equivalent surfaced through `:io`).
+- **Ctrl-C.** `ssh_cli` swallows byte `\x03` from the SSH stream and turns it into `exit(group, interrupt)`; `:group_leader` mode catches that in both shapes it can arrive and translates back to a literal `<<3>>` byte to the workload's PTY. Ctrl-C interrupts the running command and returns to the shell prompt, exactly as on a real terminal — without exiting the attach.
+
+The headline use case is `ssh nerves-foo.local` → iex → spawn a rootless container → `attach(:group_leader, c)` → you're inside the container's shell, everything from backspace to vim to Ctrl-C works:
+
+```elixir
+alias Linx.Process, as: P
+alias Linx.Tty
+
+{:ok, c} =
+  P.spawn(
+    argv: ["/bin/sh"],
+    namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
+    stdio: :pty
+  )
+
+P.proceed(c)
+Tty.attach(:group_leader, c)
+# Your SSH iex IS the container's /bin/sh until you `exit`.
+```
+
+For the local-terminal case the canonical demo is `attach(:controlling, c)` — verbatim transcript from an actual session, spawning a rootless namespaced bash and exiting back to iex:
 
 ```
 [ldr@fry linx]$ iex -S mix
