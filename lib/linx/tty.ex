@@ -249,7 +249,12 @@ defmodule Linx.Tty do
 
   Implementation: set `:io.setopts(gl, echo: false)` so `:group`
   routes input through its `:dumb` state (byte-oriented, no line
-  editor); spawn a reader sub-process that loops on
+  editor); flip the driver's `:prim_tty` output mode from
+  `:cooked` to `:raw` via `:sys.replace_state/2` so workload
+  output bytes pass through verbatim instead of being rendered
+  in caret notation (without this, the workload's `\b \b`
+  backspace-erase echo arrives at the SSH client as `^( ^(`);
+  spawn a reader sub-process that loops on
   `:io.get_chars(:standard_io, ~c"", 1)` and forwards bytes to
   the pump's mailbox. `N = 1` is intentional: `:group`'s
   `:dumb` state runs `collect_chars` (non-eager), which waits
@@ -258,6 +263,10 @@ defmodule Linx.Tty do
   is gated by `shell = noshell`, unreachable with an iex shell
   attached. One byte per round-trip is sub-microsecond and
   invisible at interactive speeds, including paste.
+
+  Both transient state changes (echo and prim_tty output mode)
+  are restored unconditionally on exit via `try/after`, even on
+  a raise inside the pump.
   pump output via `:io.put_chars(gl, bytes)`, which sends
   `{put_chars, :unicode, _}`. The unicode encoding is mandatory
   here — OTP's `ssh_cli` has no io_request clause for `:latin1`
@@ -344,6 +353,22 @@ defmodule Linx.Tty do
     try do
       _ = :io.setopts(gl, echo: false)
 
+      # Flip the driver's `:prim_tty` output mode from `:cooked` to
+      # `:raw` for the lifetime of the pump. Cooked mode renders
+      # non-printable bytes as caret notation (`\b` -> `^(`, `\x7F` ->
+      # `^?`, etc.) -- a useful behaviour for iex's own line editor,
+      # but exactly wrong for an attach pump that's supposed to relay
+      # the workload's raw terminal bytes through to the caller's
+      # terminal emulator. Without this, backspace from the workload's
+      # PTY echo (`\b \b`) renders as `^( ^(`, vim's TUI sequences get
+      # mangled, etc. See T6.1.1 in `docs/tty/PLAN.md`.
+      #
+      # Returns an opaque "saved" value (or `nil` if the driver
+      # doesn't look like ssh_cli / user_drv with a `:prim_tty` state)
+      # so the matching restore on the way out is a no-op when there's
+      # nothing to undo.
+      saved_tty_mode = take_prim_tty_output_quietly(gl, :raw)
+
       initial_ws = seed_winsize(gl, session)
       reader = spawn_link(__MODULE__, :__gl_reader__, [self(), gl])
 
@@ -359,6 +384,8 @@ defmodule Linx.Tty do
         after
           200 -> :ok
         end
+
+        give_prim_tty_output_back(saved_tty_mode)
       end
     after
       # Only restore the field we touched. `:io.setopts/2` short-circuits
@@ -572,9 +599,11 @@ defmodule Linx.Tty do
     end
   end
 
-  defp safe_get_state(pid) do
+  defp safe_get_state(pid), do: safe_get_state(pid, 1000)
+
+  defp safe_get_state(pid, timeout) do
     try do
-      :sys.get_state(pid, 1000)
+      :sys.get_state(pid, timeout)
     catch
       _, _ -> nil
     end
@@ -589,6 +618,115 @@ defmodule Linx.Tty do
   defp safe_disable(tty) do
     try do
       :prim_tty.disable_reader(tty)
+    catch
+      _, _ -> :error
+    end
+  end
+
+  # Find the driver pid backing the caller's group leader (the SSH
+  # `ssh_cli` channel handler on a Nerves SSH session, the local
+  # `user_drv` on a terminal-attached iex) and flip its `:prim_tty`
+  # output mode to `new_mode`. Returns `{drv, old_mode}` to hand to
+  # `give_prim_tty_output_back/1`, or `nil` if the driver doesn't
+  # have an addressable `:prim_tty` state (escripts, non-shell apps,
+  # drivers we don't recognise).
+  #
+  # We touch OTP internals here -- specifically, we run a function
+  # inside the driver process via `:sys.replace_state/2` that scans
+  # its state record for an element that responds to
+  # `:prim_tty.output_mode/1`, swaps in a `:prim_tty.reinit/2`'d
+  # version with the new output mode, and shouts the previous mode
+  # back to us through a one-shot ref. Same kind of OTP-internals
+  # coupling T4 already accepts for `:prim_tty.disable_reader/1`.
+  # Scanning rather than hard-coding the field index makes us
+  # resilient to ssh_cli / user_drv record-layout reshuffles across
+  # OTP versions.
+  defp take_prim_tty_output_quietly(gl, new_mode) do
+    # Use a short timeout (200ms) for the GL introspection: a real
+    # `:group` gen_statem replies within microseconds, while
+    # non-`:sys`-capable processes (test fakes, escripts' raw IO
+    # servers, etc.) wedge the call until the timeout. Falling
+    # through quickly on those keeps the fall-through path cheap.
+    with {_state_name, group_state} <- safe_get_state(gl, 200),
+         drv when is_pid(drv) <- safe_elem(group_state, 2),
+         {:ok, old_mode} <- safe_replace_prim_tty_output(drv, new_mode) do
+      {drv, old_mode}
+    else
+      _ -> nil
+    end
+  end
+
+  defp give_prim_tty_output_back(nil), do: :ok
+
+  defp give_prim_tty_output_back({drv, old_mode}) do
+    _ = safe_replace_prim_tty_output(drv, old_mode)
+    :ok
+  end
+
+  defp safe_replace_prim_tty_output(drv, new_mode) do
+    ref = make_ref()
+    parent = self()
+
+    swap = fn state ->
+      case find_prim_tty_in_state(state) do
+        {idx, old_tty} ->
+          case safe_prim_tty_reinit(old_tty, %{output: new_mode}) do
+            {:ok, new_tty, old_mode} ->
+              send(parent, {ref, {:ok, old_mode}})
+              put_elem(state, idx, new_tty)
+
+            :error ->
+              send(parent, {ref, :reinit_failed})
+              state
+          end
+
+        :not_found ->
+          send(parent, {ref, :no_prim_tty})
+          state
+      end
+    end
+
+    try do
+      _ = :sys.replace_state(drv, swap, 200)
+
+      receive do
+        {^ref, {:ok, old_mode}} -> {:ok, old_mode}
+        {^ref, _} -> :error
+      after
+        200 -> :error
+      end
+    catch
+      _, _ -> :error
+    end
+  end
+
+  defp find_prim_tty_in_state(state) when is_tuple(state) do
+    state
+    |> Tuple.to_list()
+    |> Enum.with_index()
+    |> Enum.find_value(:not_found, fn {field, idx} ->
+      case safe_prim_tty_output_mode(field) do
+        {:ok, _} -> {idx, field}
+        _ -> false
+      end
+    end)
+  end
+
+  defp find_prim_tty_in_state(_), do: :not_found
+
+  defp safe_prim_tty_output_mode(maybe_tty) do
+    try do
+      {:ok, :prim_tty.output_mode(maybe_tty)}
+    catch
+      _, _ -> :error
+    end
+  end
+
+  defp safe_prim_tty_reinit(old_tty, opts) do
+    try do
+      old_mode = :prim_tty.output_mode(old_tty)
+      new_tty = :prim_tty.reinit(old_tty, opts)
+      {:ok, new_tty, old_mode}
     catch
       _, _ -> :error
     end

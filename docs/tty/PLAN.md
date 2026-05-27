@@ -40,10 +40,15 @@
 >    byte-oriented.
 >
 > T6.1's mode-flip is therefore a one-liner of public `:io.setopts/2`
-> — no `:sys.replace_state`, no private gen_statem messages, no
-> OTP-internals coupling. **T6.0 and T6.1 have now shipped** on
-> `tty-group-leader-attach`; T6.2 (manual SSH acceptance + EXAMPLES.md
-> walkthrough) is the only remaining piece.
+> — no private gen_statem messages, no record-layout coupling beyond
+> what T4 already does. **T6.0, T6.1, and T6.1.1 have shipped** on
+> `tty-group-leader-attach`. T6.1.1 added a `:prim_tty` output-mode
+> bracket (`:sys.replace_state/2` on `ssh_cli` to flip `:cooked` to
+> `:raw` for the pump's lifetime) so workload backspace echo and
+> vim TUI sequences render verbatim through the SSH channel instead
+> of being caret-rendered (`\b` → `^(`, etc.) by `:prim_tty`'s
+> cooked-mode line editor. T6.2 (manual SSH acceptance +
+> EXAMPLES.md walkthrough) is the only remaining piece.
 
 ## Goal
 
@@ -814,6 +819,60 @@ and forwards only on change (memoised per-pump).
   Nerves device, spawn bash with `stdio: :pty`, attach via
   `:group_leader`, type characters, run `vim`, drag the SSH
   client's terminal corner, observe a clean redraw within ~1s.
+
+##### T6.1.1 — `:prim_tty` raw-output bracket
+
+✅ **Shipped** (`8d0823f`'s child commit).
+
+The first deployed T6.1 worked for typing and command execution
+but mangled the *visual* output of in-line editing: backspace
+showed `^(` instead of erasing, vim's TUI sequences came out
+garbled. Root cause: `ssh_cli` initialises `:prim_tty` with
+`output := :cooked` (see `lib/ssh-5.5.2/src/ssh_cli.erl:72`), and
+`:prim_tty`'s cooked-mode line-editor renders non-printable bytes
+in caret notation (`lib/kernel-10.6.3/src/prim_tty.erl:1395-1399`
+— `\b` → `^(`, `\x7F` → `^?`, etc.). Useful for iex's own line
+editor; exactly wrong for a pass-through attach.
+
+T6.1.1 brackets the pump with a `:prim_tty` output-mode flip:
+
+- On entry, walk `Process.group_leader/0`'s state for the driver
+  pid (the `ssh_cli` channel handler over SSH; `user_drv` locally
+  if the user reaches for `:group_leader` there too). Run
+  `:sys.replace_state/2` on it with a function that scans every
+  field of the driver's state record for one that responds to
+  `:prim_tty.output_mode/1`, calls
+  `:prim_tty.reinit(field, %{output: :raw})`, swaps it back into
+  the state, and shouts the previous mode back to the caller via
+  a one-shot ref.
+- On exit (inside the existing inner `try/after`, before the echo
+  restore), replay the same swap with the saved mode.
+
+Scanning rather than hard-coding the field index makes the
+mechanism resilient to ssh_cli / user_drv record-layout
+reshuffles across OTP versions. Every step is wrapped in safe
+helpers; if anything goes wrong (non-`:sys`-compatible driver,
+no `:prim_tty` field found, `:prim_tty.reinit/2` rejecting the
+mode), we fall through to `nil` and the attach proceeds with
+today's caret-rendered output — visibly broken, never crashy.
+A short 200ms timeout on the introspecting `:sys.get_state /
+:sys.replace_state` keeps the fall-through cheap when the
+driver isn't a `:sys`-capable process (test fakes, escripts).
+
+Same kind of OTP-internals coupling T4 already accepts for
+`:prim_tty.disable_reader/1`. The benefit (usable interactive
+backspace + vim) is high; the failure mode (cosmetic cooked
+rendering) is exactly the pre-T6.1.1 behaviour.
+
+**Tests:** existing 35-test tty suite stays green; the
+echo-restoration test exercises the fall-through path (the
+fake_gl isn't `:sys`-capable, helpers return `nil`,
+restore is a no-op, no test slowdown beyond the 200ms
+timeout).
+
+**Manual acceptance:** the user's SSH-iex bash session now
+handles backspace as expected. Vim and other TUIs should also
+render cleanly; covered by T6.2.
 
 ##### T6.2 — Manual acceptance + docs
 
