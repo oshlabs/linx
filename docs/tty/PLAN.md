@@ -41,14 +41,20 @@
 >
 > T6.1's mode-flip is therefore a one-liner of public `:io.setopts/2`
 > — no private gen_statem messages, no record-layout coupling beyond
-> what T4 already does. **T6.0, T6.1, and T6.1.1 have shipped** on
+> what T4 already does. **T6 is fully shipped** on
 > `tty-group-leader-attach`. T6.1.1 added a `:prim_tty` output-mode
 > bracket (`:sys.replace_state/2` on `ssh_cli` to flip `:cooked` to
 > `:raw` for the pump's lifetime) so workload backspace echo and
 > vim TUI sequences render verbatim through the SSH channel instead
 > of being caret-rendered (`\b` → `^(`, etc.) by `:prim_tty`'s
-> cooked-mode line editor. T6.2 (manual SSH acceptance +
-> EXAMPLES.md walkthrough) is the only remaining piece.
+> cooked-mode line editor. T6.1.2 added Ctrl-C forwarding: `ssh_cli`
+> swallows `\x03` and turns it into `exit(group, interrupt)`, so the
+> reader's `{:error, :interrupted}` reply and the pump's
+> `{:EXIT, ^gl, :interrupt}` shape both translate back to a literal
+> `<<3>>` byte to the workload's PTY (the workload's line discipline
+> then turns it into SIGINT for the foreground process group).
+> T6.2 captured the observed end-to-end behaviour in EXAMPLES.md.
+> Ready for PR.
 
 ## Goal
 
@@ -928,10 +934,22 @@ arrives in the parent's mailbox.
 
 ##### T6.2 — Manual acceptance + docs
 
-- EXAMPLES.md: full "ssh in, attach to bash, type, exit" walkthrough.
-- Line-buffering caveat documented; vim/top expected behaviour
-  documented; the "Ctrl-C unwinds your local ssh, not the workload"
-  surprise noted.
+✅ **Shipped.**
+
+- `docs/tty/EXAMPLES.md`'s "Attaching to a workload's PTY"
+  subtree was rewritten end-to-end against the observed
+  behaviour: two-mode intro, `:controlling` walkthrough with
+  the coexists-with-iex / refuses-over-SSH notes, full
+  `:group_leader` walkthrough including a captured session
+  block, the transient side-effects list (echo flip, prim_tty
+  raw-output bracket, trap_exit), the `Ctrl-C` handling
+  explanation in both of its arrival shapes, polled resize,
+  and a "when to pick which mode" table.
+- The `^C → exit 130` quirk worth knowing about is documented
+  inline: that's `128 + SIGINT(2)`, reported by `sh` from the
+  last command's status, not an attach failure.
+- All examples are paste-friendly (no `iex>` / `...>` prefixes)
+  and use `/bin/sh` — matches the Nerves rpi5 deployment target.
 
 #### Open questions — resolved by the 2026-05-27 probe series
 

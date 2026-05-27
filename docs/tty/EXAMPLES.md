@@ -10,29 +10,29 @@ actual terminal state and are best demonstrated interactively.
 ## Versions
 
 ```elixir
-iex> Linx.Tty.version()
-"linx_tty 0.1.0 (T1)"
+Linx.Tty.version()
 ```
 
-The trailing `(Tn)` matches the shipped milestone — sanity that the
-NIF you're talking to is the one you built.
+Returns a string like `"linx_tty 0.1.0 (T1)"`. The trailing `(Tn)`
+matches the shipped milestone — sanity that the NIF you're talking
+to is the one you built.
 
 ## Reading the terminal's window size
 
 ```elixir
-iex> {:ok, fd, saved} = Linx.Tty.open_controlling_raw()
-{:ok, 14, #Linx.Tty.Saved<…>}
-
-iex> Linx.Tty.window_size(fd)
-{:ok, #Linx.Tty.WindowSize<132x42>}
-
-iex> :ok = Linx.Tty.restore_and_close(fd, saved)
+{:ok, fd, saved} = Linx.Tty.open_controlling_raw()
+Linx.Tty.window_size(fd)
+:ok = Linx.Tty.restore_and_close(fd, saved)
 ```
 
-`window_size/1` works on any tty fd, not just the controlling one. On
-a non-tty fd it returns `{:error, {:ioctl, :enotty}}`; on an invalid
-fd, `{:error, {:ioctl, :ebadf}}`. The struct's `Inspect` renders
-`cols x rows` so `132x42` means "132 columns, 42 rows."
+`open_controlling_raw/0` returns `{:ok, fd, %Linx.Tty.Saved{...}}`;
+`window_size/1` returns `{:ok, %Linx.Tty.WindowSize<132x42>}` (the
+struct's `Inspect` renders `cols x rows`, so `132x42` means "132
+columns, 42 rows").
+
+`window_size/1` works on any tty fd, not just the controlling one.
+On a non-tty fd it returns `{:error, {:ioctl, :enotty}}`; on an
+invalid fd, `{:error, {:ioctl, :ebadf}}`.
 
 ## The save / restore contract
 
@@ -63,12 +63,12 @@ blocks is safe.
 `open_controlling_raw/0` returns a typed error rather than crashing:
 
 ```elixir
-# In some CI runners, or after `setsid` detached the BEAM from its tty
-iex> Linx.Tty.open_controlling_raw()
-{:error, {:open, :enxio}}
+Linx.Tty.open_controlling_raw()
 ```
 
-Always pattern-match. The atom is what makes `with` chains pleasant:
+Returns `{:error, {:open, :enxio}}` in some CI runners, or after
+`setsid` detached the BEAM from its tty. Always pattern-match —
+the atom is what makes `with` chains pleasant:
 
 ```elixir
 with {:ok, fd, saved} <- Linx.Tty.open_controlling_raw(),
@@ -83,18 +83,16 @@ end
 `set_window_size/2` is the rare direct-on-an-fd path. Most callers
 won't reach for it — the typical use case is propagating the *local*
 tty's size onto a `Linx.Process` PTY workload, and that goes through
-`Linx.Process.pty_set_winsize/2` (T3, not shipped yet) so the agent
-performs the ioctl on the master fd.
+`Linx.Process.pty_set_winsize/2` so the agent performs the ioctl on
+the master fd.
 
 The function exists for the case where you do hold a tty fd directly:
 
 ```elixir
-iex> {:ok, fd, saved} = Linx.Tty.open_controlling_raw()
-iex> Linx.Tty.set_window_size(fd, %Linx.Tty.WindowSize{rows: 40, cols: 100, xpixel: 0, ypixel: 0})
-:ok
-iex> Linx.Tty.window_size(fd)
-{:ok, #Linx.Tty.WindowSize<100x40>}
-iex> Linx.Tty.restore_and_close(fd, saved)
+{:ok, fd, saved} = Linx.Tty.open_controlling_raw()
+Linx.Tty.set_window_size(fd, %Linx.Tty.WindowSize{rows: 40, cols: 100, xpixel: 0, ypixel: 0})
+Linx.Tty.window_size(fd)
+Linx.Tty.restore_and_close(fd, saved)
 ```
 
 Setting a tty's size sends `SIGWINCH` to the foreground process group,
@@ -104,148 +102,211 @@ so attached programs see the new size immediately.
 
 `attach/2` is the composition that makes the whole subsystem
 worthwhile. Pair it with `Linx.Process` running a workload under
-`stdio: :pty` and the caller's controlling terminal *becomes* the
-workload's terminal until it exits.
+`stdio: :pty` and the caller's terminal *becomes* the workload's
+terminal until it exits.
+
+Two modes pick how the caller's terminal is reached:
+
+- `:controlling` — `open("/dev/tty", ...)` directly. Works wherever
+  the BEAM's controlling tty is the user's terminal (local iex on
+  a terminal emulator, Nerves HDMI / UART console). Has real
+  event-driven `SIGWINCH` resize and the snappiest behaviour.
+- `:group_leader` — pump bytes through `Process.group_leader/0` via
+  Erlang's I/O protocol. Works over SSH, `:remsh`, and locally as
+  a universal mode. Polls `:io.columns/0` + `:io.rows/0` for
+  resize on a ~1 s cadence (no SIGWINCH equivalent over SSH).
+
+`:controlling` actively refuses over SSH (T6.0) — see below.
+`:group_leader` works everywhere.
+
+## `:controlling` mode — local terminal
+
+Run from `iex -S mix` in a terminal emulator on your laptop, or from
+iex on a Nerves device's HDMI / UART console.
 
 ```elixir
-# In iex -- this requires a real controlling tty under the BEAM.
-iex> alias Linx.Process, as: P
-iex> alias Linx.Tty
+alias Linx.Process, as: P
+alias Linx.Tty
 
-iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], stdio: :pty)
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(c)
-iex> receive do {:linx_process, :running} -> :ok end
-
-# iex blocks here. Your terminal IS the bash inside the cloned
-# child. Type whatever; ^D or `exit` ends bash; attach restores your
-# terminal and returns the exit event.
-iex> Tty.attach(:controlling, c)
-{:ok, {:exited, 0}}
+{:ok, c} = P.spawn(argv: ["/bin/sh"], stdio: :pty)
+P.proceed(c)
+Tty.attach(:controlling, c)
 ```
 
-The mechanics:
+Drops your iex into the workload's `/bin/sh`. Type whatever; `^D`
+or `exit` ends the shell; attach restores your terminal and
+returns `{:ok, {:exited, 0}}` (or a `:signaled` / `:error` shape
+on abnormal termination).
 
-  1. `attach/2` calls `open_controlling_raw/0` to grab `/dev/tty` in
-     raw mode, saving the original termios.
+Internals:
+
+  1. `open_controlling_raw/0` grabs `/dev/tty` in raw mode and
+     saves the original termios.
   2. The fd is wrapped as an Erlang port — keystrokes arrive as
      `{port, {:data, bytes}}` messages.
-  3. The pump alternately reads from the port (forwarding to
-     `Linx.Process.pty_write/2`) and reads `{:linx_process, :pty_out, _}`
-     events (writing them back to the port via `Port.command/2`).
-  4. When the session terminates (`:exited` / `:signaled` / pre-exec
-     `:error`), the pump returns. A `try/after` runs
-     `restore_and_close/2` unconditionally — so your terminal can
-     never be left in raw mode, even if the pump raises mid-flight.
+  3. The pump alternately forwards keystrokes to
+     `Linx.Process.pty_write/2` and writes `{:linx_process, :pty_out,
+     _}` events back to the port via `Port.command/2`.
+  4. `try/after` runs `restore_and_close/2` unconditionally on the
+     way out — terminal can't be left in raw mode even if the pump
+     raises.
 
 ### Coexisting with iex's tty driver
 
-When `attach/2` runs from `iex -S mix`, the BEAM already has
-Erlang's `user_drv` / `prim_tty` driver reading `/dev/tty` to
-support type-ahead at the iex prompt. Two readers on the same
-kernel tty buffer alternate-steal each other's bytes — without
-mitigation you'd lose roughly every other keystroke.
+When `attach(:controlling, _)` runs from `iex -S mix`, the BEAM
+already has Erlang's `user_drv` / `prim_tty` driver reading
+`/dev/tty` to support type-ahead at the iex prompt. Two readers
+on the same kernel tty buffer alternate-steal each other's bytes
+— without mitigation you'd lose roughly every other keystroke.
 
-`attach/2` handles this internally: it grabs the `prim_tty` state
-out of `user_drv` (via `:sys.get_state(:user_drv)`) and calls
-`:prim_tty.disable_reader/1` before the pump, then
+`attach/2` handles this internally: grabs the `prim_tty` state out
+of `user_drv` via `:sys.get_state(:user_drv)`, calls
+`:prim_tty.disable_reader/1` before the pump, and
 `:prim_tty.enable_reader/1` in the `try/after` so iex's reader
-resumes cleanly on return. No caller action required — type into
-the attached shell as you would any normal terminal.
+resumes cleanly on return. No caller action required.
 
-When the BEAM is not running under `user_drv` (escripts,
-non-shell apps, ssh-shell driver variants), the suspend is a
-no-op — there's no competing reader to worry about.
+### What `:controlling` does over SSH / `:remsh`
 
-### What `attach(:controlling, _)` does over SSH / `:remsh`
+`/dev/tty` resolves to the BEAM process's controlling terminal,
+which has nothing to do with how *you* got into the iex session.
 
-`:controlling` targets the BEAM's *kernel-level* controlling
-terminal — `open("/dev/tty", ...)`. That fd is whatever tty the
-BEAM was launched against; it has nothing to do with how *you*
-got into the iex session.
-
-- **Local terminal emulator** (`iex -S mix` in your laptop's
-  terminal): `/dev/tty` is your terminal. Attach works as
-  expected. This is the happy path the rest of this document
-  assumes.
+- **Local terminal emulator**: `/dev/tty` is your terminal. Attach
+  works.
 - **SSH iex on Nerves** (`ssh my-pi.local` → iex): `/dev/tty` is
-  the **BEAM's controlling tty**, which on Nerves is the HDMI /
-  UART console — *not* your SSH session. After T6.0 (shipped)
-  `attach(:controlling, _)` refuses cleanly with
-  `{:error, :no_local_tty}` here instead of silently grabbing the
-  HDMI console. `Linx.Tty.format_error/1` renders the atom as a
-  human-readable hint that names `attach(:group_leader, _)` as
-  the alternative.
+  the BEAM's controlling tty — the HDMI / UART console — *not*
+  your SSH session.
+- **`:remsh`**: the local-iex side's GL points at a remote IO
+  server; `/dev/tty` is wherever the remote BEAM was launched.
 
-### `attach(:group_leader, _)` — the universal mode (T6.1)
+T6.0 closes the silent-attach-to-the-wrong-terminal trap:
+`attach(:controlling, _)` returns `{:error, :no_local_tty}` in
+the SSH (and likely `:remsh`) case. `Linx.Tty.format_error/1`
+on the atom renders a human-readable hint that names
+`attach(:group_leader, _)` as the alternative.
 
-`:group_leader` pumps through the caller's
-`Process.group_leader/0` via Erlang's I/O protocol, so it works
-in any environment where the user's terminal is reachable
-through that GL — SSH, `:remsh`, and local iex alike.
+## `:group_leader` mode — universal (T6.1)
 
 ```elixir
-# ssh nerves-foo.local
-iex> alias Linx.Process, as: P
-iex> alias Linx.Tty
-iex> {:ok, c} = P.spawn(
-...>   argv: ["/bin/bash"],
-...>   namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
-...>   stdio: :pty)
-iex> P.proceed(c)
-iex> Tty.attach(:group_leader, c)
-# Your SSH iex IS the bash inside the container until you exit.
-{:ok, {:exited, 0}}
+alias Linx.Process, as: P
+alias Linx.Tty
+
+{:ok, c} =
+  P.spawn(
+    argv: ["/bin/sh"],
+    namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
+    stdio: :pty
+  )
+
+P.proceed(c)
+Tty.attach(:group_leader, c)
 ```
 
-What to expect inside the attached shell:
+Your iex blocks; the SSH session *is* the workload's `/bin/sh` until
+you `exit`.
 
-- **Bash feels native.** Bash runs its own readline on top of the
-  workload-side PTY, so prompts, history (Bash's own), tab
-  completion, and Ctrl-A / Ctrl-E work as usual.
-- **`vim`, `top`, `htop`, `less` work.** Single keystrokes reach
-  the workload byte-by-byte (verified end-to-end by the T6
-  probes).
-- **Window resize lags up to ~1 second.** `:group_leader` mode
-  polls `:io.columns / :io.rows` rather than getting a SIGWINCH-
-  like event, so dragging your terminal corner mid-`vim` takes
-  a tick to redraw. T6.0+T6.1 default `:winsize_poll_ms = 1000`;
-  shells don't care, vim notices once. Future work may replace
-  the poll with a window-change hook.
+### Observed end-to-end behaviour over SSH (nerves_ssh, rpi5)
+
+What the iex session looks like in practice:
+
+```
+Linx.Tty.attach(:group_leader, c)
+$ ls
+releases   lib        erts-16.4
+$ sleep 30
+^C
+$ exit
+{:ok, {:exited, 130}}
+```
+
+  - `$ ` is busybox `sh`'s prompt. Characters echo as you type.
+    Backspace erases them on screen.
+  - `Ctrl-C` during `sleep 30` interrupts the running command and
+    returns control to the prompt — attach does *not* exit.
+  - `exit` ends `/bin/sh` and attach returns. Exit code `130` is
+    `128 + SIGINT(2)` — `sh` reports the last command's status,
+    and the last command (`sleep`) was killed by your earlier
+    Ctrl-C. A clean session that ends with a successful command
+    returns `{:ok, {:exited, 0}}`.
 
 ### Side effects of `:group_leader` mode, transient
 
 For the duration of the attach call:
 
-- The caller's `:io.setopts(:echo)` is flipped to `false` so
-  `:group` routes input through its `:dumb` state (byte-oriented).
-  iex's line editing — history recall via ↑/↓, expand_fun /
-  tab completion at the iex prompt — is bypassed; bytes go to
-  the workload's shell, not to iex's readline. Restored on
-  return.
+- The caller's `:io.setopts(:echo)` is flipped to `false`. This
+  routes `:group`'s input requests through its `:dumb` state
+  (byte-oriented; no line editor), and disables iex's own
+  line-editing features (↑/↓ history, tab completion at the iex
+  prompt) until attach returns. Restored unconditionally on the
+  way out — even if the pump raises.
+- The SSH driver's `:prim_tty` output mode is flipped from
+  `:cooked` to `:raw` (via `:sys.replace_state/2` on the driver
+  pid, directly mutating the `prim_tty` state's `options` map).
+  Without this, `\b`, ANSI escapes, and other non-printable
+  bytes from the workload get caret-rendered (`\b` → `^(`, etc.)
+  by `prim_tty`'s cooked-mode line editor. Restored to `:cooked`
+  on the way out.
+- `trap_exit` is set on the iex shell process so the linked
+  reader sub-process's exit doesn't take the pump down with it,
+  and so `ssh_cli`'s race-case `^C` interrupt to the shell pid
+  can be caught and translated to a `<<3>>` byte for the
+  workload. Restored to the prior value on the way out.
 
-- The pump uses `try/after` to restore `echo` even if the pump
-  body raises. A crash inside attach can never leave your SSH
-  iex stuck in echo-off mode.
+### `Ctrl-C` handling
 
-### Local iex: `:group_leader` is also fine
+`ssh_cli` intercepts byte `\x03` from the SSH stream and turns it
+into `exit(group, interrupt)` rather than passing the byte through.
+The pump translates that back into a literal `<<3>>` byte to the
+workload's PTY in both shapes it can arrive:
 
-`:group_leader` works locally too — the GL is `:group` either
-way. Two practical differences vs `:controlling`:
+- As `{:error, :interrupted}` on the reader's pending
+  `:io.get_chars` — the common case (reader is blocked on a
+  read when `^C` arrives).
+- As `{:EXIT, ^gl, :interrupt}` to the pump's mailbox — the
+  rare race case where `^C` arrives in the tiny window between
+  two reader round-trips.
 
-- **No real SIGWINCH propagation.** Resize lag of up to 1s as
-  noted above. `:controlling` (T5) gets event-driven SIGWINCH;
-  if you care about instant `vim` redraw on local iex, use it.
-- **No prim_tty wrestling.** `:controlling` has to disable
-  `prim_tty`'s reader (T4) so it doesn't compete for `/dev/tty`
-  reads. `:group_leader` reads through `:group` → user_drv →
-  prim_tty in series, no race, no need for the bracket.
+The workload's PTY line discipline then turns `<<3>>` into SIGINT
+for the foreground process group — the "Ctrl-C interrupts the
+running command" behaviour users expect.
 
-Pick `:controlling` locally when you want the snappiest resize
-behaviour. Pick `:group_leader` when you want one code path that
-works everywhere.
+### Window resize: ~1 s polling
 
-### The owner requirement
+`:group_leader` mode polls `:io.columns/0` and `:io.rows/0` on a
+1-second cadence (configurable in the source — `:winsize_poll_ms`)
+and forwards the new geometry via `Linx.Process.pty_set_winsize/2`
+when it changes. Dragging your SSH client's terminal corner
+mid-`vim` produces a clean redraw within one second.
+
+There is no SSH-side `SIGWINCH` equivalent surfaced through `:io`,
+so polling is the practical answer. A future enhancement could
+hook into ssh_cli's `window_change` handler for sub-millisecond
+event-driven resize; T6.1 ships with the poll.
+
+## `:controlling` vs `:group_leader` — when to pick which
+
+| Environment | Pick |
+|---|---|
+| Local terminal (`iex -S mix`) | `:controlling` |
+| Nerves HDMI / UART console (a keyboard plugged into the device) | `:controlling` |
+| SSH iex on Nerves (the headline use case) | `:group_leader` |
+| `:remsh` to a remote BEAM | `:group_leader` |
+
+In short: `:controlling` is the more-direct path that gives event-
+driven SIGWINCH and bypasses one OTP-internals dance (no need to
+flip `prim_tty` output mode); `:group_leader` is the universal
+path that works regardless of how the user reached the iex shell.
+
+You can always start with `:controlling`, watch for
+`{:error, :no_local_tty}`, and fall back to `:group_leader`:
+
+```elixir
+case Linx.Tty.attach(:controlling, c) do
+  {:error, :no_local_tty} -> Linx.Tty.attach(:group_leader, c)
+  other -> other
+end
+```
+
+## The owner requirement
 
 The pump waits for `{:linx_process, :pty_out, _}` in the caller's
 mailbox. The owner of those events defaults to the process that
@@ -258,25 +319,26 @@ sequential calls from the iex evaluator. In an OTP application you
 typically structure the calling process so it owns the session for
 the duration of the attach.
 
-### Composing with `Linx.Process` namespaces
+## Composing with `Linx.Process` namespaces
 
-Putting it all together — the motivating use case from
-`PLAN.md`:
+Putting it all together — the headline `docker attach` /
+`kubectl exec -it` workflow on Nerves over SSH:
 
 ```elixir
 {:ok, c} =
   Linx.Process.spawn(
-    argv: ["/bin/bash"],
+    argv: ["/bin/sh"],
     namespaces: [:net, :mount, :pid, :uts, :ipc, :user],
     stdio: :pty
   )
 
-# Host-side setup: move a netlink interface into the new netns,
-# write cgroup state, etc., while the child waits at the checkpoint.
+# Optional host-side setup before proceed/1:
+# move a netlink interface into the new netns, write cgroup
+# state, etc., while the child waits at the checkpoint.
 
 Linx.Process.proceed(c)
-Linx.Tty.attach(:controlling, c)
-# -> your iex prompt becomes the container's bash until you exit
+Linx.Tty.attach(:group_leader, c)
+# -> your iex prompt becomes the container's sh until you exit
 ```
 
 That's `docker attach` / `kubectl exec -it`, end-to-end inside the
@@ -284,77 +346,49 @@ BEAM, from a few hundred lines of clean Elixir and a few thin NIFs.
 
 ## Window size: initial seed
 
-`attach/2` reads the local terminal's `TIOCGWINSZ` at entry and forwards
-it to the workload's PTY via `Linx.Process.pty_set_winsize/2`. So a
-fresh `bash` inside the container sees the right `$LINES`/`$COLUMNS`
-from the moment it starts — `vim` and `less` open at the correct
-size, prompts wrap correctly.
+`attach/2` seeds the workload's PTY window size from the caller's
+terminal at entry, so a fresh `sh` inside the container sees the
+right `$LINES`/`$COLUMNS` from the moment it starts — `vi` and
+`less` open at the correct size, prompts wrap correctly.
+
+- `:controlling` reads `TIOCGWINSZ` on the local tty fd directly.
+- `:group_leader` calls `:io.columns/0` and `:io.rows/0` against
+  the GL.
+
+You can also set the workload's size manually at any point —
+before `proceed/1` for "start the workload at this size", or
+post-running to push an update:
 
 ```elixir
-# Manually inspect what attach/2 will seed:
-iex> {:ok, fd, saved} = Linx.Tty.open_controlling_raw()
-iex> Linx.Tty.window_size(fd)
-{:ok, #Linx.Tty.WindowSize<132x42>}
-iex> Linx.Tty.restore_and_close(fd, saved)
+alias Linx.Process, as: P
+
+{:ok, c} = P.spawn(argv: ["/bin/sh"], stdio: :pty)
+P.pty_set_winsize(c, %{rows: 50, cols: 200, xpixel: 0, ypixel: 0})
+P.proceed(c)
+# sh starts thinking the terminal is 200x50.
 ```
 
-You can also set the workload's size manually at any point — before
-`proceed/1` for "start the workload at this size", or post-running
-(once the session is `:running`) to push an update:
+## Live resize with `:controlling` mode (SIGWINCH)
 
-```elixir
-iex> alias Linx.Process, as: P
-iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], stdio: :pty)
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.pty_set_winsize(c, %{rows: 50, cols: 200, xpixel: 0, ypixel: 0})
-:ok
-iex> P.proceed(c)
-# bash starts thinking the terminal is 200x50.
-```
-
-## Live resize (`SIGWINCH`)
-
-While `attach/2` is running, dragging the corner of your terminal
-emulator sends `SIGWINCH` to the BEAM. `attach/2` registers a
-`Linx.Tty.SigwinchHandler` on OTP's `:erl_signal_server` for the
-lifetime of the call, so each resize becomes a `{:linx_tty, :sigwinch}`
-message in the pump's mailbox — the pump re-reads `TIOCGWINSZ` on the
-local tty and forwards the new size through
-`Linx.Process.pty_set_winsize/2`. Inside the container, `bash` / `vim`
-/ `top` then see their own (slave-side) `SIGWINCH` and redraw at the
-new size.
-
-### Manual acceptance test
-
-```elixir
-# In iex -S mix
-iex> alias Linx.Process, as: P
-iex> alias Linx.Tty
-iex> {:ok, c} = P.spawn(argv: ["/bin/bash"], stdio: :pty)
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(c)
-iex> receive do {:linx_process, :running} -> :ok end
-iex> Tty.attach(:controlling, c)
-# Inside the attached bash:
-#   $ vim
-#   <drag the terminal emulator's corner while vim is open>
-#   <vim redraws cleanly at the new dimensions>
-#   :q
-#   $ exit
-{:ok, {:exited, 0}}
-```
+While `attach(:controlling, _)` is running, dragging the corner of
+your terminal emulator sends `SIGWINCH` to the BEAM. `attach/2`
+registers a `Linx.Tty.SigwinchHandler` on OTP's `:erl_signal_server`
+for the lifetime of the call, so each resize becomes a
+`{:linx_tty, :sigwinch}` message in the pump's mailbox — the pump
+re-reads `TIOCGWINSZ` on the local tty and forwards the new size
+through `Linx.Process.pty_set_winsize/2`. Inside the container,
+`sh` / `vi` / `top` then see their own (slave-side) `SIGWINCH` and
+redraw at the new size.
 
 The trick — and the reason this required OTP 28 — is that OTP 26
 hadn't yet added `:sigwinch` to `:os.set_signal/2`. `prim_tty` got
-SIGWINCH support partway through the OTP 27/28 series; we now ride on
-the same plumbing iex itself uses for its line-editor geometry
+SIGWINCH support partway through the OTP 27/28 series; we now ride
+on the same plumbing iex itself uses for its line-editor geometry
 refresh. No NIF needed.
-
-### Why this composes safely with iex
 
 `:gen_event` broadcasts each signal to every registered handler.
 `prim_tty_sighandler` (iex's handler, which refreshes its line
 editor's idea of width) stays armed throughout — we register
 *alongside* it, not in place of it. Handler IDs (`{Module, ref}`)
-keep multiple concurrent attaches independent: each one removes only
-its own handler on teardown.
+keep multiple concurrent attaches independent: each one removes
+only its own handler on teardown.
