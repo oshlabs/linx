@@ -669,11 +669,11 @@ defmodule Linx.Tty do
 
     swap = fn state ->
       case find_prim_tty_in_state(state) do
-        {idx, old_tty} ->
+        {path, old_tty} ->
           case safe_prim_tty_reinit(old_tty, %{output: new_mode}) do
             {:ok, new_tty, old_mode} ->
               send(parent, {ref, {:ok, old_mode}})
-              put_elem(state, idx, new_tty)
+              put_in_tuple_path(state, path, new_tty)
 
             :error ->
               send(parent, {ref, :reinit_failed})
@@ -700,19 +700,48 @@ defmodule Linx.Tty do
     end
   end
 
-  defp find_prim_tty_in_state(state) when is_tuple(state) do
-    state
-    |> Tuple.to_list()
-    |> Enum.with_index()
-    |> Enum.find_value(:not_found, fn {field, idx} ->
-      case safe_prim_tty_output_mode(field) do
-        {:ok, _} -> {idx, field}
-        _ -> false
-      end
-    end)
+  # Recursively search `state` for an element that responds to
+  # `:prim_tty.output_mode/1`. Returns `{path, prim_tty_state}` where
+  # `path` is a list of tuple indices from the outermost state down
+  # to the prim_tty field, or `:not_found`.
+  #
+  # Recursion is needed because the SSH driver is an
+  # `ssh_client_channel` gen_server whose state record wraps the
+  # `ssh_cli` callback state as a field; the `prim_tty` we want lives
+  # two levels deep. Local `user_drv` has prim_tty at field index 1,
+  # one level. The recursive walk handles both without us hard-coding
+  # either layout.
+  defp find_prim_tty_in_state(state) do
+    find_prim_tty_in_state(state, [])
   end
 
-  defp find_prim_tty_in_state(_), do: :not_found
+  defp find_prim_tty_in_state(state, path_so_far) when is_tuple(state) do
+    case safe_prim_tty_output_mode(state) do
+      {:ok, _} ->
+        {Enum.reverse(path_so_far), state}
+
+      _ ->
+        state
+        |> Tuple.to_list()
+        |> Enum.with_index()
+        |> Enum.find_value(:not_found, fn {field, idx} ->
+          case find_prim_tty_in_state(field, [idx | path_so_far]) do
+            :not_found -> false
+            found -> found
+          end
+        end)
+    end
+  end
+
+  defp find_prim_tty_in_state(_, _), do: :not_found
+
+  defp put_in_tuple_path(_state, [], value), do: value
+
+  defp put_in_tuple_path(state, [idx | rest], value) when is_tuple(state) do
+    inner = elem(state, idx)
+    new_inner = put_in_tuple_path(inner, rest, value)
+    put_elem(state, idx, new_inner)
+  end
 
   defp safe_prim_tty_output_mode(maybe_tty) do
     try do
