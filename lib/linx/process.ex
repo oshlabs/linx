@@ -452,11 +452,16 @@ defmodule Linx.Process do
 
   @doc """
   Writes bytes to the workload's PTY master, which the workload sees as
-  input on its stdin. Returns `{:error, :no_pty}` if the session was
-  not started with `stdio: :pty`.
+  input on its stdin.
 
-  Fire-and-forget — bytes are handed to the agent (and from there to
-  the PTY); there is no acknowledgement.
+  Returns `{:error, :no_pty}` if the session was not started with
+  `stdio: :pty`; `{:error, :session_ended}` if the workload has already
+  terminated (reached any of `:exited` / `:signaled` / `:aborted` /
+  `:errored`) — the call refuses immediately rather than firing a
+  Port.command at an agent that's been collected or is about to be.
+
+  Fire-and-forget on the happy path — bytes are handed to the agent
+  (and from there to the PTY); there is no acknowledgement.
   """
   @spec pty_write(t(), iodata()) :: :ok | {:error, term}
   def pty_write(session, bytes) when is_pid(session) do
@@ -475,8 +480,11 @@ defmodule Linx.Process do
 
   Best-effort on the agent side: the workload will see `SIGWINCH` and
   the new size on its next `TIOCGWINSZ`, but no error is propagated
-  back if the ioctl fails. Returns `{:error, :no_pty}` if the session
-  wasn't started with `stdio: :pty`.
+  back if the ioctl fails.
+
+  Returns `{:error, :no_pty}` if the session wasn't started with
+  `stdio: :pty`; `{:error, :session_ended}` if the workload has
+  already terminated.
   """
   @spec pty_set_winsize(
           t(),
@@ -886,7 +894,17 @@ defmodule Linx.Process do
     {:noreply, %{state | waiters: [from | state.waiters]}}
   end
 
-  # PTY write -- only valid when the session is in PTY mode.
+  # PTY write -- only valid when the session is in PTY mode and
+  # the workload hasn't terminated yet. The result-set check runs
+  # first so a pty_write on an exited / signaled / aborted /
+  # errored session refuses immediately, instead of firing a
+  # Port.command at an agent that's been collected or is about
+  # to be.
+  def handle_call({:pty_write, _bytes}, _from, %{result: result} = state)
+      when result != nil do
+    {:reply, {:error, :session_ended}, state}
+  end
+
   def handle_call({:pty_write, bytes}, _from, %{pty?: true, port: port} = state)
       when port != nil do
     Port.command(port, :erlang.term_to_binary({:pty_in, bytes}))
@@ -909,7 +927,15 @@ defmodule Linx.Process do
     {:reply, {:error, :no_pty}, state}
   end
 
-  # Winsize forwarding -- only meaningful in PTY mode.
+  # Winsize forwarding -- only meaningful in PTY mode and only
+  # while the workload is alive. Same result-set first ordering
+  # as pty_write/2: refuses on terminated sessions without
+  # firing a no-op Port.command at a closing agent.
+  def handle_call({:pty_winsize, _ws}, _from, %{result: result} = state)
+      when result != nil do
+    {:reply, {:error, :session_ended}, state}
+  end
+
   def handle_call({:pty_winsize, _ws}, _from, %{pty?: false} = state) do
     {:reply, {:error, :no_pty}, state}
   end

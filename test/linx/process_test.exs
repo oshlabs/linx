@@ -428,6 +428,26 @@ defmodule Linx.ProcessTest do
       assert {:ok, {:exited, 0}} = P.wait(session, 2_000)
     end
 
+    test "pty_write/2 refuses with :session_ended after the workload has terminated" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      # Workload has exited. Sending pty_write should refuse rather
+      # than fire a Port.command at a closing agent.
+      assert {:error, :session_ended} = P.pty_write(session, "ignored")
+    end
+
+    test "pty_set_winsize/2 refuses with :session_ended after the workload has terminated" do
+      {:ok, session} = P.spawn(argv: ["/bin/true"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert {:error, :session_ended} = P.pty_set_winsize(session, {24, 80, 0, 0})
+    end
+
     test "pty_set_winsize/2 accepts a struct-shaped map" do
       {:ok, session} =
         P.spawn(argv: ["/bin/sh", "-c", "stty size"], stdio: :pty)
