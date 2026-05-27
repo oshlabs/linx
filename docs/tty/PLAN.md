@@ -17,8 +17,17 @@
 > Erlang I/O protocol through the caller's group leader rather than
 > `/dev/tty`, so attach works over SSH (e.g. Nerves' `ssh nerves-foo`
 > + iex), inside `:remsh`, and anywhere else the user's terminal is
-> not the BEAM's controlling tty. Sketch lives in this file; no code
-> yet.
+> not the BEAM's controlling tty.
+>
+> The 2026-05-27 SSH probe on a Nerves rpi5 confirmed the GL is
+> `kernel`'s `:group` gen_statem (same module local iex uses, just
+> on top of an SSH transport rather than `/dev/tty`), that
+> `"$ancestors"` containing `:ssh_sup` / `:sshd_sup` is the
+> detection signal, and that line-buffering comes from `:group`'s
+> `:cooked` mode — not the SSH layer. One mechanism question
+> remains: which knob (`:io.setopts/2`, a private `:group` event,
+> or `:sys.replace_state/2`) flips `:cooked` cleanly. Sketch + probe
+> only on the branch; no implementation yet.
 
 ## Goal
 
@@ -474,11 +483,26 @@ silent fallback would hide the difference from callers.
 
 The group leader is an Erlang process that speaks the I/O protocol
 (`{io_request, From, ReplyAs, Request}` /
-`{io_reply, ReplyAs, Reply}`). The identity of that process
-varies — `user_drv` under local iex, `ssh_cli` under SSH iex,
-`group` under `:remsh`, escript's IO server under escripts — but
-the protocol is the same. The pump talks to whichever pid
-`Process.group_leader/0` returns.
+`{io_reply, ReplyAs, Reply}`). The pump talks to whichever pid
+`Process.group_leader/0` returns; the I/O protocol is identical
+across drivers.
+
+The original sketch assumed the SSH-fronted GL was `ssh_cli`.
+**The 2026-05-27 probe (`docs/tty/probes/T6_ssh_probe.exs`,
+output captured on Nerves rpi5 / nerves_ssh) found otherwise**:
+
+  * `:proc_lib.translate_initial_call(gl)` → `{:group, :init, 1}`
+  * `current_function` → `{:gen_statem, :loop, 3}`
+  * GL `$ancestors` chain includes `:sshd_sup`, `:ssh_sup`
+
+So `nerves_ssh` layers Erlang's standard `user_drv` / `:group`
+line-editor on top of the SSH transport, *exactly like local iex
+does on top of `/dev/tty`*. The GL is `kernel`'s `:group`
+gen_statem — same module in both environments; only the byte
+source/sink underneath user_drv differs (SSH channel vs prim_tty).
+
+That collapses a lot of complexity: the pump talks to one stable
+abstraction (`:group`), not two driver-specific ones.
 
 **Input — a reader sub-process.** `:io.get_chars/3` is synchronous;
 the pump must interleave reads with `:pty_out` events from
@@ -507,51 +531,71 @@ end
 protocol; no port involved. `IO.binwrite(gl, bytes)` for each
 chunk arriving on `{:linx_process, :pty_out, _}`.
 
-**Mode — opt into binary; the rest is a caveat.** Set
-`:io.setopts(gl, [binary: true])` so reads return binaries, not
-charlists. Echo and line-discipline are *not* something the BEAM
-controls over SSH: the user's terminal emulator and the SSH
-client's PTY allocation negotiated those at session start, and
-flipping them mid-session is out of scope for the I/O protocol.
-This is the central trade-off — see the next subsection.
+**Mode — `binary: true` is already on; the open knob is
+`:cooked`.** The probe confirmed `:io.getopts(gl)` returns
+`binary: true` by default in the nerves_ssh path, so reads come
+back as binaries with no setopts needed. The actual obstacle is
+that `:group`'s internal `mode` field is `:cooked`: it runs a
+full readline-style line editor (the `key_map` in the GL's
+process dictionary), echoes locally, and only releases bytes to
+the consumer after a line-terminator key. `:io.get_chars(_, '',
+1)` against a cooked `:group` returns the *first byte of the
+next finished line*, which is hopeless for an attach pump.
+
+Flipping `:group` to non-cooked mode for the duration of attach
+is the central T6.1 sub-problem. Three candidate mechanisms, in
+order of preference:
+
+  1. **Public `:io.setopts/2` knob.** `{:terminal, false}`,
+     `{:echo, false}`, `{:line_history, false}` — singly or in
+     combination — may move `:group` out of cooked mode.
+     Pending the follow-up probe.
+  2. **Private message to the `:group` gen_statem.** Same
+     pattern as T4's `:prim_tty.disable_reader/1`: send `:group`
+     a cast/event that flips its internal `mode` field. Requires
+     finding the right message shape from `group.erl`.
+  3. **`:sys.replace_state/2` surgery.** Overwrite the `:cooked`
+     atom in the state record directly. Works regardless of
+     whether `:group` exposes a hook, but couples to the record
+     layout — same kind of OTP-internals dependency T4 already
+     accepts for `user_drv`.
+
+Echo suppression is a separate concern, also handled via one of
+the above. `:io.setopts(gl, [{:echo, false}])` is the documented
+path and very likely works on its own; the probe will confirm.
 
 **Window size.** `:io.columns(gl)` and `:io.rows(gl)` return
-integers under any reasonable IO server, including `ssh_cli`
-(which exposes the negotiated PTY dimensions). The pump calls
-them at entry and forwards via `Linx.Process.pty_set_winsize/2` —
-same downstream wiring as `:controlling`, sourced from the I/O
-protocol instead of `TIOCGWINSZ`.
+integers — the probe got `{:ok, 159}` / `{:ok, 56}`, matching
+the SSH client's terminal. The pump calls them at entry and
+forwards via `Linx.Process.pty_set_winsize/2` — same downstream
+wiring as `:controlling`, sourced from the I/O protocol instead
+of `TIOCGWINSZ`.
 
-Runtime resize has no equivalent of SIGWINCH on the SSH side: SSH
-`window-change` requests update `ssh_cli`'s internal state without
-emitting a shell-visible event. T6 ships **polling** (re-read
-`:io.columns / :io.rows` every `:winsize_poll_ms`, default 1000;
-forward only on change). Hooked / event-driven resize lands in a
-deferred follow-up.
+Runtime resize: there is no SIGWINCH equivalent surfaced through
+`:io`. SSH `window-change` requests update the IO server's
+internal state without emitting a shell-visible event. T6 ships
+**polling** (re-read `:io.columns / :io.rows` every
+`:winsize_poll_ms`, default 1000; forward only on change).
+Hooked / event-driven resize lands in a deferred follow-up.
 
-#### The raw-mode caveat — and what to ship anyway
+#### The raw-mode story — clearer than the original sketch
 
-`ssh_cli` does not expose a "raw mode" knob to the shell process.
-The SSH client (the user's `ssh` command on their workstation)
-holds the foreground line discipline; whatever termios flags it
-negotiated at `pty_alloc` time stay in force. In practice this
-means:
+The original sketch worried that ssh_cli's PTY negotiation locked
+in line-discipline at session start and that bytes-perfect raw
+mode would require dropping below ssh_cli. The probe reframed
+this: the line discipline is in `:group`, *not* in the SSH layer.
+ssh_cli passes bytes through; `:group` cooks them. Flipping
+`:group` is therefore within reach via the I/O protocol (option
+1 above) or, failing that, via the same kind of OTP-internals
+manipulation T4 already does for `:prim_tty`.
 
-- **Bash inside the attached workload feels native.** Bash's
-  built-in readline does its own line-editing on top of whatever
-  bytes arrive, so the user sees the expected prompt + completion
-  experience.
-- **`vim` / `top` / `htop` work but with caveats.** Single
-  keystrokes do reach the workload through ssh_cli — full-screen
-  apps redraw correctly. The caveat is that the user's *local
-  ssh client* may still post-process certain key combos (Ctrl-Z,
-  Ctrl-C, flow control) before they reach the BEAM.
-- **Bytes-perfect raw — e.g. for a terminal emulator inside the
-  workload, or a TUI that does its own ANSI parsing — is out of
-  reach without reaching deeper into `ssh_cli` state.**
-
-That's good enough for the primary "ssh in, attach to bash"
-workflow. The deeper enhancement lives in T7 (see below).
+The user's local `ssh` client does still hold its own
+line-discipline (Ctrl-Z, flow control, the terminal emulator's
+own buffering of escape sequences) — but the same is true of the
+user's *local terminal emulator* in plain `iex -S mix`, and it
+hasn't been a problem there. The shipped experience should
+match: bash feels native, vim/top redraw correctly, edge cases
+exist for unusual key sequences and remain edge cases.
 
 #### Precondition guard on `attach(:controlling, _)`
 
@@ -560,30 +604,47 @@ trap should be closed *now*. T6.0 adds a guard:
 
 ```elixir
 def attach(:controlling, session) do
-  case classify_caller_terminal() do
-    :local_tty   -> attach_via_controlling(session)
-    :ssh         -> {:error, :no_local_tty}
-    :remsh       -> {:error, :no_local_tty}
-    :unknown     -> attach_via_controlling(session)   # preserve current behaviour
+  case Linx.Tty.Env.classify_caller_terminal() do
+    :local_tty -> attach_via_controlling(session)
+    :ssh       -> {:error, :no_local_tty}
+    :remsh     -> {:error, :no_local_tty}
+    :unknown   -> attach_via_controlling(session)   # preserve current behaviour
   end
 end
 ```
 
-`classify_caller_terminal/0` walks `Process.group_leader/0`:
+`Linx.Tty.Env.classify_caller_terminal/0` walks
+`Process.group_leader/0`. The probe identified the canonical
+signal:
 
-- `Process.info(gl, :dictionary)` — `ssh_cli` records its channel
-  state under known keys.
-- `:proc_lib.translate_initial_call(gl)` — returns
-  `{module, function, arity}` for `proc_lib`-started processes.
-  `ssh_cli`'s GLs match `{ssh_cli, init, _}` (subject to
-  empirical verification; see "Open questions" below).
-- `nerves_ssh` may also stamp a process dictionary key — sniff
-  that as a stronger signal when present.
+```elixir
+gl = Process.group_leader()
 
-Heuristic, not bulletproof. The `:unknown` arm preserves today's
-behaviour rather than rejecting on uncertainty, so callers that
-work today don't suddenly break. The error message names the
-alternative:
+{:dictionary, dict} = Process.info(gl, :dictionary)
+ancestors = Keyword.get(dict, :"$ancestors", [])
+
+cond do
+  :ssh_sup in ancestors or :sshd_sup in ancestors ->
+    :ssh
+  # :remsh and other variants land here once we have a probe
+  # confirming their ancestor signatures.
+  true ->
+    case :proc_lib.translate_initial_call(gl) do
+      {:group, :init, _} when whereis_user_drv_present? -> :local_tty
+      _ -> :unknown
+    end
+end
+```
+
+Cheap, stable, no record-layout coupling. `:ssh_sup` is the
+top-level supervisor of OTP's `ssh` app — anything that fronts
+an Erlang shell with the SSH daemon shows it. `:sshd_sup` is
+`nerves_ssh`'s wrapping supervisor; both appear in the ancestor
+list because nerves_ssh sits *above* the OTP ssh app.
+
+The `:unknown` arm preserves today's behaviour rather than
+rejecting on uncertainty, so callers that work today don't
+suddenly break. The error message names the alternative:
 
 ```
 {:error, :no_local_tty}
@@ -667,44 +728,69 @@ milestone per project convention.
   documented; the "Ctrl-C unwinds your local ssh, not the workload"
   surprise noted.
 
-#### Open questions (empirical)
+#### Open questions — what the 2026-05-27 probe answered
 
-These are unknowns that need a quick experiment on the actual
-Nerves SSH path *before* T6.1 commits to a design. None of them
-block T6.0 (the guard is correct regardless).
+The first SSH probe (`docs/tty/probes/T6_ssh_probe.exs`) answered
+two of the three original open questions:
 
-1. **Does `ssh_cli` line-buffer aggressively?** If
-   `:io.get_chars(_, ~c"", N)` with small `N` blocks until the
-   user hits Enter, the SSH attach experience is unusably
-   line-oriented and we need to investigate `:io.setopts` knobs
-   or descend into ssh_cli's state. Run an iex over SSH on Nerves
-   and call `:io.get_chars(:standard_io, ~c"", 1)` to confirm.
-2. **Is there a stable SSH-detection signal?** Check
-   `Process.info(gl, :registered_name)`,
-   `:proc_lib.translate_initial_call(gl)`, and the GL's process
-   dictionary for `nerves_ssh`-specific tags. Worst case: walk
-   the GL's links / monitors to find an `ssh_connection_handler`.
-3. **Are there other GLs we should treat as `:ssh`-equivalent?**
-   `:remsh` is in the same boat. The `:tnt` console driver in
-   some embedded setups might be too.
+1. **Does the SSH path line-buffer?** **Yes**, but the culprit is
+   `:group`'s `:cooked` mode, not ssh_cli. `:io.get_chars(_, ~c"",
+   1)` blocked until Enter; the returned byte was the trailing
+   newline of the line that `:group`'s editor finally released.
+2. **Is there a stable SSH-detection signal?** **Yes**: the GL's
+   `"$ancestors"` list contains `:ssh_sup` (OTP `ssh` app top
+   supervisor) and `:sshd_sup` (nerves_ssh's wrapper). Cleanest
+   possible signal — no record-layout coupling, no `:proc_lib`
+   shape guessing.
+3. **`:remsh` and other GL variants?** Still unknown — a probe
+   from a `:remsh` session is the next data point. Not a
+   blocker for T6.0/T6.1.
+
+The remaining unknown — and the only one blocking a clean
+T6.1 implementation — is **how to flip `:group` out of cooked
+mode**. The state record's mode field is the atom `:cooked` (the
+7th element of the inner `:state` tuple in `:sys.get_state(gl)`).
+Three candidate mechanisms are listed under "Mechanism / Mode"
+above; the follow-up probe will identify which one ships:
+
+```elixir
+# Slated for docs/tty/probes/T6_group_mode.exs
+gl = Process.group_leader()
+mode = fn -> :sys.get_state(gl, 500) |> elem(1) |> Tuple.to_list()
+             |> Enum.find(&(&1 in [:cooked, :raw])) end
+
+IO.inspect(mode.(), label: "initial")
+:io.setopts(gl, terminal: false)
+IO.inspect(mode.(), label: "after terminal: false")
+:io.setopts(gl, echo: false)
+IO.inspect(mode.(), label: "after echo: false")
+# … plus a get_chars(1) probe at each step, restored at the end.
+```
 
 #### Deferred — architected-for, not built in T6
 
-- **T7 — true-raw mode over SSH.** Reach into `ssh_cli`'s state
-  via `:sys.get_state/1`, find the ssh connection ref + channel
-  id, and either (a) issue an `ssh_connection:setopts/pty_modes`
-  to flip ECHO/ICANON off, or (b) bypass the ssh_cli shell hook
-  and attach to the channel as a custom subsystem. This is the
-  vim-quality path; the docker/k8s reference impls do something
-  similar in their SSH-aware modes.
-- **Event-driven resize over SSH.** Replace the polling `after`
-  clause with a hook into `ssh_cli`'s window-change handler so
-  resizes propagate within milliseconds, not seconds.
-- **A first-class SSH-subsystem attach.** Skip iex entirely:
-  expose `Linx.Tty.SshSubsystem` (an `ssh_server_channel`) that a
-  consumer wires into their `:ssh.daemon` config. Cleanest
-  architecturally, but pushes setup into every consumer; deferred
-  until someone needs it.
+- **`:remsh` and other GL classifications.** Once we have a probe
+  from a `:remsh` session, fold its `$ancestors` signature into
+  `classify_caller_terminal/0`. Until then it falls in
+  `:unknown` and the existing `:controlling` path runs — which
+  is wrong over `:remsh` too, but at least it doesn't pretend to
+  be the SSH solution.
+- **T7 — bytes-perfect raw mode over SSH.** Originally framed as
+  "go below ssh_cli." The probe reframes this: `:group` does
+  the line-discipline, ssh_cli is just transport. If a chosen
+  T6.1 mode flip leaves residual cooked-mode artefacts (special
+  keys, control codes), T7 is the deeper surgery on `:group` (or
+  on the user_drv equivalent above it) to clear them out.
+  Scope is much smaller than the original sketch suggested.
+- **Event-driven resize over SSH.** Replace polling with a hook
+  into the IO server's window-change handler (probably on the
+  user_drv pid sitting between `:group` and the SSH transport)
+  so resizes propagate within milliseconds, not seconds.
+- **A first-class SSH-subsystem attach.** Skip the shell-channel
+  layer entirely: expose `Linx.Tty.SshSubsystem` (an
+  `ssh_server_channel`) that a consumer wires into their
+  `:ssh.daemon` config. Cleanest architecturally, but pushes
+  setup into every consumer; deferred until someone needs it.
 
 #### Why not auto-fallback?
 
