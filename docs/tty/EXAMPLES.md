@@ -114,7 +114,7 @@ Two modes pick how the caller's terminal is reached:
 - `:group_leader` — pump bytes through `Process.group_leader/0` via
   Erlang's I/O protocol. Works over SSH, `:remsh`, and locally as
   a universal mode. Polls `:io.columns/0` + `:io.rows/0` for
-  resize on a ~1 s cadence (no SIGWINCH equivalent over SSH).
+  resize on a ~250 ms cadence (no SIGWINCH equivalent over SSH).
 
 `:controlling` actively refuses over SSH (T6.0) — see below.
 `:group_leader` works everywhere.
@@ -269,18 +269,21 @@ The workload's PTY line discipline then turns `<<3>>` into SIGINT
 for the foreground process group — the "Ctrl-C interrupts the
 running command" behaviour users expect.
 
-### Window resize: ~1 s polling
+### Window resize: ~250 ms polling
 
 `:group_leader` mode polls `:io.columns/0` and `:io.rows/0` on a
-1-second cadence (configurable in the source — `:winsize_poll_ms`)
-and forwards the new geometry via `Linx.Process.pty_set_winsize/2`
-when it changes. Dragging your SSH client's terminal corner
-mid-`vim` produces a clean redraw within one second.
+250 ms cadence (the `@winsize_poll_ms` module attribute in
+`lib/linx/tty.ex`) and forwards the new geometry via
+`Linx.Process.pty_set_winsize/2` when it changes. Dragging your
+SSH client's terminal corner produces a clean redraw within a
+quarter second — well under the threshold of perceptible lag for
+interactive use. CPU cost is ~60 µs/s (~0.006 % of one core on
+the rpi5) — invisible in any practical sense.
 
 There is no SSH-side `SIGWINCH` equivalent surfaced through `:io`,
-so polling is the practical answer. A future enhancement could
-hook into ssh_cli's `window_change` handler for sub-millisecond
-event-driven resize; T6.1 ships with the poll.
+so polling is the practical answer. The trade-offs against an
+event-driven `:erlang.trace/3` hook on `ssh_cli` are discussed in
+the inline comment on `@winsize_poll_ms` in `lib/linx/tty.ex`.
 
 ## `:controlling` vs `:group_leader` — when to pick which
 

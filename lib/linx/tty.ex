@@ -287,8 +287,10 @@ defmodule Linx.Tty do
   and silently drops `IO.binwrite/2`'s `{put_chars, :latin1, _}`
   via its `unhandled_request` catch-all, hanging the caller.
   Window size is seeded from `:io.columns/0` + `:io.rows/0` and
-  re-checked on a polling timer (default 1s) since SSH has no
-  SIGWINCH equivalent.
+  re-checked on a polling timer (default 250ms) since SSH has no
+  SIGWINCH equivalent. The choice of polling vs an event-driven
+  trace hook on ssh_cli is discussed at the `@winsize_poll_ms`
+  module attribute below.
 
   Side-effects worth knowing about, all transient (restored on
   return, even on a raise inside the pump):
@@ -299,8 +301,7 @@ defmodule Linx.Tty do
       readline. Expected; the workload's own shell does its
       editing on the other side of the PTY.
     * Window-size updates lag by up to `:winsize_poll_ms` (default
-      `1000`). Fine for shells, noticeable only when resizing
-      mid-`vim`.
+      `250`). Fine for shells; barely noticeable even mid-`vim`.
 
   Caveat: the SSH transport keeps the line-discipline of the
   user's local terminal (your local `ssh` client puts your local
@@ -339,8 +340,49 @@ defmodule Linx.Tty do
     end
   end
 
+  # How often `attach(:group_leader, _)`'s pump re-reads
+  # `:io.columns` / `:io.rows` and forwards a changed window size to
+  # the workload's PTY. 250ms gives a worst-case redraw lag of
+  # ~250ms after the user finishes dragging their terminal corner --
+  # well below "noticeable" for interactive use -- while spending
+  # ~60us/s of CPU on the geometry round-trips (about 0.006% of one
+  # core; sub-noise even on the rpi5).
+  #
+  # ## Why polling rather than an event-driven hook
+  #
+  # ssh_cli (lib/ssh/src/ssh_cli.erl) receives the SSH protocol's
+  # `window_change` channel request as a `{ssh_cm, _, {window_change,
+  # ChannelId, W, H, _, _}}` message, updates its internal `#ssh_pty{}`
+  # record and the prim_tty geometry, and stops. It does not notify
+  # the group (or anyone subscribed to the group) -- the new geometry
+  # is only visible by querying ssh_cli back, which is what
+  # :io.columns/:io.rows do.
+  #
+  # The event-driven alternative is `:erlang.trace(ssh_cli_pid, true,
+  # [:receive])` for the lifetime of attach, pattern-matching on the
+  # window_change message in the pump's receive, and reacting
+  # immediately. Pros: near-zero latency (microseconds), zero
+  # idle-time CPU. Cons: (1) every message ssh_cli receives gets sent
+  # to our process for inspection, so the per-keystroke overhead
+  # grows linearly with traffic -- still small in absolute terms but
+  # not free; (2) `:erlang.trace/3` is a debugging mechanism and
+  # using it as a production-shaped API is unusual, with edge cases
+  # around trace token inheritance and gc of the trace state; (3)
+  # tighter OTP-internals coupling than polling (we'd be depending
+  # on the exact message shape ssh_cli receives, which is more
+  # fragile than our existing coupling to the group's state record
+  # layout).
+  #
+  # Polling at 250ms hits the sweet spot: human-imperceptible
+  # latency, negligible CPU, no debug-API dependency. If a future
+  # use case actually needs sub-100ms resize fidelity (a TUI that
+  # needs to redraw before the user lets go of the corner), the
+  # trace-based hook becomes worth its complexity -- until then,
+  # 250ms is the right call.
+  @winsize_poll_ms 250
+
   def attach(:group_leader, session) when is_pid(session) do
-    attach_group_leader(session, _winsize_poll_ms = 1000)
+    attach_group_leader(session, @winsize_poll_ms)
   end
 
   @doc """

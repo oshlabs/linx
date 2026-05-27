@@ -622,7 +622,13 @@ Runtime resize: there is no SIGWINCH equivalent surfaced through
 `:io`. SSH `window-change` requests update the IO server's
 internal state without emitting a shell-visible event. T6 ships
 **polling** (re-read `:io.columns / :io.rows` every
-`:winsize_poll_ms`, default 1000; forward only on change).
+`@winsize_poll_ms`, default 250; forward only on change).
+The trade-off against an event-driven `:erlang.trace/3` hook on
+`ssh_cli` is documented in the inline comment on
+`@winsize_poll_ms` in `lib/linx/tty.ex` — TL;DR: polling at 250ms
+costs ~0.006 % of one core, gives sub-frame human latency, and
+avoids the debug-API dependency and tighter record-shape coupling
+that the trace hook would introduce.
 Hooked / event-driven resize lands in a deferred follow-up.
 
 #### The raw-mode story — clearer than the original sketch
