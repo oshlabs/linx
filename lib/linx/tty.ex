@@ -71,6 +71,15 @@ defmodule Linx.Tty do
       mechanism (`:io.setopts(echo: false)` + a linked reader
       sub-process + `:io.put_chars/2` for output + polled winsize).
 
+  Both modes also refuse `{:error, :session_terminated}` (or
+  `:session_ended` for a dead session pid) when called against a
+  session whose workload has already exited — without this the
+  pump would set itself up waiting for `:pty_out` events that
+  can never arrive, and Ctrl-C wouldn't help (`ssh_cli`
+  intercepts it and the pump's reaction is to write `<<3>>` to a
+  dead session). `Linx.Process.info/1` is the cheap stage query
+  behind the guard.
+
   ## Save and restore is mandatory
 
   Any operation that mutates the local terminal's state hands the
@@ -328,15 +337,26 @@ defmodule Linx.Tty do
   """
   @spec attach(:controlling | :group_leader, session()) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
-          | {:error, :no_local_tty | :gl_eof | term()}
+          | {:error, :no_local_tty | :session_terminated | :session_ended | :gl_eof | term()}
   def attach(:controlling, session) when is_pid(session) do
-    # T6.0 guard: when the caller's terminal is fronted by Erlang's
-    # SSH daemon, /dev/tty is the BEAM's controlling tty (the HDMI /
-    # UART console on Nerves) -- *not* the SSH session. Refuse cleanly
-    # rather than silently pumping bytes to the wrong terminal.
-    case Env.classify_caller_terminal() do
-      :ssh -> {:error, :no_local_tty}
-      _ -> attach_controlling(session)
+    # Two preconditions in order:
+    # 1. The session must still be running. Without this, attach
+    #    happily sets up its byte pump on a session whose workload
+    #    has already exited -- no :pty_out events will ever arrive,
+    #    no :exited event either (it was already consumed by a
+    #    prior attach), and the pump hangs forever. Ctrl-C doesn't
+    #    help over SSH because ssh_cli intercepts it and the pump's
+    #    reaction is to send <<3>> to a dead session.
+    # 2. T6.0 guard: when the caller's terminal is fronted by
+    #    Erlang's SSH daemon, /dev/tty is the BEAM's controlling
+    #    tty (the HDMI / UART console on Nerves) -- *not* the SSH
+    #    session. Refuse cleanly rather than silently pumping bytes
+    #    to the wrong terminal.
+    with :ok <- ensure_session_running(session) do
+      case Env.classify_caller_terminal() do
+        :ssh -> {:error, :no_local_tty}
+        _ -> attach_controlling(session)
+      end
     end
   end
 
@@ -382,7 +402,29 @@ defmodule Linx.Tty do
   @winsize_poll_ms 250
 
   def attach(:group_leader, session) when is_pid(session) do
-    attach_group_leader(session, @winsize_poll_ms)
+    with :ok <- ensure_session_running(session) do
+      attach_group_leader(session, @winsize_poll_ms)
+    end
+  end
+
+  # Refuses attach against a session whose workload has already
+  # terminated, or whose GenServer is gone. `Linx.Process.info/1`
+  # is a synchronous GenServer.call that returns the lifecycle
+  # stage cheaply.
+  defp ensure_session_running(session) do
+    case Linx.Process.info(session) do
+      {:ok, %{stage: stage}} when stage in [:exited, :signaled, :aborted, :errored] ->
+        {:error, :session_terminated}
+
+      {:ok, _info} ->
+        :ok
+
+      {:error, :session_ended} ->
+        {:error, :session_ended}
+
+      {:error, _} = other ->
+        other
+    end
   end
 
   @doc """
@@ -397,6 +439,19 @@ defmodule Linx.Tty do
       "BEAM is the BEAM's controlling terminal (e.g. the HDMI/UART " <>
       "console on Nerves), not your remote session. Use " <>
       "Linx.Tty.attach(:group_leader, session) instead (T6.1)."
+  end
+
+  def format_error(:session_terminated) do
+    "The session's workload has already reached a terminal stage " <>
+      "(exited / signaled / aborted / errored). attach/2 requires " <>
+      "a session that's still running. Inspect Linx.Process.info/1 " <>
+      "for the terminal stage and result; spawn a fresh session " <>
+      "via Linx.Process.spawn/1 to attach to a new workload."
+  end
+
+  def format_error(:session_ended) do
+    "The session's GenServer has terminated -- its pid is gone. " <>
+      "Spawn a fresh session via Linx.Process.spawn/1."
   end
 
   def format_error(other), do: inspect(other)
