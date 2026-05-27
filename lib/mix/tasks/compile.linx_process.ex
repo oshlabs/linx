@@ -82,6 +82,11 @@ defmodule Mix.Tasks.Compile.LinxProcess do
   # (the app may not be loaded during `mix compile`), so we resolve the
   # directory by globbing under the OTP root -- same strategy
   # `compile.netlink_nif` uses for the erts include dir.
+  #
+  # Cross-compile setups (notably Nerves) point `ERL_EI_INCLUDE_DIR` and
+  # `ERL_EI_LIBDIR` at the *target* Erlang's erl_interface; honour those
+  # before falling back to the host OTP layout so we don't link the host
+  # libei.a into a cross-built binary.
   defp ei_dir do
     case Path.wildcard(Path.join(:code.root_dir(), "lib/erl_interface-*")) do
       [] -> Mix.raise("linx_process: erl_interface not found under #{:code.root_dir()}")
@@ -89,6 +94,19 @@ defmodule Mix.Tasks.Compile.LinxProcess do
     end
   end
 
-  defp ei_include_dir, do: Path.join(ei_dir(), "include")
-  defp ei_lib_dir, do: Path.join(ei_dir(), "lib")
+  defp ei_include_dir do
+    case System.get_env("ERL_EI_INCLUDE_DIR") do
+      nil -> Path.join(ei_dir(), "include")
+      "" -> Path.join(ei_dir(), "include")
+      dir -> dir
+    end
+  end
+
+  defp ei_lib_dir do
+    case System.get_env("ERL_EI_LIBDIR") do
+      nil -> Path.join(ei_dir(), "lib")
+      "" -> Path.join(ei_dir(), "lib")
+      dir -> dir
+    end
+  end
 end

@@ -124,7 +124,9 @@
  * caps as :unknown rather than refusing to run.
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <ei.h>
 
 #include <errno.h>
