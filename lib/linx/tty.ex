@@ -670,13 +670,13 @@ defmodule Linx.Tty do
     swap = fn state ->
       case find_prim_tty_in_state(state) do
         {path, old_tty} ->
-          case safe_prim_tty_reinit(old_tty, %{output: new_mode}) do
+          case swap_prim_tty_output_mode_direct(old_tty, new_mode) do
             {:ok, new_tty, old_mode} ->
               send(parent, {ref, {:ok, old_mode}})
               put_in_tuple_path(state, path, new_tty)
 
             :error ->
-              send(parent, {ref, :reinit_failed})
+              send(parent, {ref, :swap_failed})
               state
           end
 
@@ -751,15 +751,43 @@ defmodule Linx.Tty do
     end
   end
 
-  defp safe_prim_tty_reinit(old_tty, opts) do
-    try do
-      old_mode = :prim_tty.output_mode(old_tty)
-      new_tty = :prim_tty.reinit(old_tty, opts)
-      {:ok, new_tty, old_mode}
-    catch
-      _, _ -> :error
+  # Flip prim_tty's output mode by mutating its `options` map in
+  # place, rather than calling `:prim_tty.reinit/2`. The latter ends
+  # up in `tty_init/2` -- a NIF that requires a real terminal fd --
+  # and crashes with `:function_clause` for SSH-fronted prim_tty
+  # states whose `tty` field is `undefined` (set up via
+  # `prim_tty:init_ssh/3`, not `:init/1`).
+  #
+  # The output-mode dispatch at `prim_tty.erl:677` is
+  # `handle_request(State = #state{ options = #{ output := raw } }, ...)`,
+  # so just mutating `options.output` is sufficient -- no re-init,
+  # no NIF call.
+  #
+  # The `options` field is identified by scanning the state tuple
+  # for an element that's a map with both `:input` and `:output` keys
+  # (distinctive enough to single out `prim_tty`'s options map
+  # without hard-coding its index against record-layout changes).
+  defp swap_prim_tty_output_mode_direct(prim_tty_state, new_mode)
+       when is_tuple(prim_tty_state) do
+    idx =
+      prim_tty_state
+      |> Tuple.to_list()
+      |> Enum.find_index(&prim_tty_options_map?/1)
+
+    if idx do
+      old_options = elem(prim_tty_state, idx)
+      old_mode = Map.get(old_options, :output)
+      new_options = Map.put(old_options, :output, new_mode)
+      {:ok, put_elem(prim_tty_state, idx, new_options), old_mode}
+    else
+      :error
     end
   end
+
+  defp swap_prim_tty_output_mode_direct(_, _), do: :error
+
+  defp prim_tty_options_map?(%{input: _, output: _}), do: true
+  defp prim_tty_options_map?(_), do: false
 
   # Register a `Linx.Tty.SigwinchHandler` instance on
   # `:erl_signal_server` keyed by `{handler, id}` so multiple

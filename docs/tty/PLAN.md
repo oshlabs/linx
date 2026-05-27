@@ -839,23 +839,39 @@ T6.1.1 brackets the pump with a `:prim_tty` output-mode flip:
 - On entry, walk `Process.group_leader/0`'s state for the driver
   pid (the `ssh_cli` channel handler over SSH; `user_drv` locally
   if the user reaches for `:group_leader` there too). Run
-  `:sys.replace_state/2` on it with a function that scans every
-  field of the driver's state record for one that responds to
-  `:prim_tty.output_mode/1`, calls
-  `:prim_tty.reinit(field, %{output: :raw})`, swaps it back into
-  the state, and shouts the previous mode back to the caller via
-  a one-shot ref.
+  `:sys.replace_state/2` on it with a function that **recursively**
+  scans the driver's state record for any tuple element that
+  responds to `:prim_tty.output_mode/1` (the SSH driver is an
+  `ssh_client_channel` gen_server whose state record wraps
+  `ssh_cli`'s `#state{}` as a field, so the `prim_tty` we want
+  lives two levels deep at path `[3, 9]`; local `user_drv` has
+  it at path `[1]`). Once found, mutate the `:prim_tty` state's
+  `options` map in place to set `output: :raw`, rebuild the
+  outer state along the same path, and shout the previous mode
+  back to the caller via a one-shot ref.
 - On exit (inside the existing inner `try/after`, before the echo
   restore), replay the same swap with the saved mode.
 
+**Why direct `options`-map mutation, not `:prim_tty.reinit/2`?**
+`reinit/2` ends up calling the `tty_init/2` NIF, which requires
+a real terminal fd. SSH-fronted `prim_tty` states have
+`tty = undefined` (set up via `prim_tty:init_ssh/3`, not the
+`:init/1` path) and the NIF rejects that with `:function_clause`.
+The output-mode dispatch at `prim_tty.erl:677` is
+`handle_request(State = #state{ options = #{ output := raw } }, ...)`,
+so just updating `options.output` is sufficient — no re-init, no
+NIF call. The options map is identified by scanning for an
+element that's a map with both `:input` and `:output` keys
+(distinctive without hard-coding the field index).
+
 Scanning rather than hard-coding the field index makes the
-mechanism resilient to ssh_cli / user_drv record-layout
-reshuffles across OTP versions. Every step is wrapped in safe
-helpers; if anything goes wrong (non-`:sys`-compatible driver,
-no `:prim_tty` field found, `:prim_tty.reinit/2` rejecting the
-mode), we fall through to `nil` and the attach proceeds with
-today's caret-rendered output — visibly broken, never crashy.
-A short 200ms timeout on the introspecting `:sys.get_state /
+mechanism resilient to ssh_cli / user_drv / `prim_tty`
+record-layout reshuffles across OTP versions. Every step is
+wrapped in safe helpers; if anything goes wrong (non-`:sys`-
+capable driver, no `:prim_tty` field found, no options map),
+we fall through to `nil` and the attach proceeds with today's
+caret-rendered output — visibly broken, never crashy. A short
+200ms timeout on the introspecting `:sys.get_state /
 :sys.replace_state` keeps the fall-through cheap when the
 driver isn't a `:sys`-capable process (test fakes, escripts).
 
