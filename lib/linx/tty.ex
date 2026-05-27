@@ -69,7 +69,7 @@ defmodule Linx.Tty do
       SSH, `:remsh`, and locally as a universal alternative to
       `:controlling`. See `attach/2`'s docstring for the
       mechanism (`:io.setopts(echo: false)` + a linked reader
-      sub-process + `IO.binwrite/2` for output + polled winsize).
+      sub-process + `:io.put_chars/2` for output + polled winsize).
 
   ## Save and restore is mandatory
 
@@ -251,9 +251,14 @@ defmodule Linx.Tty do
   routes input through its `:dumb` state (byte-oriented, no line
   editor); spawn a reader sub-process that loops on
   `:io.get_chars/3` and forwards bytes to the pump's mailbox;
-  pump output via `IO.binwrite/2`. Window size is seeded from
-  `:io.columns/0` + `:io.rows/0` and re-checked on a polling
-  timer (default 1s) since SSH has no SIGWINCH equivalent.
+  pump output via `:io.put_chars(gl, bytes)`, which sends
+  `{put_chars, :unicode, _}`. The unicode encoding is mandatory
+  here — OTP's `ssh_cli` has no io_request clause for `:latin1`
+  and silently drops `IO.binwrite/2`'s `{put_chars, :latin1, _}`
+  via its `unhandled_request` catch-all, hanging the caller.
+  Window size is seeded from `:io.columns/0` + `:io.rows/0` and
+  re-checked on a polling timer (default 1s) since SSH has no
+  SIGWINCH equivalent.
 
   Side-effects worth knowing about, all transient (restored on
   return, even on a raise inside the pump):
@@ -422,7 +427,20 @@ defmodule Linx.Tty do
         __pump_gl__(reader, gl, session, poll_ms, last_ws)
 
       {:linx_process, :pty_out, bytes} ->
-        IO.binwrite(gl, bytes)
+        # `:io.put_chars/2`, not `IO.binwrite/2`. `:io.put_chars/2`
+        # sends `{put_chars, :unicode, _}`; `IO.binwrite/2` sends
+        # `{put_chars, :latin1, _}`. OTP's `ssh_cli` (lib/ssh's CLI
+        # channel handler) has no io_request clause for `:latin1` --
+        # it falls through to a catch-all that does
+        # `erlang:display({unhandled_request, Req})` and returns no
+        # reply, hanging the caller forever. `:unicode` is the only
+        # encoding ssh_cli handles, and `:group` plus the local
+        # `user_drv` both translate `{put_chars, :unicode, _}`
+        # correctly. Implication: workload output should be UTF-8 /
+        # ASCII (which is the standard interactive-shell case);
+        # arbitrary binary content may fail
+        # `:unicode.characters_to_binary/1` inside ssh_cli.
+        _ = :io.put_chars(gl, bytes)
         __pump_gl__(reader, gl, session, poll_ms, last_ws)
 
       {:linx_tty_gl, :eof} ->
