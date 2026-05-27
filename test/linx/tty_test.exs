@@ -369,17 +369,20 @@ defmodule Linx.TtyTest do
       # writes to the fake gl.
       send(self(), {:linx_tty_gl, :data, "hello\n"})
 
-      # Helper to terminate the pump after it has processed echo.
+      # Helper to terminate the pump after cat has had time to echo.
+      # 1s is comfortably longer than the actual round-trip on any
+      # plausible test host but keeps the test snappy.
       spawn_link(fn ->
-        Process.sleep(500)
+        Process.sleep(1_000)
         :ok = Linx.Process.signal(session, 15)
       end)
 
       assert {:ok, {:signaled, 15}} = Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil)
 
-      # The fake gl captured at least one write containing what cat echoed.
-      assert_received {:fake_gl_wrote, written}
-      assert String.contains?(written, "hello")
+      # Cat's echo gets fragmented across multiple writes; collect
+      # them all and assert "hello" appears in the concatenation
+      # rather than in any single write.
+      assert collect_fake_writes() =~ "hello"
     end
 
     test "returns {:ok, {:exited, code}} on natural session exit" do
@@ -695,6 +698,18 @@ defmodule Linx.TtyTest do
     end
 
     :ok
+  end
+
+  # Drain every {:fake_gl_wrote, _} that's in our mailbox right now
+  # and return their concatenation. Used to assert across the
+  # fragmentation cat's echo can take on the way back through the
+  # PTY -> linx_process -> pump -> :io.put_chars path.
+  defp collect_fake_writes(acc \\ "") do
+    receive do
+      {:fake_gl_wrote, bytes} -> collect_fake_writes(acc <> bytes)
+    after
+      0 -> acc
+    end
   end
 
   # Read from `port` until `seen` contains `needle`, then signal the

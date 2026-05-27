@@ -279,8 +279,13 @@ defmodule Linx.Process do
   Elixir verb name — one word for the same action on both sides of
   the Port boundary.
 
-  Returns `:ok`, or `{:error, :not_ready}` if the agent has not yet
-  reported `:ready` (i.e. there is no checkpoint to advance past).
+  Returns `:ok`, `{:error, :not_ready}` if the agent has not yet
+  reported `:ready` (i.e. there is no checkpoint to advance past),
+  or `{:error, :already_terminated}` if the workload has already
+  reached a terminal stage — calling `proceed/1` on a session
+  whose workload has already exited / aborted / errored is a
+  no-op the GenServer refuses cleanly rather than sending a
+  stale `:proceed` to an agent that's been collected.
   """
   @spec proceed(t()) :: :ok | {:error, term}
   def proceed(session) when is_pid(session) do
@@ -707,6 +712,15 @@ defmodule Linx.Process do
   defp pty?(_), do: false
 
   @impl true
+  # Terminal first -- mirrors abort/1's guard so the two checkpoint
+  # verbs respond consistently. Without this clause the child_pid
+  # match below fires post-terminal (child_pid stays set after
+  # :ready) and Port.command lands on a collected agent.
+  def handle_call(:proceed, _from, %{result: result} = state)
+      when result != nil do
+    {:reply, {:error, :already_terminated}, state}
+  end
+
   def handle_call(:proceed, _from, %{port: port, child_pid: child_pid} = state)
       when child_pid != nil do
     Port.command(port, :erlang.term_to_binary(:proceed))

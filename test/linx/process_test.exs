@@ -268,6 +268,17 @@ defmodule Linx.ProcessTest do
       assert {:error, :already_terminated} = P.abort(session)
     end
 
+    test "proceed/1 after the session has terminated returns :already_terminated" do
+      # Same shape as the abort/1 terminal-guard test -- proceed
+      # and abort are sibling checkpoint verbs.
+      {:ok, session} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert {:error, :already_terminated} = P.proceed(session)
+    end
+
     test "wait/1 with a timeout sees :aborted as a terminal" do
       {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"])
       assert_receive {:linx_process, :ready, _}, 2_000
