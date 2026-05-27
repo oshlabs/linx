@@ -38,6 +38,39 @@ defmodule Linx.Tty do
   `{:error, {:open, :enxio}}` — a typed error a caller can pattern-match
   on, not a crash.
 
+  ## `/dev/tty` is the BEAM's terminal, not necessarily yours
+
+  `:controlling` targets `/dev/tty` — the BEAM *process's* controlling
+  terminal. That is not always the terminal the *caller* is typing
+  into. The distinction matters in three environments:
+
+    * **SSH iex** (e.g. `ssh nerves-foo.local` → iex on a Nerves
+      device). Erlang's SSH daemon (`ssh_cli`) is a pure
+      I/O-protocol bridge; there is no kernel tty behind the SSH
+      session. `/dev/tty` inside the BEAM resolves to the BEAM's
+      actual controlling tty (on Nerves: the HDMI / UART console),
+      not the SSH session.
+    * **`:remsh`** (`iex --sname foo --remsh bar@host`). The iex
+      shell's group leader is an IO server living in the local
+      node; the remote BEAM has its own `/dev/tty` somewhere else.
+    * **Headless deployments where the BEAM's controlling tty is a
+      serial port the user can't physically reach.**
+
+  Two pieces close those gaps:
+
+    * `attach(:controlling, _)` refuses with
+      `{:error, :no_local_tty}` when the caller's group leader is
+      fronted by Erlang's SSH daemon (detected by `:ssh_sup` /
+      `:sshd_sup` in the GL's `"$ancestors"` chain). Call
+      `Linx.Tty.format_error/1` on the atom for the hint.
+
+    * `attach(:group_leader, session)` (T6.1) pumps through the
+      caller's group leader instead of `/dev/tty`, working over
+      SSH, `:remsh`, and locally as a universal alternative to
+      `:controlling`. See `attach/2`'s docstring for the
+      mechanism (`:io.setopts(echo: false)` + a linked reader
+      sub-process + `:io.put_chars/2` for output + polled winsize).
+
   ## Save and restore is mandatory
 
   Any operation that mutates the local terminal's state hands the
@@ -83,12 +116,17 @@ defmodule Linx.Tty do
 
   T0–T5 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
   window-size propagation, coexistence with `iex`'s tty driver, and
-  runtime SIGWINCH-driven resize updates. See `docs/tty/PLAN.md` for
-  the roadmap.
+  runtime SIGWINCH-driven resize updates. T6.0 + T6.1 shipped on
+  branch `tty-group-leader-attach`: the SSH-aware refusal guard on
+  `attach(:controlling, _)`, the `Linx.Tty.format_error/1` helper,
+  and the `attach(:group_leader, _)` mode that pumps via the
+  Erlang I/O protocol — works over SSH, `:remsh`, and locally as
+  a universal alternative to `:controlling`. See
+  `docs/tty/PLAN.md` for the roadmap.
   """
 
   alias Linx.Tty.Native
-  alias Linx.Tty.{Saved, WindowSize}
+  alias Linx.Tty.{Env, Saved, WindowSize}
 
   @typedoc """
   An open file descriptor referring to a tty device. Integer — the
@@ -185,17 +223,91 @@ defmodule Linx.Tty do
   end
 
   @doc """
-  Hands the BEAM's controlling terminal over to `session`'s PTY master
-  and pumps bytes both ways until the workload exits, then restores
+  Hands the caller's terminal over to `session`'s PTY master and
+  pumps bytes both ways until the workload exits, then restores
   the terminal.
 
-  `target` chooses which local tty the caller hands over. Today only
-  `:controlling` (open `/dev/tty`) is meaningful; future shapes may
-  accept an explicit fd.
+  `target` selects how the caller's terminal is reached:
+
+    * `:controlling` — open `/dev/tty` directly. Works wherever
+      the BEAM's controlling terminal is the user's terminal
+      (local iex on a terminal emulator, Nerves HDMI / UART
+      console). Refuses with `{:error, :no_local_tty}` when the
+      caller is over SSH (the T6.0 guard).
+
+    * `:group_leader` — pump through the caller's
+      `Process.group_leader/0` via Erlang's I/O protocol. Works
+      over SSH / `:remsh` and anywhere else the user's terminal
+      is an Erlang process rather than a kernel tty fd. Also
+      works on a local terminal; it's the universal mode.
 
   Returns the terminal event from the session — `{:ok, {:exited, n}}`,
-  `{:ok, {:signaled, n}}` — or `{:error, _}` for a setup failure or
-  a pre-exec workload error.
+  `{:ok, {:signaled, n}}` — or `{:error, _}` for a setup failure
+  or a pre-exec workload error.
+
+  ## `:group_leader` mode specifics
+
+  Implementation: set `:io.setopts(gl, echo: false)` so `:group`
+  routes input through its `:dumb` state (byte-oriented, no line
+  editor); flip the driver's `:prim_tty` output mode from
+  `:cooked` to `:raw` via `:sys.replace_state/2` so workload
+  output bytes pass through verbatim instead of being rendered
+  in caret notation (without this, the workload's `\b \b`
+  backspace-erase echo arrives at the SSH client as `^( ^(`);
+  spawn a reader sub-process that loops on
+  `:io.get_chars(:standard_io, ~c"", 1)` and forwards bytes to
+  the pump's mailbox. `N = 1` is intentional: `:group`'s
+  `:dumb` state runs `collect_chars` (non-eager), which waits
+  for *exactly* N chars before returning; the eager variant
+  (`collect_chars_eager`, which returns whatever's available)
+  is gated by `shell = noshell`, unreachable with an iex shell
+  attached. One byte per round-trip is sub-microsecond and
+  invisible at interactive speeds, including paste.
+
+  Both transient state changes (echo and prim_tty output mode)
+  are restored unconditionally on exit via `try/after`, even on
+  a raise inside the pump.
+
+  ### Ctrl-C handling
+
+  `ssh_cli` intercepts byte `\\x03` (Ctrl-C) from the SSH stream
+  and turns it into `exit(group, interrupt)` instead of passing
+  the byte through. The pump translates that back into a literal
+  `\\x03` byte to the workload's PTY in both shapes it can arrive:
+  as `{:error, :interrupted}` on the reader's pending
+  `:io.get_chars` (the common case), and as a direct
+  `{:EXIT, ^gl, :interrupt}` to the pump's mailbox (the race case
+  where the interrupt arrives between two reader round-trips).
+  The workload's PTY line discipline then turns the byte into
+  SIGINT for the foreground process group — the user-visible
+  "Ctrl-C interrupts the running command" behaviour.
+  pump output via `:io.put_chars(gl, bytes)`, which sends
+  `{put_chars, :unicode, _}`. The unicode encoding is mandatory
+  here — OTP's `ssh_cli` has no io_request clause for `:latin1`
+  and silently drops `IO.binwrite/2`'s `{put_chars, :latin1, _}`
+  via its `unhandled_request` catch-all, hanging the caller.
+  Window size is seeded from `:io.columns/0` + `:io.rows/0` and
+  re-checked on a polling timer (default 250ms) since SSH has no
+  SIGWINCH equivalent. The choice of polling vs an event-driven
+  trace hook on ssh_cli is discussed at the `@winsize_poll_ms`
+  module attribute below.
+
+  Side-effects worth knowing about, all transient (restored on
+  return, even on a raise inside the pump):
+
+    * The caller's `:echo` opt is flipped to `false`. iex's line
+      editing (history, completion, `^A`/`^E`, etc.) is bypassed
+      for the duration — bytes go to the workload, not the iex
+      readline. Expected; the workload's own shell does its
+      editing on the other side of the PTY.
+    * Window-size updates lag by up to `:winsize_poll_ms` (default
+      `250`). Fine for shells; barely noticeable even mid-`vim`.
+
+  Caveat: the SSH transport keeps the line-discipline of the
+  user's local terminal (your local `ssh` client puts your local
+  terminal in raw mode by default; if it didn't, no amount of
+  BEAM-side wrangling would deliver per-keystroke input). All
+  observed nerves_ssh paths are fine here.
 
   ## Owner requirement
 
@@ -214,10 +326,288 @@ defmodule Linx.Tty do
   unconditionally via `try/after`, even on a crash inside the loop,
   so a wedged terminal is structurally impossible.
   """
-  @spec attach(:controlling, session()) ::
+  @spec attach(:controlling | :group_leader, session()) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+          | {:error, :no_local_tty | :gl_eof | term()}
+  def attach(:controlling, session) when is_pid(session) do
+    # T6.0 guard: when the caller's terminal is fronted by Erlang's
+    # SSH daemon, /dev/tty is the BEAM's controlling tty (the HDMI /
+    # UART console on Nerves) -- *not* the SSH session. Refuse cleanly
+    # rather than silently pumping bytes to the wrong terminal.
+    case Env.classify_caller_terminal() do
+      :ssh -> {:error, :no_local_tty}
+      _ -> attach_controlling(session)
+    end
+  end
+
+  # How often `attach(:group_leader, _)`'s pump re-reads
+  # `:io.columns` / `:io.rows` and forwards a changed window size to
+  # the workload's PTY. 250ms gives a worst-case redraw lag of
+  # ~250ms after the user finishes dragging their terminal corner --
+  # well below "noticeable" for interactive use -- while spending
+  # ~60us/s of CPU on the geometry round-trips (about 0.006% of one
+  # core; sub-noise even on the rpi5).
+  #
+  # ## Why polling rather than an event-driven hook
+  #
+  # ssh_cli (lib/ssh/src/ssh_cli.erl) receives the SSH protocol's
+  # `window_change` channel request as a `{ssh_cm, _, {window_change,
+  # ChannelId, W, H, _, _}}` message, updates its internal `#ssh_pty{}`
+  # record and the prim_tty geometry, and stops. It does not notify
+  # the group (or anyone subscribed to the group) -- the new geometry
+  # is only visible by querying ssh_cli back, which is what
+  # :io.columns/:io.rows do.
+  #
+  # The event-driven alternative is `:erlang.trace(ssh_cli_pid, true,
+  # [:receive])` for the lifetime of attach, pattern-matching on the
+  # window_change message in the pump's receive, and reacting
+  # immediately. Pros: near-zero latency (microseconds), zero
+  # idle-time CPU. Cons: (1) every message ssh_cli receives gets sent
+  # to our process for inspection, so the per-keystroke overhead
+  # grows linearly with traffic -- still small in absolute terms but
+  # not free; (2) `:erlang.trace/3` is a debugging mechanism and
+  # using it as a production-shaped API is unusual, with edge cases
+  # around trace token inheritance and gc of the trace state; (3)
+  # tighter OTP-internals coupling than polling (we'd be depending
+  # on the exact message shape ssh_cli receives, which is more
+  # fragile than our existing coupling to the group's state record
+  # layout).
+  #
+  # Polling at 250ms hits the sweet spot: human-imperceptible
+  # latency, negligible CPU, no debug-API dependency. If a future
+  # use case actually needs sub-100ms resize fidelity (a TUI that
+  # needs to redraw before the user lets go of the corner), the
+  # trace-based hook becomes worth its complexity -- until then,
+  # 250ms is the right call.
+  @winsize_poll_ms 250
+
+  def attach(:group_leader, session) when is_pid(session) do
+    attach_group_leader(session, @winsize_poll_ms)
+  end
+
+  @doc """
+  Returns a human-readable description for error atoms `Linx.Tty`
+  returns. Currently covers `:no_local_tty` (the T6.0 guard's
+  refusal); falls back to `inspect/1` for any other shape so it can
+  be safely chained at error sites without losing information.
+  """
+  @spec format_error(term()) :: binary()
+  def format_error(:no_local_tty) do
+    "Your iex appears to be over SSH (or :remsh); /dev/tty inside the " <>
+      "BEAM is the BEAM's controlling terminal (e.g. the HDMI/UART " <>
+      "console on Nerves), not your remote session. Use " <>
+      "Linx.Tty.attach(:group_leader, session) instead (T6.1)."
+  end
+
+  def format_error(other), do: inspect(other)
+
+  defp attach_group_leader(session, winsize_poll_ms) do
+    gl = Process.group_leader()
+    saved_echo = Keyword.get(:io.getopts(gl), :echo, true)
+    saved_trap = Process.flag(:trap_exit, true)
+
+    try do
+      _ = :io.setopts(gl, echo: false)
+
+      # Flip the driver's `:prim_tty` output mode from `:cooked` to
+      # `:raw` for the lifetime of the pump. Cooked mode renders
+      # non-printable bytes as caret notation (`\b` -> `^(`, `\x7F` ->
+      # `^?`, etc.) -- a useful behaviour for iex's own line editor,
+      # but exactly wrong for an attach pump that's supposed to relay
+      # the workload's raw terminal bytes through to the caller's
+      # terminal emulator. Without this, backspace from the workload's
+      # PTY echo (`\b \b`) renders as `^( ^(`, vim's TUI sequences get
+      # mangled, etc. See T6.1.1 in `docs/tty/PLAN.md`.
+      #
+      # Returns an opaque "saved" value (or `nil` if the driver
+      # doesn't look like ssh_cli / user_drv with a `:prim_tty` state)
+      # so the matching restore on the way out is a no-op when there's
+      # nothing to undo.
+      saved_tty_mode = take_prim_tty_output_quietly(gl, :raw)
+
+      initial_ws = seed_winsize(gl, session)
+      reader = spawn_link(__MODULE__, :__gl_reader__, [self(), gl])
+
+      try do
+        __pump_gl__(reader, gl, session, winsize_poll_ms, initial_ws)
+      after
+        # Reader is stuck in :io.get_chars; an exit signal unblocks it.
+        if Process.alive?(reader), do: Process.exit(reader, :shutdown)
+        # Drain its linked :EXIT message so we don't leak it past the
+        # trap_exit restore below.
+        receive do
+          {:EXIT, ^reader, _} -> :ok
+        after
+          200 -> :ok
+        end
+
+        give_prim_tty_output_back(saved_tty_mode)
+      end
+    after
+      # Only restore the field we touched. `:io.setopts/2` short-circuits
+      # on options it considers `:enotsup` (e.g. `terminal: false`), so
+      # restoring the whole `:io.getopts/0` result would silently drop
+      # later keys -- including the echo we care about.
+      _ = :io.setopts(gl, echo: saved_echo)
+      Process.flag(:trap_exit, saved_trap)
+    end
+  end
+
+  defp seed_winsize(gl, session) do
+    case {:io.columns(gl), :io.rows(gl)} do
+      {{:ok, cols}, {:ok, rows}} ->
+        ws = %WindowSize{rows: rows, cols: cols, xpixel: 0, ypixel: 0}
+        _ = Linx.Process.pty_set_winsize(session, ws)
+        ws
+
+      _ ->
+        nil
+    end
+  end
+
+  @doc false
+  # Linked reader sub-process: synchronous `:io.get_chars/3` in a
+  # loop, translating each batch of bytes into a pump mailbox
+  # message. Exposed (under @doc false) so `spawn_link/3` can reach
+  # it as an MFA -- otherwise an anonymous fun would do.
+  @spec __gl_reader__(pid(), pid()) :: no_return()
+  def __gl_reader__(parent, gl) when is_pid(parent) and is_pid(gl) do
+    # Defensive: `spawn_link/3` already inherits the parent's GL,
+    # which is the GL we want, but set it explicitly so an unusual
+    # call site (e.g. tests) doesn't accidentally read from a
+    # different IO server.
+    Process.group_leader(self(), gl)
+    gl_reader_loop(parent)
+  end
+
+  defp gl_reader_loop(parent) do
+    # `N = 1`, not a larger buffer size. With echo=false `:group`
+    # routes input through its `:dumb` state's `collect_chars`
+    # (non-eager) handler, which waits for *exactly* N chars before
+    # returning. The eager variant (`collect_chars_eager`) that
+    # returns on first byte is gated by `shell = noshell`, which we
+    # can't satisfy with an iex shell. So we ask for one byte per
+    # round-trip; each keystroke completes a `get_chars(1)`
+    # immediately, the pump forwards it, and we loop. One message
+    # round-trip per byte is sub-microsecond — fine for interactive
+    # use including paste.
+    case :io.get_chars(:standard_io, ~c"", 1) do
+      :eof ->
+        send(parent, {:linx_tty_gl, :eof})
+
+      {:error, :interrupted} ->
+        # SSH Ctrl-C handling. `ssh_cli` (lib/ssh-5.5.2/src/ssh_cli.erl:408)
+        # intercepts byte `\x03` from the SSH stream and turns it into
+        # `exit(group, interrupt)` instead of passing the byte through.
+        # If we (the reader) have a pending `:io.get_chars` request,
+        # group.erl:511 replies `{error, interrupted}`. Translate that
+        # back into a literal `\x03` byte for the workload so the
+        # workload's PTY line discipline can turn it into SIGINT for
+        # the foreground process group -- the user-visible "Ctrl-C
+        # interrupts the running command" behaviour.
+        send(parent, {:linx_tty_gl, :data, <<3>>})
+        gl_reader_loop(parent)
+
+      {:error, why} ->
+        send(parent, {:linx_tty_gl, {:error, why}})
+
+      bytes when is_binary(bytes) ->
+        send(parent, {:linx_tty_gl, :data, bytes})
+        gl_reader_loop(parent)
+
+      bytes when is_list(bytes) ->
+        send(parent, {:linx_tty_gl, :data, IO.iodata_to_binary(bytes)})
+        gl_reader_loop(parent)
+    end
+  end
+
+  @doc false
+  # The `:group_leader`-mode pump. Exposed (under @doc false) so tests
+  # can drive it directly without spinning up the full attach flow.
+  #
+  # `last_ws` is the most recently forwarded `Linx.Tty.WindowSize` (or
+  # `nil` if the initial seed failed or hasn't happened). The polling
+  # `after` clause forwards a new size only when it differs, so a quiet
+  # terminal generates no work beyond the periodic `:io` round-trips.
+  @spec __pump_gl__(pid(), pid(), session(), pos_integer(), WindowSize.t() | nil) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
           | {:error, term()}
-  def attach(:controlling, session) when is_pid(session) do
+  def __pump_gl__(reader, gl, session, poll_ms, last_ws)
+      when is_pid(reader) and is_pid(gl) and is_pid(session) and is_integer(poll_ms) do
+    receive do
+      {:linx_tty_gl, :data, bytes} ->
+        _ = Linx.Process.pty_write(session, bytes)
+        __pump_gl__(reader, gl, session, poll_ms, last_ws)
+
+      {:linx_process, :pty_out, bytes} ->
+        # `:io.put_chars/2`, not `IO.binwrite/2`. `:io.put_chars/2`
+        # sends `{put_chars, :unicode, _}`; `IO.binwrite/2` sends
+        # `{put_chars, :latin1, _}`. OTP's `ssh_cli` (lib/ssh's CLI
+        # channel handler) has no io_request clause for `:latin1` --
+        # it falls through to a catch-all that does
+        # `erlang:display({unhandled_request, Req})` and returns no
+        # reply, hanging the caller forever. `:unicode` is the only
+        # encoding ssh_cli handles, and `:group` plus the local
+        # `user_drv` both translate `{put_chars, :unicode, _}`
+        # correctly. Implication: workload output should be UTF-8 /
+        # ASCII (which is the standard interactive-shell case);
+        # arbitrary binary content may fail
+        # `:unicode.characters_to_binary/1` inside ssh_cli.
+        _ = :io.put_chars(gl, bytes)
+        __pump_gl__(reader, gl, session, poll_ms, last_ws)
+
+      {:linx_tty_gl, :eof} ->
+        {:error, :gl_eof}
+
+      {:linx_tty_gl, {:error, why}} ->
+        {:error, {:gl_reader, why}}
+
+      {:EXIT, ^reader, reason} ->
+        {:error, {:gl_reader_exit, reason}}
+
+      {:EXIT, ^gl, :interrupt} ->
+        # Race case: ssh_cli intercepted ^C and exit'd us directly
+        # rather than via our reader's pending input request (see
+        # group.erl:507 -- the "input = undefined" handler). Happens
+        # in the tiny window between our reader's get_chars
+        # round-trips. Translate to a `\x03` byte for the workload
+        # so SIGINT propagation still works.
+        _ = Linx.Process.pty_write(session, <<3>>)
+        __pump_gl__(reader, gl, session, poll_ms, last_ws)
+
+      {:linx_process, :exited, code} ->
+        {:ok, {:exited, code}}
+
+      {:linx_process, :signaled, signum} ->
+        {:ok, {:signaled, signum}}
+
+      {:linx_process, :error, errno, stage} ->
+        {:error, %{errno: errno, stage: stage}}
+    after
+      poll_ms ->
+        new_ws = maybe_forward_winsize(gl, session, last_ws)
+        __pump_gl__(reader, gl, session, poll_ms, new_ws)
+    end
+  end
+
+  defp maybe_forward_winsize(gl, session, last_ws) do
+    case {:io.columns(gl), :io.rows(gl)} do
+      {{:ok, cols}, {:ok, rows}} ->
+        ws = %WindowSize{rows: rows, cols: cols, xpixel: 0, ypixel: 0}
+
+        if ws != last_ws do
+          _ = Linx.Process.pty_set_winsize(session, ws)
+          ws
+        else
+          last_ws
+        end
+
+      _ ->
+        last_ws
+    end
+  end
+
+  defp attach_controlling(session) do
     with {:ok, fd, saved} <- open_controlling_raw() do
       # Pause Erlang's prim_tty reader so it stops competing with us
       # for /dev/tty reads. See the module doc's "Coexisting with
@@ -288,9 +678,11 @@ defmodule Linx.Tty do
     end
   end
 
-  defp safe_get_state(pid) do
+  defp safe_get_state(pid), do: safe_get_state(pid, 1000)
+
+  defp safe_get_state(pid, timeout) do
     try do
-      :sys.get_state(pid, 1000)
+      :sys.get_state(pid, timeout)
     catch
       _, _ -> nil
     end
@@ -309,6 +701,172 @@ defmodule Linx.Tty do
       _, _ -> :error
     end
   end
+
+  # Find the driver pid backing the caller's group leader (the SSH
+  # `ssh_cli` channel handler on a Nerves SSH session, the local
+  # `user_drv` on a terminal-attached iex) and flip its `:prim_tty`
+  # output mode to `new_mode`. Returns `{drv, old_mode}` to hand to
+  # `give_prim_tty_output_back/1`, or `nil` if the driver doesn't
+  # have an addressable `:prim_tty` state (escripts, non-shell apps,
+  # drivers we don't recognise).
+  #
+  # We touch OTP internals here -- specifically, we run a function
+  # inside the driver process via `:sys.replace_state/2` that scans
+  # its state record for an element that responds to
+  # `:prim_tty.output_mode/1`, swaps in a `:prim_tty.reinit/2`'d
+  # version with the new output mode, and shouts the previous mode
+  # back to us through a one-shot ref. Same kind of OTP-internals
+  # coupling T4 already accepts for `:prim_tty.disable_reader/1`.
+  # Scanning rather than hard-coding the field index makes us
+  # resilient to ssh_cli / user_drv record-layout reshuffles across
+  # OTP versions.
+  defp take_prim_tty_output_quietly(gl, new_mode) do
+    # Use a short timeout (200ms) for the GL introspection: a real
+    # `:group` gen_statem replies within microseconds, while
+    # non-`:sys`-capable processes (test fakes, escripts' raw IO
+    # servers, etc.) wedge the call until the timeout. Falling
+    # through quickly on those keeps the fall-through path cheap.
+    with {_state_name, group_state} <- safe_get_state(gl, 200),
+         drv when is_pid(drv) <- safe_elem(group_state, 2),
+         {:ok, old_mode} <- safe_replace_prim_tty_output(drv, new_mode) do
+      {drv, old_mode}
+    else
+      _ -> nil
+    end
+  end
+
+  defp give_prim_tty_output_back(nil), do: :ok
+
+  defp give_prim_tty_output_back({drv, old_mode}) do
+    _ = safe_replace_prim_tty_output(drv, old_mode)
+    :ok
+  end
+
+  defp safe_replace_prim_tty_output(drv, new_mode) do
+    ref = make_ref()
+    parent = self()
+
+    swap = fn state ->
+      case find_prim_tty_in_state(state) do
+        {path, old_tty} ->
+          case swap_prim_tty_output_mode_direct(old_tty, new_mode) do
+            {:ok, new_tty, old_mode} ->
+              send(parent, {ref, {:ok, old_mode}})
+              put_in_tuple_path(state, path, new_tty)
+
+            :error ->
+              send(parent, {ref, :swap_failed})
+              state
+          end
+
+        :not_found ->
+          send(parent, {ref, :no_prim_tty})
+          state
+      end
+    end
+
+    try do
+      _ = :sys.replace_state(drv, swap, 200)
+
+      receive do
+        {^ref, {:ok, old_mode}} -> {:ok, old_mode}
+        {^ref, _} -> :error
+      after
+        200 -> :error
+      end
+    catch
+      _, _ -> :error
+    end
+  end
+
+  # Recursively search `state` for an element that responds to
+  # `:prim_tty.output_mode/1`. Returns `{path, prim_tty_state}` where
+  # `path` is a list of tuple indices from the outermost state down
+  # to the prim_tty field, or `:not_found`.
+  #
+  # Recursion is needed because the SSH driver is an
+  # `ssh_client_channel` gen_server whose state record wraps the
+  # `ssh_cli` callback state as a field; the `prim_tty` we want lives
+  # two levels deep. Local `user_drv` has prim_tty at field index 1,
+  # one level. The recursive walk handles both without us hard-coding
+  # either layout.
+  defp find_prim_tty_in_state(state) do
+    find_prim_tty_in_state(state, [])
+  end
+
+  defp find_prim_tty_in_state(state, path_so_far) when is_tuple(state) do
+    case safe_prim_tty_output_mode(state) do
+      {:ok, _} ->
+        {Enum.reverse(path_so_far), state}
+
+      _ ->
+        state
+        |> Tuple.to_list()
+        |> Enum.with_index()
+        |> Enum.find_value(:not_found, fn {field, idx} ->
+          case find_prim_tty_in_state(field, [idx | path_so_far]) do
+            :not_found -> false
+            found -> found
+          end
+        end)
+    end
+  end
+
+  defp find_prim_tty_in_state(_, _), do: :not_found
+
+  defp put_in_tuple_path(_state, [], value), do: value
+
+  defp put_in_tuple_path(state, [idx | rest], value) when is_tuple(state) do
+    inner = elem(state, idx)
+    new_inner = put_in_tuple_path(inner, rest, value)
+    put_elem(state, idx, new_inner)
+  end
+
+  defp safe_prim_tty_output_mode(maybe_tty) do
+    try do
+      {:ok, :prim_tty.output_mode(maybe_tty)}
+    catch
+      _, _ -> :error
+    end
+  end
+
+  # Flip prim_tty's output mode by mutating its `options` map in
+  # place, rather than calling `:prim_tty.reinit/2`. The latter ends
+  # up in `tty_init/2` -- a NIF that requires a real terminal fd --
+  # and crashes with `:function_clause` for SSH-fronted prim_tty
+  # states whose `tty` field is `undefined` (set up via
+  # `prim_tty:init_ssh/3`, not `:init/1`).
+  #
+  # The output-mode dispatch at `prim_tty.erl:677` is
+  # `handle_request(State = #state{ options = #{ output := raw } }, ...)`,
+  # so just mutating `options.output` is sufficient -- no re-init,
+  # no NIF call.
+  #
+  # The `options` field is identified by scanning the state tuple
+  # for an element that's a map with both `:input` and `:output` keys
+  # (distinctive enough to single out `prim_tty`'s options map
+  # without hard-coding its index against record-layout changes).
+  defp swap_prim_tty_output_mode_direct(prim_tty_state, new_mode)
+       when is_tuple(prim_tty_state) do
+    idx =
+      prim_tty_state
+      |> Tuple.to_list()
+      |> Enum.find_index(&prim_tty_options_map?/1)
+
+    if idx do
+      old_options = elem(prim_tty_state, idx)
+      old_mode = Map.get(old_options, :output)
+      new_options = Map.put(old_options, :output, new_mode)
+      {:ok, put_elem(prim_tty_state, idx, new_options), old_mode}
+    else
+      :error
+    end
+  end
+
+  defp swap_prim_tty_output_mode_direct(_, _), do: :error
+
+  defp prim_tty_options_map?(%{input: _, output: _}), do: true
+  defp prim_tty_options_map?(_), do: false
 
   # Register a `Linx.Tty.SigwinchHandler` instance on
   # `:erl_signal_server` keyed by `{handler, id}` so multiple

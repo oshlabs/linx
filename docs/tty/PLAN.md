@@ -11,6 +11,50 @@
 > `Linx.Process.pty_set_winsize/2`). OTP 28's expanded
 > `:os.set_signal/2` (which now covers `:sigwinch`) made the
 > originally-proposed signalfd NIF unnecessary.
+>
+> **T6 is in progress** on branch `tty-group-leader-attach`: a sibling
+> attach mode (`attach(:group_leader, session)`) that pumps via the
+> Erlang I/O protocol through the caller's group leader rather than
+> `/dev/tty`, so attach works over SSH (e.g. Nerves' `ssh nerves-foo`
+> + iex), inside `:remsh`, and anywhere else the user's terminal is
+> not the BEAM's controlling tty.
+>
+> The 2026-05-27 SSH probes on a Nerves rpi5 (probe #1 + #2 + #3,
+> under `docs/tty/probes/`) plus a read of `kernel-10.6.3`'s
+> `group.erl` resolved the mechanism entirely:
+>
+>  * The GL is `kernel`'s `:group` gen_statem — same module local
+>    iex uses, just on top of an SSH transport rather than
+>    `/dev/tty`.
+>  * Detection: `"$ancestors"` in the GL's dictionary contains
+>    `:ssh_sup` (OTP `ssh` app top supervisor) and `:sshd_sup`
+>    (nerves_ssh's wrapper).
+>  * Line-buffering came from `:group` routing input requests to
+>    its `:xterm` state (the rich line editor with key_map and
+>    history) when `echo=true`. Setting `echo=false` routes through
+>    `:dumb` state instead, whose `get_chars_dumb` returns bytes
+>    immediately as the driver delivers them.
+>  * Probe #3 verified: with `:io.setopts(gl, echo: false)` set,
+>    `:io.get_chars(:standard_io, '', 1)` returned `<<"x">>` on a
+>    single keypress, no Enter required. SSH transport is
+>    byte-oriented.
+>
+> T6.1's mode-flip is therefore a one-liner of public `:io.setopts/2`
+> — no private gen_statem messages, no record-layout coupling beyond
+> what T4 already does. **T6 is fully shipped** on
+> `tty-group-leader-attach`. T6.1.1 added a `:prim_tty` output-mode
+> bracket (`:sys.replace_state/2` on `ssh_cli` to flip `:cooked` to
+> `:raw` for the pump's lifetime) so workload backspace echo and
+> vim TUI sequences render verbatim through the SSH channel instead
+> of being caret-rendered (`\b` → `^(`, etc.) by `:prim_tty`'s
+> cooked-mode line editor. T6.1.2 added Ctrl-C forwarding: `ssh_cli`
+> swallows `\x03` and turns it into `exit(group, interrupt)`, so the
+> reader's `{:error, :interrupted}` reply and the pump's
+> `{:EXIT, ^gl, :interrupt}` shape both translate back to a literal
+> `<<3>>` byte to the workload's PTY (the workload's line discipline
+> then turns it into SIGINT for the foreground process group).
+> T6.2 captured the observed end-to-end behaviour in EXAMPLES.md.
+> Ready for PR.
 
 ## Goal
 
@@ -407,6 +451,571 @@ fallback path (no bracketing) is taken and the every-other-byte
 behaviour returns — visibly broken, but not crashy. That's an
 acceptable failure mode; the value of the brackets is too large to
 not take this dependency.
+
+### T6 — Attach over SSH / non-controlling-tty environments
+
+⏳ **Sketched, not built.** Branch: `tty-group-leader-attach`.
+
+#### Motivation — the SSH-on-Nerves trap
+
+The motivating Linx workflow is: on a Nerves device, `ssh
+nerves-foo.local`, land at `iex>`, spawn a container with
+`stdio: :pty`, and attach. That sequence reads naturally as
+"attach the *thing I'm typing into* to the workload" — and that's
+exactly what `attach(:controlling, session)` doesn't do over SSH.
+
+`Linx.Tty.attach(:controlling, _)` opens `/dev/tty`, which inside
+the BEAM resolves to the **BEAM process's actual controlling
+terminal**. On Nerves that is the HDMI / UART console set up by
+`erlinit` — not the SSH session. Erlang's SSH daemon (`:ssh.daemon`
+→ `ssh_cli`) is a pure Erlang/IO-protocol bridge; bytes come off
+the SSH transport, the iex shell process consumes them via the
+group leader, and outputs go back the same way. There is no
+`/dev/pts/N`, no `openpty()`, no kernel tty fd anywhere on the SSH
+side. The "is this user's terminal a Linux fd?" assumption that
+underpins `:controlling` simply does not hold there.
+
+The observable failure is silent: attach opens the HDMI console
+(succeeds — that fd exists), puts *it* in raw mode, runs a pump
+between *it* and the workload. The SSH iex blocks forever waiting
+on `__pump__`; a user at the physical Pi screen could type into
+the workload, but the SSH user sees nothing. Ctrl-C eventually
+unwinds the IEx shell evaluator (the `try/after` restores the HDMI
+console correctly), and `nerves_ssh` spawns a fresh shell. No
+crash, no error message — just "attach is broken over SSH."
+
+The same trap applies to `:remsh` (the GL is a remote shell's IO
+server, not a local tty), `iex --hidden`-style escripts wired up
+oddly, and any future deployment where the user's terminal is an
+Erlang-process abstraction rather than a kernel tty.
+
+#### Surface
+
+A sibling attach mode with the same return shape, different byte
+source/sink:
+
+```elixir
+@spec attach(:group_leader, session()) ::
+        {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+        | {:error, term()}
+def attach(:group_leader, session)
+```
+
+Selection is explicit — no auto-fallback between `:controlling`
+and `:group_leader`. The two modes have meaningfully different
+capabilities (raw-mode fidelity, SIGWINCH availability), and
+silent fallback would hide the difference from callers.
+
+#### Mechanism
+
+The group leader is an Erlang process that speaks the I/O protocol
+(`{io_request, From, ReplyAs, Request}` /
+`{io_reply, ReplyAs, Reply}`). The pump talks to whichever pid
+`Process.group_leader/0` returns; the I/O protocol is identical
+across drivers.
+
+The original sketch assumed the SSH-fronted GL was `ssh_cli`.
+**The 2026-05-27 probe (`docs/tty/probes/T6_ssh_probe.exs`,
+output captured on Nerves rpi5 / nerves_ssh) found otherwise**:
+
+  * `:proc_lib.translate_initial_call(gl)` → `{:group, :init, 1}`
+  * `current_function` → `{:gen_statem, :loop, 3}`
+  * GL `$ancestors` chain includes `:sshd_sup`, `:ssh_sup`
+
+So `nerves_ssh` layers Erlang's standard `user_drv` / `:group`
+line-editor on top of the SSH transport, *exactly like local iex
+does on top of `/dev/tty`*. The GL is `kernel`'s `:group`
+gen_statem — same module in both environments; only the byte
+source/sink underneath user_drv differs (SSH channel vs prim_tty).
+
+That collapses a lot of complexity: the pump talks to one stable
+abstraction (`:group`), not two driver-specific ones.
+
+**Input — a reader sub-process.** `:io.get_chars/3` is synchronous;
+the pump must interleave reads with `:pty_out` events from
+`Linx.Process`. A linked reader process owns the blocking call and
+relays results into the pump's mailbox:
+
+```elixir
+defp spawn_reader(gl, parent) do
+  spawn_link(fn ->
+    Process.group_leader(self(), gl)
+    read_loop(parent)
+  end)
+end
+
+defp read_loop(parent) do
+  case :io.get_chars(:standard_io, ~c"", 256) do
+    :eof          -> send(parent, {:linx_tty_gl, :eof})
+    {:error, why} -> send(parent, {:linx_tty_gl, {:error, why}})
+    bytes         -> send(parent, {:linx_tty_gl, :data, IO.iodata_to_binary(bytes)})
+                     read_loop(parent)
+  end
+end
+```
+
+**Output — `IO.binwrite`.** Fire-and-forget through the I/O
+protocol; no port involved. `IO.binwrite(gl, bytes)` for each
+chunk arriving on `{:linx_process, :pty_out, _}`.
+
+**Mode — `:io.setopts(gl, echo: false)`, end of story.** The
+`group.erl` source (kernel-10.6.3, line 244) routes input
+requests inside `:server` state based on two fields:
+
+```erlang
+%% group.erl, server/3:
+{next_state,
+ if Data#state.dumb orelse not Data#state.echo -> dumb; true -> xterm end,
+ ...}
+```
+
+`echo=false` (or `dumb=true`) routes to the `:dumb` state. In
+`:dumb`, `get_chars_dumb/5` (line 1152) delivers bytes
+immediately as they arrive from the driver — no line editor, no
+buffering at the `:group` layer. Probe #3 verified end-to-end on
+nerves_ssh: a single keystroke returns `<<"x">>` from
+`get_chars(_, '', 1)` with no Enter.
+
+`binary: true` is already the default on nerves_ssh (probe #1
+confirmed), so we only need to flip `echo`. Saving and restoring
+just that one field — *not* the full `:io.getopts/1` result —
+matters because `:io.setopts/2` short-circuits on options it
+considers `:enotsup` (e.g. `terminal: true|false`), so passing
+back the full opts list silently drops the echo restore.
+
+```elixir
+saved_echo = Keyword.get(:io.getopts(gl), :echo, true)
+
+try do
+  :io.setopts(gl, echo: false)
+  run_pump(...)
+after
+  :io.setopts(gl, echo: saved_echo)
+end
+```
+
+Side effects of `echo=false` worth noting:
+
+- `:group` stops echoing characters back through the driver
+  (line 1160 — the echo write is guarded by `Data#state.echo`).
+  That matches what we want anyway: the workload's PTY does its
+  own echo when bash/etc. configures `ECHO` on the slave side.
+- The local-edit features of `:xterm` state (history recall via
+  ↑/↓, line editing, tab completion) are bypassed for the
+  duration of attach. The remote terminal emulator and the
+  workload's readline (if any) take over. Expected.
+
+The richer `terminal_mode = raw` path in `:dumb` (line 258 —
+`collect_chars_eager`) is gated by `Data#state.shell = noshell`,
+which we can't satisfy without ripping out the iex shell. We
+don't need it: `collect_chars` in `:dumb` already gives us the
+behaviour we want.
+
+**Window size.** `:io.columns(gl)` and `:io.rows(gl)` return
+integers — the probe got `{:ok, 159}` / `{:ok, 56}`, matching
+the SSH client's terminal. The pump calls them at entry and
+forwards via `Linx.Process.pty_set_winsize/2` — same downstream
+wiring as `:controlling`, sourced from the I/O protocol instead
+of `TIOCGWINSZ`.
+
+Runtime resize: there is no SIGWINCH equivalent surfaced through
+`:io`. SSH `window-change` requests update the IO server's
+internal state without emitting a shell-visible event. T6 ships
+**polling** (re-read `:io.columns / :io.rows` every
+`@winsize_poll_ms`, default 250; forward only on change).
+The trade-off against an event-driven `:erlang.trace/3` hook on
+`ssh_cli` is documented in the inline comment on
+`@winsize_poll_ms` in `lib/linx/tty.ex` — TL;DR: polling at 250ms
+costs ~0.006 % of one core, gives sub-frame human latency, and
+avoids the debug-API dependency and tighter record-shape coupling
+that the trace hook would introduce.
+Hooked / event-driven resize lands in a deferred follow-up.
+
+#### The raw-mode story — clearer than the original sketch
+
+The original sketch worried that ssh_cli's PTY negotiation locked
+in line-discipline at session start and that bytes-perfect raw
+mode would require dropping below ssh_cli. The probe reframed
+this: the line discipline is in `:group`, *not* in the SSH layer.
+ssh_cli passes bytes through; `:group` cooks them. Flipping
+`:group` is therefore within reach via the I/O protocol (option
+1 above) or, failing that, via the same kind of OTP-internals
+manipulation T4 already does for `:prim_tty`.
+
+The user's local `ssh` client does still hold its own
+line-discipline (Ctrl-Z, flow control, the terminal emulator's
+own buffering of escape sequences) — but the same is true of the
+user's *local terminal emulator* in plain `iex -S mix`, and it
+hasn't been a problem there. The shipped experience should
+match: bash feels native, vim/top redraw correctly, edge cases
+exist for unusual key sequences and remain edge cases.
+
+#### Precondition guard on `attach(:controlling, _)`
+
+Regardless of when `:group_leader` lands, the silent-attach-to-HDMI
+trap should be closed *now*. T6.0 adds a guard:
+
+```elixir
+def attach(:controlling, session) do
+  case Linx.Tty.Env.classify_caller_terminal() do
+    :local_tty -> attach_via_controlling(session)
+    :ssh       -> {:error, :no_local_tty}
+    :remsh     -> {:error, :no_local_tty}
+    :unknown   -> attach_via_controlling(session)   # preserve current behaviour
+  end
+end
+```
+
+`Linx.Tty.Env.classify_caller_terminal/0` walks
+`Process.group_leader/0`. The probe identified the canonical
+signal:
+
+```elixir
+gl = Process.group_leader()
+
+{:dictionary, dict} = Process.info(gl, :dictionary)
+ancestors = Keyword.get(dict, :"$ancestors", [])
+
+cond do
+  :ssh_sup in ancestors or :sshd_sup in ancestors ->
+    :ssh
+  # :remsh and other variants land here once we have a probe
+  # confirming their ancestor signatures.
+  true ->
+    case :proc_lib.translate_initial_call(gl) do
+      {:group, :init, _} when whereis_user_drv_present? -> :local_tty
+      _ -> :unknown
+    end
+end
+```
+
+Cheap, stable, no record-layout coupling. `:ssh_sup` is the
+top-level supervisor of OTP's `ssh` app — anything that fronts
+an Erlang shell with the SSH daemon shows it. `:sshd_sup` is
+`nerves_ssh`'s wrapping supervisor; both appear in the ancestor
+list because nerves_ssh sits *above* the OTP ssh app.
+
+The `:unknown` arm preserves today's behaviour rather than
+rejecting on uncertainty, so callers that work today don't
+suddenly break. The error message names the alternative:
+
+```
+{:error, :no_local_tty}
+# Linx.Tty.format_error/1:
+# "Your iex appears to be over SSH or :remsh; /dev/tty here is the
+#  BEAM's actual controlling terminal (e.g. HDMI console on Nerves),
+#  not your remote session. Use Linx.Tty.attach(:group_leader, session)."
+```
+
+#### Module structure (incremental)
+
+```
+Linx.Tty       — adds attach(:group_leader, _), the reader and
+                 pump helpers (private), format_error/1.
+Linx.Tty.Env   — classify_caller_terminal/0 + small sniff
+                 helpers driven by $ancestors.
+```
+
+The reader and pump are two small private functions inside
+`Linx.Tty` — no separate module is warranted given the scale.
+No NIF changes. No new agent commands — the workload-side path
+(`pty_write`, `:pty_out`, `pty_set_winsize`) is unchanged.
+
+#### Sequencing — sub-milestones
+
+Each is an independently reviewable commit; commit + push per
+milestone per project convention.
+
+##### T6.0 — Precondition guard
+
+✅ **Shipped** (`d86a8d4`'s child commit on the same branch).
+
+- `Linx.Tty.Env.classify_caller_terminal/0` and `/1` — walk the
+  caller's GL `"$ancestors"` and return `:ssh | :local_tty |
+  :unknown`. Conservative on uncertainty: returns `:local_tty`
+  when no SSH signal is present, so callers that work today
+  don't suddenly start refusing.
+- `Linx.Tty.attach(:controlling, _)` now branches on the
+  classification and returns `{:error, :no_local_tty}` when the
+  GL has SSH supervisors in its ancestor chain. `:local_tty`
+  and `:unknown` both take the existing path.
+- `Linx.Tty.format_error/1` renders `:no_local_tty` as a
+  human-readable string naming the SSH alternative; falls back
+  to `inspect/1` for other shapes.
+- **Tests** (plain `mix test`, no root): `Linx.Tty.Env` against
+  fixture GLs with synthesized `"$ancestors"` (both SSH and
+  non-SSH); dead-pid edge case → `:unknown`; the guard refusal
+  itself; `format_error/1` covers the new atom and falls
+  through for unknown shapes.
+- The `:remsh` classification is still future work — held in
+  the `:unknown` bucket (where current behaviour is preserved)
+  until we have a probe that names the signal.
+
+##### T6.1 — `attach(:group_leader, session)`
+
+✅ **Shipped.**
+
+The whole milestone, concretely:
+
+```elixir
+def attach(:group_leader, session) when is_pid(session) do
+  gl = Process.group_leader()
+  saved_echo = Keyword.get(:io.getopts(gl), :echo, true)
+
+  try do
+    :io.setopts(gl, echo: false)
+
+    with {:ok, cols} <- :io.columns(gl),
+         {:ok, rows} <- :io.rows(gl) do
+      _ = Linx.Process.pty_set_winsize(session,
+            %WindowSize{rows: rows, cols: cols, xpixel: 0, ypixel: 0})
+    end
+
+    reader = spawn_link(__MODULE__, :__gl_reader__, [self(), gl])
+    __pump_gl__(reader, gl, session, _winsize_poll_ms = 1000)
+  after
+    :io.setopts(gl, echo: saved_echo)
+  end
+end
+
+def __gl_reader__(parent, gl) do
+  Process.group_leader(self(), gl)
+  gl_reader_loop(parent)
+end
+
+defp gl_reader_loop(parent) do
+  case :io.get_chars(:standard_io, ~c"", 1024) do
+    :eof          -> send(parent, {:linx_tty_gl, :eof})
+    {:error, why} -> send(parent, {:linx_tty_gl, {:error, why}})
+    bytes ->
+      send(parent, {:linx_tty_gl, :data, IO.iodata_to_binary(bytes)})
+      gl_reader_loop(parent)
+  end
+end
+
+def __pump_gl__(reader, gl, session, poll_ms) do
+  receive do
+    {:linx_tty_gl, :data, bytes} ->
+      _ = Linx.Process.pty_write(session, bytes)
+      __pump_gl__(reader, gl, session, poll_ms)
+
+    {:linx_process, :pty_out, bytes} ->
+      IO.binwrite(gl, bytes)
+      __pump_gl__(reader, gl, session, poll_ms)
+
+    {:linx_tty_gl, :eof} ->
+      {:error, :gl_eof}
+
+    {:linx_process, :exited, code}     -> {:ok, {:exited, code}}
+    {:linx_process, :signaled, signum} -> {:ok, {:signaled, signum}}
+    {:linx_process, :error, errno, stage} ->
+      {:error, %{errno: errno, stage: stage}}
+  after
+    poll_ms ->
+      maybe_forward_winsize(gl, session)
+      __pump_gl__(reader, gl, session, poll_ms)
+  end
+end
+```
+
+Plus a `maybe_forward_winsize/2` that re-reads `:io.columns / :io.rows`
+and forwards only on change (memoised per-pump).
+
+- **Tests:** plain `mix test` against a fake group leader (a
+  process that consumes `{io_request, …}` and emits `{io_reply,
+  …}`, just like the existing socketpair stand-in for the
+  `:controlling` path). Verify byte round-trip, eof propagation,
+  winsize forwarding on poll. Plus a regression test that the
+  `after` block restores `echo` even if the pump body raises.
+- **Manual acceptance** (in `EXAMPLES.md` under T6.2): SSH into a
+  Nerves device, spawn bash with `stdio: :pty`, attach via
+  `:group_leader`, type characters, run `vim`, drag the SSH
+  client's terminal corner, observe a clean redraw within ~1s.
+
+##### T6.1.1 — `:prim_tty` raw-output bracket
+
+✅ **Shipped** (`8d0823f`'s child commit).
+
+The first deployed T6.1 worked for typing and command execution
+but mangled the *visual* output of in-line editing: backspace
+showed `^(` instead of erasing, vim's TUI sequences came out
+garbled. Root cause: `ssh_cli` initialises `:prim_tty` with
+`output := :cooked` (see `lib/ssh-5.5.2/src/ssh_cli.erl:72`), and
+`:prim_tty`'s cooked-mode line-editor renders non-printable bytes
+in caret notation (`lib/kernel-10.6.3/src/prim_tty.erl:1395-1399`
+— `\b` → `^(`, `\x7F` → `^?`, etc.). Useful for iex's own line
+editor; exactly wrong for a pass-through attach.
+
+T6.1.1 brackets the pump with a `:prim_tty` output-mode flip:
+
+- On entry, walk `Process.group_leader/0`'s state for the driver
+  pid (the `ssh_cli` channel handler over SSH; `user_drv` locally
+  if the user reaches for `:group_leader` there too). Run
+  `:sys.replace_state/2` on it with a function that **recursively**
+  scans the driver's state record for any tuple element that
+  responds to `:prim_tty.output_mode/1` (the SSH driver is an
+  `ssh_client_channel` gen_server whose state record wraps
+  `ssh_cli`'s `#state{}` as a field, so the `prim_tty` we want
+  lives two levels deep at path `[3, 9]`; local `user_drv` has
+  it at path `[1]`). Once found, mutate the `:prim_tty` state's
+  `options` map in place to set `output: :raw`, rebuild the
+  outer state along the same path, and shout the previous mode
+  back to the caller via a one-shot ref.
+- On exit (inside the existing inner `try/after`, before the echo
+  restore), replay the same swap with the saved mode.
+
+**Why direct `options`-map mutation, not `:prim_tty.reinit/2`?**
+`reinit/2` ends up calling the `tty_init/2` NIF, which requires
+a real terminal fd. SSH-fronted `prim_tty` states have
+`tty = undefined` (set up via `prim_tty:init_ssh/3`, not the
+`:init/1` path) and the NIF rejects that with `:function_clause`.
+The output-mode dispatch at `prim_tty.erl:677` is
+`handle_request(State = #state{ options = #{ output := raw } }, ...)`,
+so just updating `options.output` is sufficient — no re-init, no
+NIF call. The options map is identified by scanning for an
+element that's a map with both `:input` and `:output` keys
+(distinctive without hard-coding the field index).
+
+Scanning rather than hard-coding the field index makes the
+mechanism resilient to ssh_cli / user_drv / `prim_tty`
+record-layout reshuffles across OTP versions. Every step is
+wrapped in safe helpers; if anything goes wrong (non-`:sys`-
+capable driver, no `:prim_tty` field found, no options map),
+we fall through to `nil` and the attach proceeds with today's
+caret-rendered output — visibly broken, never crashy. A short
+200ms timeout on the introspecting `:sys.get_state /
+:sys.replace_state` keeps the fall-through cheap when the
+driver isn't a `:sys`-capable process (test fakes, escripts).
+
+Same kind of OTP-internals coupling T4 already accepts for
+`:prim_tty.disable_reader/1`. The benefit (usable interactive
+backspace + vim) is high; the failure mode (cosmetic cooked
+rendering) is exactly the pre-T6.1.1 behaviour.
+
+**Tests:** existing 35-test tty suite stays green; the
+echo-restoration test exercises the fall-through path (the
+fake_gl isn't `:sys`-capable, helpers return `nil`,
+restore is a no-op, no test slowdown beyond the 200ms
+timeout).
+
+**Manual acceptance:** the user's SSH-iex bash session now
+handles backspace as expected. Vim and other TUIs should also
+render cleanly; covered by T6.2.
+
+##### T6.1.2 — Ctrl-C forwarding
+
+✅ **Shipped** alongside T6.1.1's final fix.
+
+The first T6.1.1 deploy worked for editing but broke `Ctrl-C`:
+the user pressed `^C` during a `sleep 30` and attach exited
+with `{:error, {:gl_reader, :interrupted}}` instead of just
+interrupting `sleep`.
+
+Root cause: `ssh_cli` (`ssh_cli.erl:408`) intercepts byte `\x03`
+from the SSH stream and turns it into `exit(group, interrupt)`
+instead of passing the byte through. `group.erl:507-514` then
+translates that into either `{:error, :interrupted}` on the
+pending input request (the reader's `:io.get_chars`) or
+`exit(shell, interrupt)` to the calling iex shell process
+(when no input request is pending — a tiny race window
+between reader round-trips).
+
+Fix: both paths convert back to a literal `\x03` byte and forward
+to the workload's PTY. The workload's line discipline then turns
+0x03 into SIGINT for the foreground process group, which is what
+users expect from Ctrl-C at a shell prompt.
+
+- Reader's `:io.get_chars` returning `{:error, :interrupted}` →
+  the reader sends `{:linx_tty_gl, :data, <<3>>}` to the pump
+  and loops, instead of forwarding the error.
+- Pump receives `{:EXIT, ^gl, :interrupt}` → writes `<<3>>` via
+  `Linx.Process.pty_write` and continues the pump loop.
+
+Both translations covered by `mix test` (37/37 tty): the pump
+test injects the EXIT message and observes the workload (cat)
+dies from SIGINT (`{:signaled, 2}`) before a backup SIGTERM
+fires; the reader test runs against a scripted GL that replies
+`:interrupted` then `:eof` and asserts a `<<3>>` data event
+arrives in the parent's mailbox.
+
+##### T6.2 — Manual acceptance + docs
+
+✅ **Shipped.**
+
+- `docs/tty/EXAMPLES.md`'s "Attaching to a workload's PTY"
+  subtree was rewritten end-to-end against the observed
+  behaviour: two-mode intro, `:controlling` walkthrough with
+  the coexists-with-iex / refuses-over-SSH notes, full
+  `:group_leader` walkthrough including a captured session
+  block, the transient side-effects list (echo flip, prim_tty
+  raw-output bracket, trap_exit), the `Ctrl-C` handling
+  explanation in both of its arrival shapes, polled resize,
+  and a "when to pick which mode" table.
+- The `^C → exit 130` quirk worth knowing about is documented
+  inline: that's `128 + SIGINT(2)`, reported by `sh` from the
+  last command's status, not an attach failure.
+- All examples are paste-friendly (no `iex>` / `...>` prefixes)
+  and use `/bin/sh` — matches the Nerves rpi5 deployment target.
+
+#### Open questions — resolved by the 2026-05-27 probe series
+
+Recorded for posterity; all three are answered.
+
+1. **Does the SSH path line-buffer?** **Yes by default, fixable
+   trivially.** Probe #1 confirmed `:io.get_chars(_, '', 1)`
+   waits for Enter. Probe #3 confirmed it returns immediately
+   after `:io.setopts(gl, echo: false)`. `:group` routes through
+   its `:xterm` line editor when echo is on and through `:dumb`
+   when echo is off; `:dumb`'s `get_chars_dumb/5` is
+   byte-oriented.
+2. **Is there a stable SSH-detection signal?** **Yes**: the GL's
+   `"$ancestors"` list contains `:ssh_sup` (OTP `ssh` app top
+   supervisor) and `:sshd_sup` (nerves_ssh's wrapper). Cleanest
+   possible signal — no record-layout coupling, no `:proc_lib`
+   shape guessing.
+3. **`:remsh` and other GL variants?** Still unknown — a probe
+   from a `:remsh` session is the next data point. Not a
+   blocker for T6.0/T6.1.
+
+Read `docs/tty/probes/T6_*.exs` for the probe scripts and
+captured terminal output. The `group.erl` cross-reference is
+under "References" — `kernel-10.6.3/src/group.erl`.
+
+#### Deferred — architected-for, not built in T6
+
+- **`:remsh` and other GL classifications.** Once we have a probe
+  from a `:remsh` session, fold its `$ancestors` signature into
+  `classify_caller_terminal/0`. Until then it falls in
+  `:unknown` and the existing `:controlling` path runs — which
+  is wrong over `:remsh` too, but at least it doesn't pretend to
+  be the SSH solution.
+- **Event-driven resize over SSH.** Replace polling with a hook
+  into the user_drv-equivalent's window-change handler so
+  resizes propagate within milliseconds, not seconds. T6.1 ships
+  with the 1s poll; this would mostly matter for users who
+  resize while inside `vim`.
+- **A first-class SSH-subsystem attach.** Skip the shell-channel
+  layer entirely: expose `Linx.Tty.SshSubsystem` (an
+  `ssh_server_channel`) that a consumer wires into their
+  `:ssh.daemon` config. Cleanest architecturally, but pushes
+  setup into every consumer; deferred until someone needs it.
+
+The earlier T7 "go below ssh_cli for true-raw mode" item is
+**dropped**: the probe series showed line-discipline lived in
+`:group`, not ssh_cli, and `:io.setopts(echo: false)` already
+gives byte-oriented input. There is no obvious additional
+fidelity to chase.
+
+#### Why not auto-fallback?
+
+`attach(:controlling, _)` could in principle observe
+`{:error, :no_local_tty}` and re-dispatch to `:group_leader`. T6
+deliberately doesn't, because the two modes have meaningfully
+different capabilities (raw-mode fidelity, SIGWINCH availability,
+exit semantics on disconnect). Silent fallback hides those
+differences from the caller. Explicit selection — with a
+descriptive error pointing at the alternative — keeps the
+trade-off visible.
 
 ## Testing
 
