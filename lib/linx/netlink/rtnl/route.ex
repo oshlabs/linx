@@ -216,7 +216,14 @@ defmodule Linx.Netlink.Rtnl.Route do
     end
   end
 
-  @doc "Deletes the route to `destination`/`prefix` via `gateway`."
+  @doc """
+  Deletes the route to `destination`/`prefix` via `gateway`.
+
+  On delete the kernel filters by an option only when it is set, so by default
+  `:protocol` is left unspecified (`RTPROT_UNSPEC`) — the route is matched
+  regardless of which protocol installed it. Pass `:protocol` (and `:table` /
+  `:metric`) to narrow the match when several routes share a destination.
+  """
   @spec delete(Socket.t(), binary | IP.t(), non_neg_integer, binary | IP.t(), opts) ::
           :ok | {:error, term}
   def delete(%Socket{} = socket, destination, prefix, gateway, opts \\ [])
@@ -229,7 +236,8 @@ defmodule Linx.Netlink.Rtnl.Route do
       @rtm_delroute,
       @rt_scope_nowhere,
       nlm_f_ack(),
-      opts
+      # RTPROT_UNSPEC (0) means "match any protocol" for RTM_DELROUTE.
+      Keyword.put_new(opts, :protocol, 0)
     )
   end
 
