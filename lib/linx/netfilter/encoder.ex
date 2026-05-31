@@ -1109,19 +1109,6 @@ defmodule Linx.Netfilter.Encoder do
     end)
   end
 
-  defp encode_log_flags(flags) do
-    import Bitwise
-
-    Enum.reduce(flags, 0, fn
-      :tcp_seq, acc -> acc ||| 0x01
-      :tcp_opt, acc -> acc ||| 0x02
-      :ip_opt, acc -> acc ||| 0x04
-      :uid, acc -> acc ||| 0x08
-      :macdecode, acc -> acc ||| 0x20
-      _, acc -> acc
-    end)
-  end
-
   defp encode_expr_data(:redir, %{
          flags: flags,
          reg_proto_min: reg_proto_min,
@@ -1144,6 +1131,19 @@ defmodule Linx.Netfilter.Encoder do
 
   # Unknown expression — emit empty data; kernel will reject.
   defp encode_expr_data(_name, _data), do: []
+
+  defp encode_log_flags(flags) do
+    import Bitwise
+
+    Enum.reduce(flags, 0, fn
+      :tcp_seq, acc -> acc ||| 0x01
+      :tcp_opt, acc -> acc ||| 0x02
+      :ip_opt, acc -> acc ||| 0x04
+      :uid, acc -> acc ||| 0x08
+      :macdecode, acc -> acc ||| 0x20
+      _, acc -> acc
+    end)
+  end
 
   defp maybe_append(list, true, item), do: list ++ [item]
   defp maybe_append(list, false, _item), do: list

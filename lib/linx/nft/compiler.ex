@@ -540,6 +540,37 @@ defmodule Linx.NFT.Compiler do
     ct_state_match(op, bits)
   end
 
+  defp compile_rhs({:identifier, name, _meta}, op, :ifname, _state) do
+    Expr.cmp(op, pad_ifname(name))
+  end
+
+  defp compile_rhs({:identifier, name, meta}, op, {:int, width}, state) do
+    case parse_int_keyword(name) do
+      {:ok, n} ->
+        Expr.cmp(op, encode_int(n, width))
+
+      :error ->
+        raise_at!(
+          state,
+          meta,
+          "compiler: don't know how to interpret identifier `#{name}` as integer"
+        )
+    end
+  end
+
+  defp compile_rhs({:list, elems, meta}, op, kind, state) do
+    # Comma-separated list outside `{}` braces — treat as anon set.
+    compile_rhs({:set_inline, elems, meta}, op, kind, state)
+  end
+
+  defp compile_rhs(node, _op, kind, state) do
+    raise_at!(
+      state,
+      value_meta(node),
+      "compiler: cannot use value #{inspect(node)} with field kind #{inspect(kind)}"
+    )
+  end
+
   defp ct_state_bits_from_elems!(elems, state, fallback_meta) do
     Enum.reduce(elems, 0, fn elem, acc ->
       case elem do
@@ -578,37 +609,6 @@ defmodule Linx.NFT.Compiler do
       Expr.bitwise(<<bits::big-32>>, <<0::big-32>>),
       Expr.cmp(:eq, <<0::big-32>>)
     ]
-  end
-
-  defp compile_rhs({:identifier, name, _meta}, op, :ifname, _state) do
-    Expr.cmp(op, pad_ifname(name))
-  end
-
-  defp compile_rhs({:identifier, name, meta}, op, {:int, width}, state) do
-    case parse_int_keyword(name) do
-      {:ok, n} ->
-        Expr.cmp(op, encode_int(n, width))
-
-      :error ->
-        raise_at!(
-          state,
-          meta,
-          "compiler: don't know how to interpret identifier `#{name}` as integer"
-        )
-    end
-  end
-
-  defp compile_rhs({:list, elems, meta}, op, kind, state) do
-    # Comma-separated list outside `{}` braces — treat as anon set.
-    compile_rhs({:set_inline, elems, meta}, op, kind, state)
-  end
-
-  defp compile_rhs(node, _op, kind, state) do
-    raise_at!(
-      state,
-      value_meta(node),
-      "compiler: cannot use value #{inspect(node)} with field kind #{inspect(kind)}"
-    )
   end
 
   # ---- Set / value-kind helpers ----

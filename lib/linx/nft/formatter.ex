@@ -382,10 +382,6 @@ defmodule Linx.NFT.Formatter do
     do_format_exprs(rest, [stmt("ct #{key}", render_op(op), Integer.to_string(rhs)) | acc])
   end
 
-  defp invert_ct_cmp_op(:neq, 0), do: :eq
-  defp invert_ct_cmp_op(:eq, 0), do: :neq
-  defp invert_ct_cmp_op(other, _), do: other
-
   # ---- verdicts ----
   defp do_format_exprs([%Expr{name: :immediate, data: %Verdict{} = v} | rest], acc) do
     do_format_exprs(rest, [format_verdict(v) | acc])
@@ -477,6 +473,10 @@ defmodule Linx.NFT.Formatter do
   defp do_format_exprs([expr | rest], acc) do
     do_format_exprs(rest, ["# <unsupported expression: #{inspect(expr.name)}>" | acc])
   end
+
+  defp invert_ct_cmp_op(:neq, 0), do: :eq
+  defp invert_ct_cmp_op(:eq, 0), do: :neq
+  defp invert_ct_cmp_op(other, _), do: other
 
   defp format_nat(%{type: type}, addr_bytes, port) do
     addr_text =
