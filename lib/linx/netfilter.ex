@@ -111,7 +111,7 @@ defmodule Linx.Netfilter do
   the only coupling, exactly the way `Linx.Sysctl` / `Linx.Mount` /
   every other subsystem composes.
 
-  See `docs/netfilter/DESIGN.md` for design work deferred past 0.1.0.
+  See `docs/netfilter/DESIGN.md` for design work intentionally deferred.
 
   ## References
 

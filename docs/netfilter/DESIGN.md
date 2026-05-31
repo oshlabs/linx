@@ -1,10 +1,10 @@
-# Linx.Netfilter — post-0.1.0 design notes
+# Linx.Netfilter — design notes
 
 Forward-looking design for `Linx.Netfilter` and the `~NFT` sigil. Unlike
-the per-subsystem `PLAN.md`/`COVERAGE.md` files (retired in the 0.1.0
-docs consolidation), this doc is **kept** — it captures decisions and
-open questions for work intentionally deferred past 0.1.0. Nothing here
-ships in 0.1.0.
+the per-subsystem `PLAN.md`/`COVERAGE.md` files (retired in the docs
+consolidation), this doc is **kept** — it captures decisions and open
+questions for work intentionally deferred. Nothing here is implemented
+yet.
 
 ## 1. Round-trippable `Inspect` → `~NFT` source
 
@@ -25,14 +25,14 @@ table inet myfw {
 **The catch.** The formatter renders any construct outside the supported grammar
 subset as a `# <unsupported expression: …>` comment, which does **not**
 round-trip. So `Inspect`-as-`~NFT` needs a fallback: if a ruleset uses
-features the formatter can't faithfully emit, fall back to the 0.1.0
+features the formatter can't faithfully emit, fall back to the
 summary form (`#Linx.Netfilter.Ruleset<2 tables, 8 chains, 240 rules>`)
 rather than emit a sigil that won't parse back. Decision needed: detect
 unsupported constructs up front, or attempt the format and downgrade on
 any `# <unsupported>` marker.
 
-This supersedes the minimal summary `Inspect` that shipped in 0.1.0
-(D3) — that stays as the fallback.
+This supersedes the minimal summary `Inspect` (D3) — that stays as the
+fallback.
 
 ## 2. `~NFT.Chain` / `~NFT.Rule` sub-sigils
 
@@ -76,8 +76,8 @@ alongside any other 0.2 API renames so it lands as one breaking change.
 
 ## 5. Feature breadth (formerly the separate TODO list)
 
-Tier-1 constructs deferred past 0.1.0 (also tracked in the 0.1.0 release
-plan's Deferred section): `limit rate`, `meta FIELD set` / `ct … set`,
+Tier-1 constructs intentionally deferred: `limit rate`,
+`meta FIELD set` / `ct … set`,
 named objects, flowtables, concatenated set/map keys, NPTv6, `include`
 substitution, the `nftables.conf` codec, and a `mix format` plugin for
 `~NFT` blocks. These are grammar/codec breadth, not architecture — they

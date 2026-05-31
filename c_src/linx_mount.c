@@ -50,8 +50,7 @@
 #include <sys/syscall.h> /* SYS_pivot_root (no glibc wrapper) */
 #include <unistd.h>
 
-/* Bumped per shipping milestone. */
-#define LINX_MOUNT_VERSION "linx_mount 0.1.0 (M4)"
+#define LINX_MOUNT_VERSION "linx_mount"
 
 /* --- errno -> atom ------------------------------------------------------- */
 

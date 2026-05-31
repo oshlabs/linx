@@ -51,7 +51,7 @@ defmodule Linx.Sysctl.Native do
   @type error :: {:error, {stage(), atom() | pos_integer()}}
 
   @doc """
-  Returns the NIF version string.
+  Returns the NIF identifier string.
   """
   @spec version() :: charlist()
   def version, do: :erlang.nif_error(:nif_not_loaded)

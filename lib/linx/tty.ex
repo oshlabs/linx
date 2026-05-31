@@ -148,7 +148,7 @@ defmodule Linx.Tty do
   def __error_stages__, do: @error_stages
 
   @doc """
-  Returns the linx_tty NIF version string — sanity that the native
+  Returns the linx_tty NIF identifier string — sanity that the native
   library loaded and its ABI is reachable.
   """
   @spec version() :: binary()

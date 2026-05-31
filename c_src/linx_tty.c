@@ -41,8 +41,7 @@
 #include <termios.h>
 #include <unistd.h>
 
-/* Bumped per shipping milestone. */
-#define LINX_TTY_VERSION "linx_tty 0.1.0 (T3)"
+#define LINX_TTY_VERSION "linx_tty"
 
 /* --- errno -> atom ------------------------------------------------------- */
 

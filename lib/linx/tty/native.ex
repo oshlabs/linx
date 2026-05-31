@@ -17,7 +17,7 @@ defmodule Linx.Tty.Native do
   end
 
   @doc """
-  Returns the NIF version string. Cheap round-trip used by tests to
+  Returns the NIF identifier string. Cheap round-trip used by tests to
   confirm the native library actually loaded.
   """
   @spec version() :: binary()

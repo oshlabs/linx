@@ -118,12 +118,10 @@ defmodule Linx.TtyTest do
   end
 
   describe "NIF scaffolding" do
-    test "version/0 reflects the running milestone" do
+    test "version/0 returns the NIF identifier" do
       v = Tty.version()
       assert is_binary(v)
-      assert String.starts_with?(v, "linx_tty ")
-      # T3 marker -- bumped per milestone in c_src/linx_tty.c.
-      assert String.ends_with?(v, "(T3)")
+      assert v == "linx_tty"
     end
   end
 

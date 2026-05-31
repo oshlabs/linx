@@ -42,7 +42,7 @@ defmodule Linx.Mount.Native do
   end
 
   @doc """
-  Returns the NIF version string.
+  Returns the NIF identifier string.
   """
   @spec version() :: charlist()
   def version, do: :erlang.nif_error(:nif_not_loaded)

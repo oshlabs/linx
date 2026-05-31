@@ -700,11 +700,9 @@ defmodule Linx.MountTest do
   end
 
   describe "Linx.Mount.Native" do
-    test "version/0 reflects the running milestone" do
+    test "version/0 returns the NIF identifier" do
       v = Mount.Native.version() |> List.to_string()
-      assert String.starts_with?(v, "linx_mount ")
-      # M4 marker; bumped when the NIF changes shape.
-      assert String.ends_with?(v, "(M4)")
+      assert v == "linx_mount"
     end
   end
 

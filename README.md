@@ -8,7 +8,7 @@ A library of low-level Linux primitives — netlink sockets, process and namespa
 
 Linx is a library of **primitives**, not a runtime. A container engine, a network orchestrator, or an observability tool is a *consumer* of Linx; the runtime concepts (images, supervision policies, request routing) live in those projects.
 
-> ⚠️ **Early days.** Linx is still pre-1.0 — APIs are settling and breaking changes are likely.
+> ⚠️ **Early days.** Linx is still settling — APIs are evolving and breaking changes are likely.
 
 ## Installation
 

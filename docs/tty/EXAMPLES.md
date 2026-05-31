@@ -7,15 +7,14 @@ a real terminal (the BEAM's controlling tty). `mix test` covers the
 error paths; the success paths live here because they mutate your
 actual terminal state and are best demonstrated interactively.
 
-## Versions
+## NIF identifier
 
 ```elixir
 Linx.Tty.version()
 ```
 
-Returns a string like `"linx_tty 0.1.0 (T1)"`. The trailing `(Tn)`
-identifies the built NIF — sanity that the NIF you're talking
-to is the one you built.
+Returns `"linx_tty"` — a cheap round-trip that confirms the native
+library you built is the one actually loaded.
 
 ## Reading the terminal's window size
 
