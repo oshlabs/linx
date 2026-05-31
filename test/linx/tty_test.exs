@@ -130,24 +130,28 @@ defmodule Linx.TtyTest do
   describe "window_size/1 (TIOCGWINSZ)" do
     test "returns ENOTTY on a non-tty fd" do
       # fd 0 in `mix test` is the BEAM's stdin, generally not a tty.
-      assert {:error, {:ioctl, :enotty}} = Tty.window_size(0)
+      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :enotty}} = Tty.window_size(0)
     end
 
     test "returns EBADF on a closed/invalid fd" do
       # fd 99999 is far past anything ExUnit holds open.
-      assert {:error, {:ioctl, :ebadf}} = Tty.window_size(99_999)
+      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :ebadf}} = Tty.window_size(99_999)
     end
   end
 
   describe "set_window_size/2 (TIOCSWINSZ)" do
     test "returns ENOTTY on a non-tty fd" do
       ws = %Linx.Tty.WindowSize{rows: 24, cols: 80, xpixel: 0, ypixel: 0}
-      assert {:error, {:ioctl, :enotty}} = Tty.set_window_size(0, ws)
+
+      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :enotty}} =
+               Tty.set_window_size(0, ws)
     end
 
     test "rejects window dimensions that wouldn't fit in struct winsize" do
       ws = %Linx.Tty.WindowSize{rows: 24, cols: 80, xpixel: 0, ypixel: 70_000}
-      assert {:error, {:ioctl, :einval}} = Tty.set_window_size(0, ws)
+
+      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :einval}} =
+               Tty.set_window_size(0, ws)
     end
   end
 
@@ -171,9 +175,9 @@ defmodule Linx.TtyTest do
           # And it's idempotent against the already-closed fd.
           assert :ok =
                    Tty.restore_and_close(fd, saved) or
-                     match?({:error, {_, _}}, Tty.restore_and_close(fd, saved))
+                     match?({:error, %Linx.Tty.Error{}}, Tty.restore_and_close(fd, saved))
 
-        {:error, {:open, :enxio}} ->
+        {:error, %Linx.Tty.Error{operation: :open, errno: :enxio}} ->
           :ok
 
         other ->
@@ -189,7 +193,7 @@ defmodule Linx.TtyTest do
           assert inspect(saved) == "#Linx.Tty.Saved<…>"
           assert :ok = Tty.restore_and_close(fd, saved)
 
-        {:error, {:open, :enxio}} ->
+        {:error, %Linx.Tty.Error{operation: :open, errno: :enxio}} ->
           :ok
       end
     end
@@ -287,7 +291,7 @@ defmodule Linx.TtyTest do
       assert {:ok, {:exited, 0}} = Linx.Tty.__pump__(attach_port, session)
     end
 
-    test "propagates pre-exec errors as {:error, %{errno, stage}}" do
+    test "propagates pre-exec errors as {:error, %Linx.Process.Error{}}" do
       # execve fails on a missing binary; the session emits
       # {:linx_process, :error, _, :execve}. The pump translates that
       # into the public error shape.
@@ -298,7 +302,7 @@ defmodule Linx.TtyTest do
       {:ok, {_user_fd, attach_fd}} = Linx.Tty.Native.socketpair()
       attach_port = :erlang.open_port({:fd, attach_fd, attach_fd}, [:binary, :stream])
 
-      assert {:error, %{errno: 2, stage: :execve}} =
+      assert {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}} =
                Linx.Tty.__pump__(attach_port, session)
     end
   end
@@ -398,7 +402,7 @@ defmodule Linx.TtyTest do
       gl = fake_gl(self())
       reader = spawn_link(fn -> Process.sleep(:infinity) end)
 
-      assert {:error, %{errno: 2, stage: :execve}} =
+      assert {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}} =
                Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil)
     end
 

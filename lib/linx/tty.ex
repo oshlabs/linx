@@ -35,8 +35,8 @@ defmodule Linx.Tty do
 
   When the BEAM has no controlling terminal at all (redirected stdio,
   some CI environments), opening `/dev/tty` fails cleanly with
-  `{:error, {:open, :enxio}}` — a typed error a caller can pattern-match
-  on, not a crash.
+  `{:error, %Linx.Tty.Error{operation: :open, errno: :enxio}}` — a typed
+  error a caller can pattern-match on, not a crash.
 
   ## `/dev/tty` is the BEAM's terminal, not necessarily yours
 
@@ -172,10 +172,11 @@ defmodule Linx.Tty do
 
   Returns `{:ok, fd, saved}` on success — `fd` for wrapping with
   `:erlang.open_port({:fd, fd, fd}, [...])`, `saved` for
-  `restore_and_close/2`. `{:error, {stage, errno}}` covers the failure
-  paths (`stage` is one of `:open`, `:tcgetattr`, `:tcsetattr`); the
-  most common case — BEAM without a controlling terminal — surfaces
-  as `{:error, {:open, :enxio}}`.
+  `restore_and_close/2`. `{:error, %Linx.Tty.Error{}}` covers the
+  failure paths (`operation` is one of `:open`, `:tcgetattr`,
+  `:tcsetattr`); the most common case — BEAM without a controlling
+  terminal — surfaces as
+  `{:error, %Linx.Tty.Error{operation: :open, errno: :enxio}}`.
 
   Pair every successful call with `restore_and_close/2` (idiomatically
   in a `try/after`) so the user's terminal can never be left stuck in
@@ -185,7 +186,7 @@ defmodule Linx.Tty do
   def open_controlling_raw do
     case Native.open_controlling_raw() do
       {:ok, fd, saved_bin} -> {:ok, fd, %Saved{termios: saved_bin}}
-      {:error, _} = err -> err
+      {:error, _} = err -> wrap_tty_error(err)
     end
   end
 
@@ -198,7 +199,7 @@ defmodule Linx.Tty do
   """
   @spec restore_and_close(fd(), Saved.t()) :: :ok | {:error, term()}
   def restore_and_close(fd, %Saved{termios: saved_bin}) when is_integer(fd) do
-    Native.restore_and_close(fd, saved_bin)
+    wrap_tty_error(Native.restore_and_close(fd, saved_bin))
   end
 
   @doc """
@@ -212,7 +213,7 @@ defmodule Linx.Tty do
         {:ok, %WindowSize{rows: rows, cols: cols, xpixel: xp, ypixel: yp}}
 
       {:error, _} = err ->
-        err
+        wrap_tty_error(err)
     end
   end
 
@@ -228,8 +229,15 @@ defmodule Linx.Tty do
   @spec set_window_size(fd(), WindowSize.t()) :: :ok | {:error, term()}
   def set_window_size(fd, %WindowSize{rows: r, cols: c, xpixel: xp, ypixel: yp})
       when is_integer(fd) do
-    Native.set_window_size(fd, {r, c, xp, yp})
+    wrap_tty_error(Native.set_window_size(fd, {r, c, xp, yp}))
   end
+
+  # Wrap the linx_tty NIF's {:error, {stage, errno}} pairs in a
+  # %Linx.Tty.Error{}; pass :ok / {:ok, _} through untouched.
+  defp wrap_tty_error({:error, {stage, errno}}),
+    do: {:error, Linx.Tty.Error.from_nif(stage, errno)}
+
+  defp wrap_tty_error(other), do: other
 
   @doc """
   Hands the caller's terminal over to `session`'s PTY master and
@@ -632,7 +640,7 @@ defmodule Linx.Tty do
         {:ok, {:signaled, signum}}
 
       {:linx_process, :error, errno, stage} ->
-        {:error, %{errno: errno, stage: stage}}
+        {:error, Linx.Process.Error.from_agent(errno, stage)}
     after
       poll_ms ->
         new_ws = maybe_forward_winsize(gl, session, last_ws)
@@ -993,7 +1001,7 @@ defmodule Linx.Tty do
         {:ok, {:signaled, signum}}
 
       {:linx_process, :error, errno, stage} ->
-        {:error, %{errno: errno, stage: stage}}
+        {:error, Linx.Process.Error.from_agent(errno, stage)}
     end
   end
 end

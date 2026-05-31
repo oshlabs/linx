@@ -168,6 +168,7 @@ defmodule Linx.MixProject do
         ],
         Tty: [
           Linx.Tty,
+          Linx.Tty.Error,
           Linx.Tty.Saved,
           Linx.Tty.WindowSize,
           Linx.Tty.Native
