@@ -569,6 +569,15 @@ C ASan/UBSan, error-path coverage).
     wedged helper functions out from between clause groups (behavior-
     preserving; suite green). This gate is ready for CI.
   - `--check-formatted` already passes (done in Phase 2).
+  - ✅ **CI workflow added** (`.github/workflows/ci.yml`). Triggers:
+    `pull_request` + `push` to main (feature-branch pushes don't fire
+    until a PR opens). Matrix: elixir/otp `1.15/26` (floor), `1.17/27`
+    (mid), `1.19/28` (dev pin). Each cell runs `mix deps.get`, compile
+    `--warnings-as-errors`, and `mix test --warnings-as-errors`; the
+    format check runs only on the latest cell (version-sensitive output).
+    README has the CI badge (renders once the repo goes public). The 147
+    `:integration` tests (excluded by default in `test_helper.exs`) are a
+    **planned follow-up privileged job** — runner-kernel support TBD.
   - `mix docs` emits a handful of benign auto-link warnings — ExDoc
     trying to resolve backtick code spans as references: hidden modules
     (`Linx.Seccomp.Constants`/`Syscalls`), a not-yet-existent

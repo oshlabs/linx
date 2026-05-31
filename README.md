@@ -1,5 +1,7 @@
 # Linx
 
+[![CI](https://github.com/oshlabs/linx/actions/workflows/ci.yml/badge.svg)](https://github.com/oshlabs/linx/actions/workflows/ci.yml)
+
 **Linux kernel interfaces for Elixir.**
 
 A library of low-level Linux primitives — netlink sockets, process and namespace lifecycle, terminal/PTY control, cgroup v2 resource limits, filesystem mounts, user-namespace identity mappings, per-process capability sets, per-thread seccomp filters, kernel-tunable parameters, modern firewalling via nf_tables — exposed as idiomatic Elixir. The aim is to make these feel as natural to drive from the BEAM as anything in the standard library.
