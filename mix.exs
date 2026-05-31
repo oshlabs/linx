@@ -88,6 +88,7 @@ defmodule Linx.MixProject do
         "docs/netfilter/EXAMPLES.md",
         "docs/netfilter/DESIGN.md",
         "docs/netfilter/REFERENCES.md",
+        "docs/reconcile/EXAMPLES.md",
         {:LICENSE, [title: "License"]}
       ],
       source_ref: "v#{@version}",
@@ -109,6 +110,7 @@ defmodule Linx.MixProject do
           "docs/netfilter/DESIGN.md",
           "docs/netfilter/REFERENCES.md"
         ],
+        Reconcile: ["docs/reconcile/EXAMPLES.md"],
         "Repo-wide": ["AGENTS.md"]
       ],
       groups_for_modules: [

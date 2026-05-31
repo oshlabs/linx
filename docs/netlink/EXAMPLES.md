@@ -216,6 +216,30 @@ IPv6 works through the same API — `Route.add(sock, "fd00::", 64, "fc00::1")`
 or `Route.add_default(sock, "fc00::1")`; the family is taken from the
 gateway and destination, which must agree.
 
+### In-place updates and route options
+
+`replace/5` is create-or-replace: install the route if absent, overwrite it
+in place (e.g. a changed gateway) if present. It is idempotent, where `add/5`
+is strict (`:eexist` on a duplicate).
+
+```elixir
+Route.add(sock, "10.99.0.0", 24, "10.0.42.1")       # strict; errors if present
+Route.replace(sock, "10.99.0.0", 24, "10.0.42.9")   # upsert; new gateway in place
+```
+
+`add/5`, `replace/5` and `delete/5` take `:table`, `:protocol` and `:metric`.
+
+```elixir
+# A route in a custom table, tagged with a dedicated protocol, at a metric.
+Route.add(sock, "10.50.0.0", 24, "10.0.42.1", table: 100, protocol: :static, metric: 50)
+Route.delete(sock, "10.50.0.0", 24, "10.0.42.1", table: 100, metric: 50)
+```
+
+`:protocol` (an integer, or `:kernel`/`:boot`/`:static`/`:ra`/`:dhcp`) is the
+ownership tag a reconciler uses to manage only its own routes; `:table`
+accepts any value (tables above 255 ride `RTA_TABLE` automatically);
+`:metric` is the route's `RTA_PRIORITY`.
+
 ## Neighbours
 
 Static ARP (IPv4) or NDP (IPv6) entries — mapping an IP to a MAC on a
@@ -246,6 +270,124 @@ iex> Rule.add(sock, fwmark: 0x1, table: 100, priority: 200)
 iex> Rule.delete(sock, from: "10.0.0.0/24", table: 100)
 :ok
 ```
+
+## Reconciliation: diffing observed vs desired
+
+`Linx.Netlink.Rtnl.Diff` computes the minimal create / update / delete ops
+that converge observed kernel state onto a desired state — the diff half of
+declarative reconciliation (applying them, and observing, come together in
+the reconciler). The diff currency is the decoded structs themselves, so
+desired and observed are the same type.
+
+Routes own by `rtm_protocol` (two-way): tag desired routes with a protocol,
+and the diff considers only observed routes carrying it — connected routes
+and other writers are invisible to it. A changed gateway is an `:update`
+(applied in place with `Route.replace/5`), not a delete+create.
+
+```elixir
+desired = [build_route("10.50.0.0", 24, "10.0.0.1", protocol: :static)]
+{:ok, observed} = Route.list(sock)
+
+Diff.routes(desired, observed, :static)
+# => [{:create, %Route{...}}, {:update, %Route{...}}, {:delete, %Route{...}}]
+```
+
+Everything else (addresses, links, rules, neighbours) has no kernel ownership
+field, so deletion is gated three-way by a `last_applied` key set — the keys
+this reconciler installed before. Foreign state that merely appeared is left
+alone; only keys you previously applied and no longer want are deleted.
+
+```elixir
+owned = MapSet.new(Enum.map(previously_applied, &Diff.address_key/1))
+Diff.addresses(desired_addrs, observed_addrs, owned)
+```
+
+See the `Linx.Netlink.Rtnl.Diff` moduledoc for the full key/ownership table.
+
+### Single-shot reconcile
+
+`Linx.Netlink.Rtnl.Reconcile.reconcile/4` composes the diffs into one ordered,
+converging pass for **addresses and routes** on existing interfaces. You author
+the desired state by interface name; indices are resolved each pass. It applies
+addresses before routes (so a gateway is reachable), is fail-fast, and returns
+a report whose `:last_applied` you thread into the next pass.
+
+```elixir
+desired = %{
+  addresses: [{"eth0", "10.0.0.2", 24}],
+  routes: [{"10.50.0.0", 24, "10.0.0.1"}, {:default, "10.0.0.1"}]
+}
+
+{:ok, r} = Reconcile.reconcile(sock, desired)
+r.converged?        # true once the kernel matches
+r.applied           # the ops that ran this pass
+
+# Idempotent — a second pass with the threaded ownership does nothing.
+{:ok, r2} = Reconcile.reconcile(sock, desired, r.last_applied)
+r2.applied == []
+```
+
+Run it on a timer and it self-heals: delete an address by hand and the next
+pass restores it; drop one from `desired` and the next pass removes it — but
+only addresses *it* installed, never a foreign one that merely appeared.
+Routes are owned by `rtm_protocol` (default `76`, override with `:protocol`),
+so a route written by anything else is invisible to the reconciler and never
+touched. Link lifecycle, rules, and neighbours are out of this pass's scope.
+
+### Watching for change: the Monitor
+
+`Linx.Netlink.Rtnl.Monitor` is the `ip monitor` equivalent — a GenServer that
+subscribes to the rtnetlink multicast groups and forwards each change to an
+owner. It is a *latency* layer over the timer-driven reconcile: a faster "look
+now" signal, not a source of truth.
+
+```elixir
+{:ok, mon} = Linx.Netlink.Rtnl.Monitor.subscribe()
+
+# the owner receives, for any change in the namespace:
+#   {:linx_rtnl, :event, %Monitor.Event{op: :new_addr, resource: %Address{...}}}
+#   {:linx_rtnl, :resync_needed}    (on ENOBUFS — the stream is lossy)
+
+Linx.Netlink.Rtnl.Monitor.unsubscribe(mon)
+```
+
+Netlink multicast drops frames under load, so events are **wake-up hints, not
+deltas**: a level-triggered consumer re-`list`s and re-diffs on *any* event (or
+`:resync_needed`) rather than acting on the event's `:resource`. Because
+`RTM_*` notifications decode through the same codecs as `list/1`, the structs
+in an event are identical to what a re-read returns. Pair it with `reconcile/4`
+to wake the loop faster than its timer; correctness still rests on the resync.
+
+### A long-lived loop (opt-in)
+
+`reconcile/4` and the Monitor are mechanism; wiring them into a continuous
+control loop is policy you can write yourself (a ~15-line timer that re-`list`s,
+re-diffs, and reconciles, woken early by the Monitor). When you'd rather not,
+the opt-in `Linx.Reconcile` loop does it, driven through the rtnl `Source`
+adapter. The `scope` is the namespace — the loop opens a short-lived socket per
+pass, so it owns no socket lifecycle:
+
+```elixir
+children = [
+  {Linx.Reconcile,
+   source: Linx.Netlink.Rtnl.Reconcile.Source,
+   scope: {:pid, container_pid},
+   desired: %{
+     addresses: [{"eth0", "10.0.0.2", 24}],
+     routes: [{:default, "10.0.0.1"}]
+   },
+   interval: :timer.seconds(30)}
+]
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+By default it subscribes to the Monitor for low-latency wakeups and re-syncs
+every `interval` as the safety net — delete an address by hand and it is
+restored, either on the Monitor wakeup or the next timer pass. It links to the
+Monitor: if the multicast socket dies the loop restarts and resynchronizes from
+scratch, which is correct (resync is truth). It drives **one** namespace; the
+cross-subsystem composite (a container's process + network + cgroup together)
+stays in the consumer, where it belongs.
 
 ## IP addresses, subnets, and MAC addresses
 

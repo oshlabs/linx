@@ -243,6 +243,49 @@ If the workload tries to allocate past `memory.max`, the kernel
 OOM-kills it inside the cgroup; `Linx.Process` then delivers the
 `{:linx_process, :signaled, 9}` you'd expect.
 
+## Reconciling limits declaratively
+
+The setters above are imperative. To describe the limits you *want* and have
+them converged — and re-converged after manual drift — use
+`Linx.Cgroup.Reconcile`. It is "sysctl-with-hierarchy": a flat map from
+interface-file name to desired value, against one already-existing cgroup.
+
+```elixir
+alias Linx.Cgroup.Reconcile
+
+desired = %{
+  "memory.max" => 256 * 1024 * 1024,   # bytes, or :max to clear
+  "pids.max" => 100,                    # count, or :max
+  "cpu.max" => {50_000, 100_000}        # {quota_us, period_us}, or :max
+}
+
+{:ok, r} = Reconcile.reconcile("/sys/fs/cgroup/myorg/web-42", desired)
+r.converged?            #=> true once the kernel matches
+
+# Thread last_applied into the next pass; idempotent.
+{:ok, r2} = Reconcile.reconcile("/sys/fs/cgroup/myorg/web-42", desired, r.last_applied)
+```
+
+It reconciles **limits only** — it never creates or destroys the cgroup,
+enables controllers, or moves processes. Those are lifecycle the consumer owns
+(create the cgroup and delegate controllers first, as above); a write to a knob
+whose controller isn't delegated simply lands in `r.failed`, best-effort, and
+the next pass retries. Three-way `last_applied` ownership and
+`revert_on_release:` work exactly as in `Linx.Sysctl.Reconcile`.
+
+For continuous convergence, drive it from the opt-in `Linx.Reconcile` loop via
+the cgroup `Source` adapter (the `scope` is the cgroup path):
+
+```elixir
+{Linx.Reconcile,
+ source: Linx.Cgroup.Reconcile.Source,
+ scope: "/sys/fs/cgroup/myorg/web-42",
+ desired: %{"memory.max" => 256 * 1024 * 1024, "pids.max" => 100}}
+```
+
+cgroupfs has no change multicast, so the loop is timer-only — right for limit
+knobs that only move when something writes them.
+
 ## Reading counters
 
 `stats/1` returns a snapshot of a cgroup's resource counters as a

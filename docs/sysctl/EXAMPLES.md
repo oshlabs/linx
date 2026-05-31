@@ -474,3 +474,95 @@ iex> Sysctl.write("net.ipv4.ip_forward", 1, in: {:path, "/var/run/netns/blue"})
 This is the right shape for `ip netns`-style named namespaces and
 for callers that have already opened a pinned-namespace file via
 some other path. Most callers will use `{:pid, n}` instead.
+
+## Declarative reconciliation
+
+`Linx.Sysctl.Reconcile` turns a desired `%{key => value}` map into the
+writes needed to converge the kernel onto it — observe, diff, apply,
+once. It is single-shot mechanism: it holds no state and owns no
+process. The loop that calls it on a cadence is the consumer's.
+
+```elixir
+alias Linx.Sysctl.Reconcile
+
+desired = %{
+  "net.ipv4.ip_forward" => 1,
+  "net.ipv4.conf.all.rp_filter" => 1,
+  "kernel.printk" => [4, 4, 1, 7]
+}
+
+# First pass: writes whatever the kernel doesn't already match.
+{:ok, r} = Reconcile.reconcile(desired)
+r.converged?            # true once every knob matches
+r.applied               # the ops that actually hit the kernel this pass
+r.failed                # [{op, %Sysctl.Error{}}] for any that errored
+
+# Idempotent: a second pass with the same desired state is a no-op.
+{:ok, r2} = Reconcile.reconcile(desired, r.last_applied)
+r2.applied == []        # nothing left to do
+```
+
+Reconcile is **best-effort** — every knob is attempted, and a failure
+on one (say `EACCES` without root) lands in `r.failed` without starving
+the rest. Re-running converges anything still wrong; events are hints,
+resync is truth.
+
+### `last_applied` — three-way ownership
+
+Thread `r.last_applied` from one pass into the next. It records which
+keys you manage and the value each had before you first touched it. Its
+job is to do the right thing when a key *leaves* the desired set:
+
+```elixir
+# Pass 1 manages two knobs.
+{:ok, r1} = Reconcile.reconcile(%{"net.ipv4.ip_forward" => 1, "vm.swappiness" => 10})
+
+# Pass 2 no longer wants vm.swappiness. By default it is released:
+# left at its current value, reported as {:release, "vm.swappiness"}.
+{:ok, r2} = Reconcile.reconcile(%{"net.ipv4.ip_forward" => 1}, r1.last_applied)
+
+# Opt in to restoring the captured original instead:
+{:ok, r3} =
+  Reconcile.reconcile(%{"net.ipv4.ip_forward" => 1}, r1.last_applied,
+    revert_on_release: true)
+```
+
+`last_applied` is reconciler-held and must not be persisted — it
+captures live, pre-management values that die with the node. Start each
+fresh run from `%{}`.
+
+### Reconciling into a container's namespace
+
+Every verb's `:in` option is forwarded, so reconcile works against a
+container's namespace stack exactly like `read/3` and `write/3`:
+
+```elixir
+{:ok, r} =
+  Reconcile.reconcile(%{"net.ipv4.ip_forward" => 1, "kernel.hostname" => "ct0"},
+    %{}, in: {:pid, container_pid})
+```
+
+### A long-lived loop (opt-in)
+
+`Reconcile.reconcile/3` is single-shot — you call it, it converges once,
+you thread `last_applied` yourself. For a *continuously* converged knob,
+add the opt-in `Linx.Reconcile` loop to your own supervision tree via the
+sysctl `Source` adapter. The `scope` is the `:in` target:
+
+```elixir
+children = [
+  {Linx.Reconcile,
+   source: Linx.Sysctl.Reconcile.Source,
+   scope: :self,
+   desired: %{"net.ipv4.ip_forward" => 1},
+   name: :host_sysctls}
+]
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+It re-converges on a timer (default 5 s; set `interval:`), so a knob
+flipped by hand is corrected on the next pass. sysctl has no kernel
+multicast, so the loop is timer-only here — exactly right for state that
+never changes behind your back. The loop is genuinely optional: it is the
+recommended easy path for an app with no supervision tree to roll its own,
+but the single-shot verbs work fully standalone without it.
