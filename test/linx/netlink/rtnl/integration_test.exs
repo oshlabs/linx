@@ -25,10 +25,11 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     {_, 0} =
       System.cmd("ip", ~w(-n #{netns} link add dummy0 type dummy), stderr_to_stdout: true)
 
-    {:ok, socket} = Rtnl.open({:path, "/var/run/netns/#{netns}"})
+    netns_path = "/var/run/netns/#{netns}"
+    {:ok, socket} = Rtnl.open({:path, netns_path})
     on_exit(fn -> Socket.close(socket) end)
 
-    %{socket: socket}
+    %{socket: socket, netns_path: netns_path}
   end
 
   test "set_up/2 and set_down/2 toggle a link's administrative state", %{socket: socket} do
@@ -390,4 +391,54 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     {:ok, all} = Route.list(socket)
     assert Enum.any?(all, &(&1.dst == ~IP"10.77.0.0" and &1.protocol == 4))
   end
+
+  # --- Phase 5: the rtnl Monitor --------------------------------------------
+
+  alias Linx.Netlink.Rtnl.Monitor
+  alias Linx.Netlink.Rtnl.Monitor.Event
+
+  test "Monitor forwards address and route events to the owner",
+       %{socket: socket, netns_path: path} do
+    assert :ok = Link.set_up(socket, "dummy0")
+
+    # subscribe/2 joins the multicast groups synchronously in init, so events
+    # caused after this call are captured (queued in the socket buffer).
+    {:ok, mon} = Monitor.subscribe(self(), netns: {:path, path})
+
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+
+    assert_receive {:linx_rtnl, :event,
+                    %Event{op: :new_addr, resource: %Address{address: ~IP"10.99.0.2"}}},
+                   2_000
+
+    assert :ok = Route.add(socket, "10.50.0.0", 24, "10.99.0.1")
+
+    assert_receive {:linx_rtnl, :event,
+                    %Event{op: :new_route, resource: %Route{dst: ~IP"10.50.0.0"}}},
+                   2_000
+
+    assert :ok = Address.delete(socket, "dummy0", "10.99.0.2", 24)
+    assert_receive {:linx_rtnl, :event, %Event{op: :del_addr}}, 2_000
+
+    assert :ok = Monitor.stop(mon)
+  end
+
+  test "Monitor wakes on out-of-band drift (level-triggered)",
+       %{socket: socket, netns_path: path} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    {:ok, mon} = Monitor.subscribe(self(), netns: {:path, path})
+
+    # A change made by anyone in the namespace is observed — the event is a
+    # wake-up; a reconciler would re-list and re-diff here.
+    {_, 0} =
+      System.cmd("ip", ~w(-n) ++ [netns_name(path)] ++ ~w(addr add 10.99.0.7/24 dev dummy0))
+
+    assert_receive {:linx_rtnl, :event,
+                    %Event{op: :new_addr, resource: %Address{address: ~IP"10.99.0.7"}}},
+                   2_000
+
+    assert :ok = Monitor.stop(mon)
+  end
+
+  defp netns_name(path), do: Path.basename(path)
 end

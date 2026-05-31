@@ -334,6 +334,30 @@ Routes are owned by `rtm_protocol` (default `76`, override with `:protocol`),
 so a route written by anything else is invisible to the reconciler and never
 touched. Link lifecycle, rules, and neighbours are out of this pass's scope.
 
+### Watching for change: the Monitor
+
+`Linx.Netlink.Rtnl.Monitor` is the `ip monitor` equivalent — a GenServer that
+subscribes to the rtnetlink multicast groups and forwards each change to an
+owner. It is a *latency* layer over the timer-driven reconcile: a faster "look
+now" signal, not a source of truth.
+
+```elixir
+{:ok, mon} = Linx.Netlink.Rtnl.Monitor.subscribe()
+
+# the owner receives, for any change in the namespace:
+#   {:linx_rtnl, :event, %Monitor.Event{op: :new_addr, resource: %Address{...}}}
+#   {:linx_rtnl, :resync_needed}    (on ENOBUFS — the stream is lossy)
+
+Linx.Netlink.Rtnl.Monitor.unsubscribe(mon)
+```
+
+Netlink multicast drops frames under load, so events are **wake-up hints, not
+deltas**: a level-triggered consumer re-`list`s and re-diffs on *any* event (or
+`:resync_needed`) rather than acting on the event's `:resource`. Because
+`RTM_*` notifications decode through the same codecs as `list/1`, the structs
+in an event are identical to what a re-read returns. Pair it with `reconcile/4`
+to wake the loop faster than its timer; correctness still rests on the resync.
+
 ## IP addresses, subnets, and MAC addresses
 
 IP addresses, subnets and MAC addresses are first-class values — `Linx.IP`,
