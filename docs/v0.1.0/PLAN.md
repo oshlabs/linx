@@ -528,8 +528,31 @@ findings) and annotated with outcomes. All fixups shipped on
   **Phase 2 is effectively complete** — only the optional forward-compat
   notes above are left, and they're not gating.
 
-**Phase 3 — Hardening: ⬜ NOT STARTED** (StreamData property tests,
-C ASan/UBSan, error-path coverage).
+**Phase 3 — Hardening: 🟡 IN PROGRESS.**
+  Done:
+  - **StreamData property tests** added (`{:stream_data, "~> 1.0",
+    only: :test}`):
+    - Value types (`5487d19`): `Linx.IP` / `MAC` byte + string round-trips
+      and family tagging; `Subnet` parse round-trip + contains?/network/
+      broadcast invariants; `Netlink.Attr` TLV round-trip + 4-byte
+      alignment; `Stats.Link64` counter round-trip + trailing-byte / short-
+      layout tolerance.
+    - NFT + sysctl (`c56febb`): a **generative** `~NFT` round-trip
+      (random rulesets → parse/format/parse identity + format idempotence;
+      complements the curated `golden_test.exs`), and sysctl key
+      validation (well-formed never `:bad_key`; traversal/illegal always
+      `:bad_key`).
+  - **First real bug found + fixed** (`c56febb`): the NFT tokenizer
+    misread a digit-led first IPv6 hextet ending in `d` (e.g. `830d:…`)
+    as the time literal "830 days" (`d` is the only time unit that's also
+    a hex digit). Fixed + deterministic regression test + CHANGELOG entry.
+  Remaining:
+  - C ASan/UBSan pass on the five NIFs (coupled to the CI privileged-job
+    decision — needs the integration suite running).
+  - Error-path coverage (force `%X.Error{}` / tagged-tuple branches:
+    ESRCH/ENOENT/EPERM, malformed kernel responses).
+  - Optional further properties: the `Netlink.Codec` message round-trips,
+    seccomp filter `from_rules`/`to_rules`, the mountinfo parser.
 
 **Phase 4 — Release: ⬜ NOT STARTED.** Known open items:
   - ✅ **Version floor decided.** `mix.exs` now pins `elixir: "~> 1.15"`
