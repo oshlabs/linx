@@ -51,6 +51,14 @@ defmodule Linx.Mount do
   The same call works post-`proceed/1` against a running container
   for hot-mounting volumes or remounting paths.
 
+  ## Forward compatibility
+
+  `list/0..1` parse `/proc/.../mountinfo` defensively: a line that
+  doesn't match the expected shape — or carries an optional-field tag
+  Linx doesn't recognise — is silently skipped rather than crashing the
+  whole parse. A future kernel adding optional fields can't break a
+  mount-table read.
+
   ## Status
 
   All foundation milestones shipped (M0–M4): `list/0`, `list/1`,

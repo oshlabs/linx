@@ -67,6 +67,12 @@ defmodule Linx.User do
   coupling, exactly the way `Linx.Netlink` / `Linx.Cgroup` /
   `Linx.Mount` integration works.
 
+  ## Forward compatibility
+
+  `read_uid_map/1` / `read_gid_map/1` parse the map files defensively —
+  a line that isn't three non-negative integers is skipped rather than
+  crashing the read.
+
   ## Status
 
   All foundation milestones shipped (U0–U2): `supported?/0`,

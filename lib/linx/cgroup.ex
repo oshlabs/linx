@@ -53,6 +53,13 @@ defmodule Linx.Cgroup do
   `Linx.Process` itself has no awareness of cgroups; the checkpoint
   is the integration surface and that is enough.
 
+  ## Forward compatibility
+
+  `stats/1` reads the curated counters it knows; an unrecognised line in
+  a `*.stat` file (a counter a newer kernel added) is silently dropped,
+  so the returned `%Stats{}` stays valid. Reach for `read/2` to get any
+  raw field without a typed reader.
+
   ## Status
 
   All foundation milestones shipped (C0–C4): `supported?/0`,

@@ -110,6 +110,13 @@ defmodule Linx.Sysctl do
   the way `Linx.Netlink` / `Linx.Cgroup` / `Linx.Mount` / `Linx.User`
   integration works.
 
+  ## Forward compatibility
+
+  `list/0..1` silently skip nodes they can't read
+  (`EACCES`/`EPERM`/`EIO`) — the intent is "everything visible", not
+  "everything that exists". An errno Linx hasn't catalogued surfaces as
+  `errno: :unknown` with the raw integer preserved in `:code`.
+
   ## Status
 
   S0–S3 shipped: `supported?/0`, host-side `read/1..2`,

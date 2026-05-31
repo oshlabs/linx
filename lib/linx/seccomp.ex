@@ -73,6 +73,14 @@ defmodule Linx.Seccomp do
   A bug that tries `execve(2)` (not on the list) kills the process;
   the kernel never enters `do_execve`.
 
+  ## Forward compatibility
+
+  `Linx.Seccomp.Syscalls.from_number/2` returns `:unknown` for a syscall
+  number outside Linx's per-arch table rather than crashing, so decoding
+  a filter that references a newer syscall degrades gracefully.
+  Construction is strict the other way: an unknown syscall *atom* is
+  rejected at build time, since a typo must never silently widen a filter.
+
   ## Status
 
   S0 + S1 + S2 shipped: detection (`supported?/0`, `arch/0`),
