@@ -68,7 +68,8 @@ defmodule Linx.MixProject do
         "docs/sysctl/REFERENCES.md",
         "docs/netfilter/EXAMPLES.md",
         "docs/netfilter/DESIGN.md",
-        "docs/netfilter/REFERENCES.md"
+        "docs/netfilter/REFERENCES.md",
+        {:"LICENSE", [title: "License"]}
       ],
       source_ref: "v#{@version}",
       # Per-subsystem pages: EXAMPLES.md (recipes) + REFERENCES.md

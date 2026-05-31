@@ -508,15 +508,15 @@ findings) and annotated with outcomes. All fixups shipped on
   - **`mix format` the whole tree** (it had never been format-clean) —
     isolated commit + `.git-blame-ignore-revs`. The Phase-4
     `--check-formatted` gate now passes.
+  - **README slim** ✅ — 62 KB → ~10.7 KB. Kept the tagline +
+    "primitives, not a runtime" framing + headline composition + install
+    + license; the ten per-subsystem walkthroughs collapsed to a 1–3
+    sentence blurb each (deep recipes now live in the moduledocs /
+    `EXAMPLES.md`); added a short "Errors" section reflecting the D2
+    convention; fixed the stale `PLAN.md`/`COVERAGE.md` doc-IA mentions.
+    `LICENSE` added to `mix.exs` `extras` (titled "License") — its
+    `mix docs` page now generates and the README link resolves.
   Remaining:
-  - **README slim** (the big one) — 62 KB → ~10–15 KB standard shape.
-    Agreed structure: keep the tagline + "primitives, not a runtime"
-    framing + the headline composition example + install + license;
-    compress the ten per-subsystem sections to a 1–3 sentence blurb each
-    linking to the module docs; cut the deep per-subsystem API
-    walkthroughs (now in the moduledocs / `EXAMPLES.md`). Also add
-    `LICENSE` to `mix.exs` `extras` (or make its README link relative)
-    to clear the one remaining `mix docs` broken-link warning.
   - Minor polish (low priority): inline examples on the five Netlink
     *resource* modules (`Link`/`Address`/`Route`/`Neighbour`/`Rule` —
     the entry modules already have them); optional forward-compat notes
@@ -533,6 +533,12 @@ C ASan/UBSan, error-path coverage).
     `lib/linx/nft/compiler.ex`, and `lib/linx/nft/formatter.ex` — group
     the split clauses before the CI gate.
   - `--check-formatted` already passes (done in Phase 2).
+  - `mix docs` emits a handful of benign auto-link warnings — ExDoc
+    trying to resolve backtick code spans as references: hidden modules
+    (`Linx.Seccomp.Constants`/`Syscalls`), a not-yet-existent
+    `Linx.Tty.openpt/0` and `Set.new!/2`, and `:prim_tty.*` Erlang refs
+    in `docs/tty/EXAMPLES.md`. Pre-existing; quiet them (escape or
+    rephrase) before the release docs build if we want a clean run.
 
 ## Notes for resuming after context compaction
 
