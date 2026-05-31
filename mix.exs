@@ -52,7 +52,8 @@ defmodule Linx.MixProject do
 
   defp deps do
     [
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:stream_data, "~> 1.0", only: :test, runtime: false}
     ]
   end
 
