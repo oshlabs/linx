@@ -49,6 +49,12 @@ defmodule Linx.Sysctl do
   apply ordering, and reload policy belong to a consumer built on
   these primitives, not to Linx.
 
+  Single-shot declarative reconciliation — observe a desired
+  `%{key => value}` map against the kernel, diff, and converge in one
+  caller-driven pass — *is* mechanism and lives in
+  `Linx.Sysctl.Reconcile`. It holds no long-lived state and owns no
+  process; the loop that calls it on a cadence remains the consumer's.
+
   ## Per-namespace vs global
 
   The kernel routes each read or write through the *calling task's*

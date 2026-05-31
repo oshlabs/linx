@@ -396,14 +396,16 @@ diff. Events are hints; resync is truth.
 - **Q3 — sysctl leads.** The first full reconcile loop is built on sysctl as the
   proving ground for the generic discipline (Phase 2); the rtnl *actuation* fixes
   (Phase 1) are independent and run in parallel.
-- **Q2 — fail-fast partial-apply.** rtnl has no transaction, so a reconcile pass
-  is an ordered sequence that can partially apply. It stops at the first failing
-  op and returns a report (what applied / the failing op + error / what is
-  pending), rather than best-effort or rollback — the level-triggered next tick is
-  the safety net, which makes rollback wasted work and best-effort mostly
-  redundant. The same shape covers sysctl's independent per-key writes. *Still to
-  settle:* the exact report struct fields (semantics are fixed; field names are
-  not).
+- **Q2 — partial-apply report, strategy per subsystem.** A reconcile pass returns
+  a uniform report — `converged?` / `applied` / `failed` / `pending` (realized as
+  `Linx.Sysctl.Reconcile.Report`) — but the *strategy* follows whether the
+  subsystem's ops are ordered. **Ordered (rtnl)** is fail-fast: a later op depends
+  on an earlier one (a route via a not-yet-added address fails anyway), so the
+  pass stops at the first failure — `failed` holds ≤1 op, `pending` holds the
+  rest. **Independent (sysctl)** is best-effort: every op is attempted so one
+  permanent `EACCES` never starves the others — `failed` collects them all,
+  `pending` is empty. Rollback is rejected either way: the level-triggered next
+  tick is the safety net, which makes it wasted work.
 - **Q1 — offer the opt-in loop (predisposition).** Linx will build toward shipping
   a thin opt-in `Linx.Reconcile` loop (Phase 7), subject to the five "really
   opt-in" constraints listed there and the `Reconcile.Source` litmus test (§7).
@@ -420,7 +422,6 @@ diff. Events are hints; resync is truth.
 - The final Phase-7 go/no-go, decided by the PoC (Phase 9) + the litmus test: does
   a thin per-subsystem loop implement cleanly and serve the simple consumer, or
   does the composite subsume it so Linx stops at single-shot reconcile + Monitor?
-- The exact field shape of rtnl's partial-apply report (Q2 semantics are fixed).
 
 ## Appendix — minimal reconcile skeleton (illustrative)
 
