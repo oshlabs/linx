@@ -551,22 +551,30 @@ defmodule Linx.TtyTest do
       Process.group_leader(self(), gl)
 
       try do
-        # `/bin/true` exits immediately; the pump returns
-        # {:ok, {:exited, 0}}. We're not asserting on the return value
-        # here -- the assertion is that `echo` is restored.
-        {:ok, session} = Linx.Process.spawn(argv: ["/bin/true"], stdio: :pty)
+        # A live session: /bin/cat with a PTY parks waiting for input and
+        # never exits on its own, so attach's not-terminated guard reliably
+        # passes (a fast-exiting command like /bin/true races that guard and
+        # makes attach a no-op). The fake gl has no input clause, so the
+        # reader's first get_chars gets {:error, :enotsup} and the pump returns
+        # an error -- which is exactly the "way out" this test asserts echo is
+        # restored on. We're not asserting on the return value.
+        {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
         assert_receive {:linx_process, :ready, _}, 2_000
         :ok = Linx.Process.proceed(session)
+        assert_receive {:linx_process, :running}, 2_000
 
         _ = Linx.Tty.attach(:group_leader, session)
+        _ = Linx.Process.signal(session, 9)
       after
         Process.group_leader(self(), original_gl)
       end
 
-      # The fake gl captured every setopts call. echo: false on entry,
-      # echo: true on the way out.
-      assert_received {:fake_gl_setopts, [echo: false]}
-      assert_received {:fake_gl_setopts, [echo: true]}
+      # The fake gl captured every setopts call: echo: false on entry,
+      # echo: true on the way out. It sends these from its own process as
+      # attach drives setopts, so wait for them rather than checking the
+      # mailbox synchronously (assert_received raced the in-flight messages).
+      assert_receive {:fake_gl_setopts, [echo: false]}, 1_000
+      assert_receive {:fake_gl_setopts, [echo: true]}, 1_000
     end
   end
 
