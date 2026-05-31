@@ -543,10 +543,14 @@ C ASan/UBSan, error-path coverage).
     otp {26, latest}`, and **only the latest-Elixir cell runs
     `mix format --check-formatted`** (formatter output is version-sensitive
     — running the check on the 1.15 cell would fail spuriously against code
-    formatted on 1.19). ✅ `.tool-versions` added (erlang 29.0, elixir
-    1.19.5-otp-28) pinning the dev/format toolchain to the latest so
-    contributors format identically. Kernel floor (6.6 LTS, target 6.12)
-    is also in the README Requirements note now.
+    formatted on 1.19). ✅ `.tool-versions` added (erlang 28.5.0.1, elixir
+    1.19.5-otp-28 — matched majors; suite green on this combo) pinning the
+    dev/format toolchain so contributors format identically. NB: the asdf
+    `-otp-28` suffix is the OTP the Elixir build was *compiled against*, not
+    a hard runtime requirement — but pin a matched pairing rather than
+    relying on BEAM backward-compat (1.19 on OTP 29 works but is off
+    Elixir's support matrix; the OTP-29 build is 1.20-rc). Kernel floor
+    (6.6 LTS, target 6.12) is also in the README Requirements note now.
   - Note: `mix format --check-formatted` is genuinely green again as of
     `2066ffc` — a quoted-atom miss in `mix.exs` (`{:"LICENSE", ...}` →
     `{:LICENSE, ...}`) had slipped in with the README slim. When checking
