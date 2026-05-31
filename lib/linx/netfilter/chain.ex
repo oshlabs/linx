@@ -106,7 +106,7 @@ defmodule Linx.Netfilter.Chain do
 
   # Named priority atoms commonly used in nft scripts. Bridge has
   # its own set with overlapping names — resolution to integers is
-  # the wire codec's job (N2). We accept these atoms here and pass
+  # the wire codec's job. We accept these atoms here and pass
   # them through.
   @known_priority_names [:raw, :mangle, :dstnat, :filter, :security, :srcnat, :out]
 
@@ -207,6 +207,7 @@ defmodule Linx.Netfilter.Chain do
   # Base chain: all three of type/hook/priority must be set.
   # Regular chain: none of the three may be set.
   defp validate_base_consistency(nil, nil, nil), do: :ok
+
   defp validate_base_consistency(type, hook, priority)
        when not is_nil(type) and not is_nil(hook) and not is_nil(priority),
        do: :ok
@@ -214,8 +215,7 @@ defmodule Linx.Netfilter.Chain do
   defp validate_base_consistency(type, hook, priority),
     do:
       {:error,
-       {:bad_chain,
-        {:incomplete_base_chain, %{type: type, hook: hook, priority: priority}}}}
+       {:bad_chain, {:incomplete_base_chain, %{type: type, hook: hook, priority: priority}}}}
 
   defp validate_type(nil), do: :ok
   defp validate_type(t) when t in @valid_types, do: :ok
@@ -353,4 +353,11 @@ defmodule Linx.Netfilter.Chain do
 
   def add_rule(%__MODULE__{}, other),
     do: {:error, {:bad_chain, {:not_a_rule, other}}}
+
+  defimpl Inspect do
+    def inspect(%Linx.Netfilter.Chain{} = c, _opts) do
+      base = if c.hook, do: " #{c.type}/#{c.hook}", else: ""
+      "#Linx.Netfilter.Chain<#{c.name}#{base}: #{length(c.rules)} rules>"
+    end
+  end
 end

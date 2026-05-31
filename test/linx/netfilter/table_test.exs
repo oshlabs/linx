@@ -150,7 +150,9 @@ defmodule Linx.Netfilter.TableTest do
       {:ok, t} = Table.add_chain(t, c)
 
       mutated = %{c | priority: 10, table: "myapp"}
-      assert {:ok, %Table{chains: %{"input" => %Chain{priority: 10}}}} = Table.put_chain(t, mutated)
+
+      assert {:ok, %Table{chains: %{"input" => %Chain{priority: 10}}}} =
+               Table.put_chain(t, mutated)
     end
 
     test "put_chain on a missing name is :no_such_chain" do

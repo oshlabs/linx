@@ -57,7 +57,10 @@ defmodule Linx.NFTTest do
 
       assert %Ruleset{} = rs
       table = Map.fetch!(rs.tables, {:inet, "myapp"})
-      assert %Chain{type: :filter, hook: :input, policy: :drop} = Map.fetch!(table.chains, "input")
+
+      assert %Chain{type: :filter, hook: :input, policy: :drop} =
+               Map.fetch!(table.chains, "input")
+
       assert length(table.chains["input"].rules) == 1
     end
 
@@ -71,7 +74,13 @@ defmodule Linx.NFTTest do
         }
         """
 
-      [rule] = (rs |> Ruleset.fetch_table({:inet, "x"}) |> elem(1) |> then(& &1.chains)) |> Map.fetch!("c") |> then(& &1.rules)
+      [rule] =
+        rs
+        |> Ruleset.fetch_table({:inet, "x"})
+        |> elem(1)
+        |> then(& &1.chains)
+        |> Map.fetch!("c")
+        |> then(& &1.rules)
 
       assert [
                %Expr{name: :payload, data: %{base: :transport, offset: 2, len: 2}},
@@ -90,7 +99,13 @@ defmodule Linx.NFTTest do
         }
         """
 
-      [rule] = (rs |> Ruleset.fetch_table({:ip, "x"}) |> elem(1) |> then(& &1.chains)) |> Map.fetch!("c") |> then(& &1.rules)
+      [rule] =
+        rs
+        |> Ruleset.fetch_table({:ip, "x"})
+        |> elem(1)
+        |> then(& &1.chains)
+        |> Map.fetch!("c")
+        |> then(& &1.rules)
 
       assert [
                %Expr{name: :payload, data: %{base: :network, offset: 12, len: 4}},
@@ -103,7 +118,14 @@ defmodule Linx.NFTTest do
       ip = {10, 0, 0, 7}
 
       rs = ~NFT"table ip x { chain c { ip daddr #{ip} accept } }"
-      [rule] = (rs |> Ruleset.fetch_table({:ip, "x"}) |> elem(1) |> then(& &1.chains)) |> Map.fetch!("c") |> then(& &1.rules)
+
+      [rule] =
+        rs
+        |> Ruleset.fetch_table({:ip, "x"})
+        |> elem(1)
+        |> then(& &1.chains)
+        |> Map.fetch!("c")
+        |> then(& &1.rules)
 
       assert [_payload, %Expr{name: :cmp, data: %{value: <<10, 0, 0, 7>>}}, _verdict] =
                rule.expressions
@@ -113,7 +135,14 @@ defmodule Linx.NFTTest do
       name = "eth0"
 
       rs = ~NFT"table inet x { chain c { meta iifname #{name} accept } }"
-      [rule] = (rs |> Ruleset.fetch_table({:inet, "x"}) |> elem(1) |> then(& &1.chains)) |> Map.fetch!("c") |> then(& &1.rules)
+
+      [rule] =
+        rs
+        |> Ruleset.fetch_table({:inet, "x"})
+        |> elem(1)
+        |> then(& &1.chains)
+        |> Map.fetch!("c")
+        |> then(& &1.rules)
 
       assert [
                %Expr{name: :meta, data: %{key: :iifname}},

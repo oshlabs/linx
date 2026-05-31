@@ -12,6 +12,17 @@ defmodule Linx.Netlink.Error do
 
       {:error, %Linx.Netlink.Error{errno: :enodev}} = Link.get(socket, "nope0")
 
+  ## No `:operation` field
+
+  Unlike the filesystem/procfs-backed error structs (`Linx.Cgroup.Error`,
+  `Linx.Mount.Error`, …), this struct carries no `:operation`. A netlink
+  error returns straight from the verb the caller invoked, so the operation
+  is already known at the call site — and the kernel's extended-ack
+  `message` is a richer, self-describing diagnostic than a synthetic
+  operation tag would be. `from_errno/2` is named for what it takes — a
+  numeric wire errno, not a POSIX atom — which is why it differs from the
+  `from_posix/_` constructors elsewhere in Linx.
+
   This module also implements `Exception` so an error can be `raise`d, or
   rendered with `Exception.message/1`.
   """
@@ -85,7 +96,7 @@ defmodule Linx.Netlink.Error do
     %__MODULE__{errno: Map.get(@posix, code, :unknown), code: code, message: message}
   end
 
-  @impl true
+  @impl Exception
   def message(%__MODULE__{errno: errno, code: code, message: nil}) do
     "netlink #{format_errno(errno, code)}"
   end

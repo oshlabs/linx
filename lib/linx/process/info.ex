@@ -21,8 +21,8 @@ defmodule Linx.Process.Info do
     * `:result` — the terminal result, once one has arrived. `nil`
       before that. Same shape as `Linx.Process.wait/1` returns
       under `{:ok, _}` (`{:exited, code}` / `{:signaled, signum}` /
-      `:aborted`), or the error-map shape (`{:error, %{errno: _,
-      stage: _}}`) for pre-exec failures.
+      `:aborted`), or `{:error, %Linx.Process.Error{}}` for pre-exec
+      failures.
 
   ## Stages
 
@@ -77,7 +77,7 @@ defmodule Linx.Process.Info do
           | {:exited, non_neg_integer()}
           | {:signaled, pos_integer()}
           | :aborted
-          | {:error, %{errno: integer(), stage: atom()}}
+          | {:error, Linx.Process.Error.t()}
 
   @type t :: %__MODULE__{
           mode: mode(),
@@ -101,8 +101,9 @@ defmodule Linx.Process.Info do
     # Terminal stages get their payload inline.
     defp format_stage(:exited, {:exited, code}), do: ":exited(#{code})"
     defp format_stage(:signaled, {:signaled, signum}), do: ":signaled(#{signum})"
-    defp format_stage(:errored, {:error, %{stage: s, errno: e}}),
-      do: ":errored(#{s}/#{e})"
+
+    defp format_stage(:errored, {:error, %Linx.Process.Error{stage: s, code: c}}),
+      do: ":errored(#{s}/#{c})"
 
     defp format_stage(stage, _), do: ":#{stage}"
 

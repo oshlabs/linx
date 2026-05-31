@@ -34,12 +34,12 @@ sections in the source when interpretation is non-obvious.
   `clone(CLONE_NEWNS)`, `setns(CLONE_NEWNS)`, and the mount
   namespace.
 - **`nsenter(1)`** — the userspace tool that does, essentially,
-  what our M3 `:in` option does. The semantics our cross-namespace
+  what our `:in` option does. The semantics our cross-namespace
   mounts match.
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — `Linx.Process` namespace machinery; the
+- `Linx.Process` — `Linx.Process` namespace machinery; the
   `:mount` namespace and where it comes from.
 - `lib/linx/netlink/socket/native.ex` — the netlink-in-netns NIF
   whose throwaway-thread setns pattern `Linx.Mount.Native` reuses.

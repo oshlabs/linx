@@ -55,8 +55,7 @@ defmodule Linx.NFT.Formatter do
 
     * **Static `~NFT` sigil body / `.nft` file** — parses,
       runs through `format/1`, returns the canonical
-      single-formatted source. Idempotent (N8f's
-      output-stability assertion already proves this).
+      single-formatted source. Idempotent.
     * **Interpolation-bearing `~NFT` sigil body** — left
       verbatim. AST-aware formatting that preserves `\#{…}`
       positions while reflowing the surrounding nft syntax is a
@@ -160,7 +159,14 @@ defmodule Linx.NFT.Formatter do
     "set #{name} {\n#{indent(body, 2)}\n}"
   end
 
-  defp format_map(%NMap{name: name, key_type: kt, data_type: dt, flags: flags, elements: elems, timeout: to}) do
+  defp format_map(%NMap{
+         name: name,
+         key_type: kt,
+         data_type: dt,
+         flags: flags,
+         elements: elems,
+         timeout: to
+       }) do
     keyword = if dt == :verdict, do: "vmap", else: "map"
 
     body =
@@ -197,8 +203,11 @@ defmodule Linx.NFT.Formatter do
   defp render_set_element(v, _kt) when is_binary(v), do: v
   defp render_set_element(other, _kt), do: inspect(other)
 
-  defp format_map_element({key, %Verdict{} = v}), do: "#{format_set_value(key)} : #{format_verdict(v)}"
-  defp format_map_element({key, value}), do: "#{format_set_value(key)} : #{format_set_value(value)}"
+  defp format_map_element({key, %Verdict{} = v}),
+    do: "#{format_set_value(key)} : #{format_verdict(v)}"
+
+  defp format_map_element({key, value}),
+    do: "#{format_set_value(key)} : #{format_set_value(value)}"
 
   defp format_seconds(secs) when is_integer(secs) do
     cond do
@@ -372,10 +381,6 @@ defmodule Linx.NFT.Formatter do
     do_format_exprs(rest, [stmt("ct #{key}", render_op(op), Integer.to_string(rhs)) | acc])
   end
 
-  defp invert_ct_cmp_op(:neq, 0), do: :eq
-  defp invert_ct_cmp_op(:eq, 0), do: :neq
-  defp invert_ct_cmp_op(other, _), do: other
-
   # ---- verdicts ----
   defp do_format_exprs([%Expr{name: :immediate, data: %Verdict{} = v} | rest], acc) do
     do_format_exprs(rest, [format_verdict(v) | acc])
@@ -422,7 +427,9 @@ defmodule Linx.NFT.Formatter do
 
   # ---- masq / nat / redirect ----
   defp do_format_exprs([%Expr{name: :masq, data: %{flags: flags}} | rest], acc) do
-    do_format_exprs(rest, [["masquerade" | flag_strings(flags)] |> Enum.join(" ") |> String.trim() | acc])
+    do_format_exprs(rest, [
+      ["masquerade" | flag_strings(flags)] |> Enum.join(" ") |> String.trim() | acc
+    ])
   end
 
   # NAT shape: immediate(addr) [immediate(port)] nat
@@ -455,7 +462,9 @@ defmodule Linx.NFT.Formatter do
   end
 
   defp do_format_exprs([%Expr{name: :redir, data: %{flags: flags}} | rest], acc) do
-    do_format_exprs(rest, [["redirect" | flag_strings(flags)] |> Enum.join(" ") |> String.trim() | acc])
+    do_format_exprs(rest, [
+      ["redirect" | flag_strings(flags)] |> Enum.join(" ") |> String.trim() | acc
+    ])
   end
 
   # ---- catchall: emit an in-line comment so the output remains
@@ -463,6 +472,10 @@ defmodule Linx.NFT.Formatter do
   defp do_format_exprs([expr | rest], acc) do
     do_format_exprs(rest, ["# <unsupported expression: #{inspect(expr.name)}>" | acc])
   end
+
+  defp invert_ct_cmp_op(:neq, 0), do: :eq
+  defp invert_ct_cmp_op(:eq, 0), do: :neq
+  defp invert_ct_cmp_op(other, _), do: other
 
   defp format_nat(%{type: type}, addr_bytes, port) do
     addr_text =
@@ -474,7 +487,10 @@ defmodule Linx.NFT.Formatter do
       end
 
     port_text = if port, do: ":#{port}", else: ""
-    "#{type} to #{addr_text}#{port_text}" |> String.trim_trailing(" to ") |> String.trim_trailing(" to")
+
+    "#{type} to #{addr_text}#{port_text}"
+    |> String.trim_trailing(" to ")
+    |> String.trim_trailing(" to")
   end
 
   defp format_verdict(%Verdict{kind: :accept}), do: "accept"
@@ -507,8 +523,12 @@ defmodule Linx.NFT.Formatter do
   defp payload_field(:network, 24, 16), do: "ip6 daddr"
   defp payload_field(base, o, l), do: "@#{base},#{o},#{l}"
 
-  defp render_payload_value(v, :transport, _o, 2), do: Integer.to_string(:binary.decode_unsigned(v))
-  defp render_payload_value(v, :transport, _o, 1), do: Integer.to_string(:binary.decode_unsigned(v))
+  defp render_payload_value(v, :transport, _o, 2),
+    do: Integer.to_string(:binary.decode_unsigned(v))
+
+  defp render_payload_value(v, :transport, _o, 1),
+    do: Integer.to_string(:binary.decode_unsigned(v))
+
   defp render_payload_value(v, :network, _o, 4) when byte_size(v) == 4, do: render_ipv4(v)
   defp render_payload_value(v, :network, _o, 16) when byte_size(v) == 16, do: render_ipv6(v)
   defp render_payload_value(v, :network, 9, 1), do: render_ip_protocol(v)
@@ -526,7 +546,10 @@ defmodule Linx.NFT.Formatter do
 
   defp render_meta_value(:iifname, v) when is_binary(v), do: ~s/"#{trim_ifname(v)}"/
   defp render_meta_value(:oifname, v) when is_binary(v), do: ~s/"#{trim_ifname(v)}"/
-  defp render_meta_value(_, v) when is_binary(v) and byte_size(v) <= 8, do: Integer.to_string(:binary.decode_unsigned(v))
+
+  defp render_meta_value(_, v) when is_binary(v) and byte_size(v) <= 8,
+    do: Integer.to_string(:binary.decode_unsigned(v))
+
   defp render_meta_value(_, v) when is_binary(v), do: inspect(v)
 
   defp trim_ifname(v) do

@@ -31,8 +31,7 @@ defmodule Linx.Seccomp.Syscalls do
   # arch (you typically need both) and add an entry to the per-arch
   # map below. Then run `mix test test/linx/seccomp_test.exs` — the
   # round-trip tests catch table inconsistencies (duplicate numbers,
-  # atoms missing from one arch, etc.). See `docs/seccomp/PLAN.md`
-  # "Extending the syscall table" for the full procedure.
+  # atoms missing from one arch, etc.).
   #
   # Syscalls that exist on one arch but not the other (e.g. legacy
   # `:open` on x86_64; aarch64 doesn't carry the unsuffixed verbs)
@@ -506,8 +505,8 @@ defmodule Linx.Seccomp.Syscalls do
     landlock_restrict_self: 446
   }
 
-  @x86_64_inv (for {atom, n} <- @x86_64, into: %{}, do: {n, atom})
-  @aarch64_inv (for {atom, n} <- @aarch64, into: %{}, do: {n, atom})
+  @x86_64_inv for {atom, n} <- @x86_64, into: %{}, do: {n, atom}
+  @aarch64_inv for {atom, n} <- @aarch64, into: %{}, do: {n, atom}
 
   @x86_64_atoms MapSet.new(Map.keys(@x86_64))
   @aarch64_atoms MapSet.new(Map.keys(@aarch64))

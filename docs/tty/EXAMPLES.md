@@ -7,15 +7,14 @@ a real terminal (the BEAM's controlling tty). `mix test` covers the
 error paths; the success paths live here because they mutate your
 actual terminal state and are best demonstrated interactively.
 
-## Versions
+## NIF identifier
 
 ```elixir
 Linx.Tty.version()
 ```
 
-Returns a string like `"linx_tty 0.1.0 (T1)"`. The trailing `(Tn)`
-matches the shipped milestone — sanity that the NIF you're talking
-to is the one you built.
+Returns `"linx_tty"` — a cheap round-trip that confirms the native
+library you built is the one actually loaded.
 
 ## Reading the terminal's window size
 
@@ -116,7 +115,7 @@ Two modes pick how the caller's terminal is reached:
   a universal mode. Polls `:io.columns/0` + `:io.rows/0` for
   resize on a ~250 ms cadence (no SIGWINCH equivalent over SSH).
 
-`:controlling` actively refuses over SSH (T6.0) — see below.
+`:controlling` actively refuses over SSH — see below.
 `:group_leader` works everywhere.
 
 ## `:controlling` mode — local terminal
@@ -178,13 +177,13 @@ which has nothing to do with how *you* got into the iex session.
 - **`:remsh`**: the local-iex side's GL points at a remote IO
   server; `/dev/tty` is wherever the remote BEAM was launched.
 
-T6.0 closes the silent-attach-to-the-wrong-terminal trap:
+This closes the silent-attach-to-the-wrong-terminal trap:
 `attach(:controlling, _)` returns `{:error, :no_local_tty}` in
 the SSH (and likely `:remsh`) case. `Linx.Tty.format_error/1`
 on the atom renders a human-readable hint that names
 `attach(:group_leader, _)` as the alternative.
 
-## `:group_leader` mode — universal (T6.1)
+## `:group_leader` mode — universal
 
 ```elixir
 alias Linx.Process, as: P

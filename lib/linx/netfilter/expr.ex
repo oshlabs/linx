@@ -9,21 +9,18 @@ defmodule Linx.Netfilter.Expr do
   `"cmp"`, `"immediate"`, `"lookup"`) and `:data` (kind-specific
   arguments — a keyword list, a map, a verdict, …).
 
-  ## N1 scope
+  ## Constructors
 
-  N1 ships the struct shape and a small set of constructors:
-
-    * `immediate/1` — load a verdict (or, in N2+, a constant) into
-      the kernel's register 0.
+    * `immediate/1` — load a verdict (or a constant) into the
+      kernel's register 0.
     * `new/2` — generic constructor for arbitrary `(name, data)`
       pairs. Useful for callers building expressions Linx doesn't
       yet have a dedicated helper for.
 
-  The full constructor set (`cmp/3`, `payload/3`, `meta/2`,
-  `bitwise/3`, `ct/2`, `lookup/2`, `reject/2`, `counter/1`, NAT
-  helpers) lands in N2/N3 alongside the wire encoder. At the
-  value-type level the struct shape is final today — the additional
-  constructors are extra entry points, not extra fields.
+  There are also kind-specific helpers (`cmp/3`, `payload/3`,
+  `meta/2`, `bitwise/3`, `ct/2`, `lookup/2`, `reject/2`,
+  `counter/1`, NAT helpers). They are extra entry points over the
+  same struct shape, not extra fields.
 
   ## Inspect
 
@@ -55,10 +52,9 @@ defmodule Linx.Netfilter.Expr do
   @doc """
   Generic constructor: an expression named `name` carrying `data`.
 
-  Most callers want one of the kind-specific helpers (`immediate/1`
-  here; `cmp/3` / `payload/3` / etc. landing in N2). Use `new/2`
-  when you're constructing an expression Linx doesn't yet have a
-  dedicated helper for.
+  Most callers want one of the kind-specific helpers (`immediate/1`,
+  `cmp/3`, `payload/3`, etc.). Use `new/2` when you're constructing
+  an expression Linx doesn't yet have a dedicated helper for.
   """
   @spec new(atom() | String.t(), term()) :: t()
   def new(name, data \\ nil) when is_atom(name) or is_binary(name),
@@ -70,9 +66,9 @@ defmodule Linx.Netfilter.Expr do
   The data is the verdict struct itself. Accepts a `%Verdict{}` or
   any input form `Verdict.new!/1` understands.
 
-  In N2 this constructor also accepts a constant (a binary or
-  integer) for loading a value into a register prior to a `cmp` —
-  the kernel uses the same expression for both forms.
+  This constructor also accepts a constant (a binary or integer)
+  for loading a value into a register prior to a `cmp` — the kernel
+  uses the same expression for both forms.
 
       iex> Expr.immediate(Verdict.accept())
       #Linx.Netfilter.Expr<immediate accept>
@@ -88,7 +84,7 @@ defmodule Linx.Netfilter.Expr do
   Returns `true` if `expr` is an `immediate` expression carrying a
   `%Verdict{}` — i.e. a terminal expression in a rule.
 
-  N2 also recognises wrapped immediate-verdict in the
+  Also recognises wrapped immediate-verdict in the
   `%{dreg: 0, value: %Verdict{}}` shape that the codec uses.
   """
   @spec verdict?(t()) :: boolean()
@@ -99,7 +95,7 @@ defmodule Linx.Netfilter.Expr do
   def verdict?(%__MODULE__{}), do: false
 
   # ===========================================================
-  # N2 expression constructors (cmp / payload / meta / bitwise /
+  # Expression constructors (cmp / payload / meta / bitwise /
   # ct / lookup / reject / counter)
   # ===========================================================
 
@@ -112,7 +108,7 @@ defmodule Linx.Netfilter.Expr do
   depending on what was loaded into `sreg`).
 
   Most callers don't construct `cmp/3` directly — the high-level
-  `~NFT` sigil (N8) and pipeline helpers compose `payload + cmp`
+  `~NFT` sigil and pipeline helpers compose `payload + cmp`
   into the natural "tcp dport 22" shape.
 
       iex> Expr.cmp(:eq, <<22::big-16>>)
@@ -194,7 +190,7 @@ defmodule Linx.Netfilter.Expr do
 
   Keys: `:len`, `:protocol`, `:mark`, `:iif`, `:oif`, `:iifname`,
   `:oifname`, `:nfproto`, `:l4proto`, etc. (see
-  `Linx.Netfilter.Wire.meta_key_int/1` for the full list N2 knows).
+  `Linx.Netfilter.Wire.meta_key_int/1` for the full list).
   """
   @spec meta(atom(), keyword()) :: t()
   def meta(key, opts \\ []) when is_atom(key) and is_list(opts) do
@@ -226,8 +222,8 @@ defmodule Linx.Netfilter.Expr do
   Connection-tracking load expression. Reads `key` (`:state`,
   `:mark`, etc.) from conntrack state into `dreg`.
 
-  N2 ships `:state`-shaped CT loads. CT-state matching uses the
-  bitmask integers — wrap the state atom(s) with
+  CT-state matching uses the bitmask integers — wrap the state
+  atom(s) with
   `Linx.Netfilter.Wire.ct_state_bits/1` to produce the comparison
   value:
 
@@ -338,7 +334,7 @@ defmodule Linx.Netfilter.Expr do
   end
 
   # ===========================================================
-  # N3 — NAT family (nat / masquerade / redirect)
+  # NAT family (nat / masquerade / redirect)
   # ===========================================================
 
   @doc """
@@ -432,7 +428,8 @@ defmodule Linx.Netfilter.Expr do
   """
   @type addr_input ::
           {0..255, 0..255, 0..255, 0..255}
-          | {0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF}
+          | {0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF,
+             0..0xFFFF}
           | <<_::32>>
           | <<_::128>>
           | String.t()
@@ -462,8 +459,9 @@ defmodule Linx.Netfilter.Expr do
     %__MODULE__{name: :immediate, data: %{dreg: dreg, value: bin}}
   end
 
-  defp normalize_addr({a, b, c, d}) when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255,
-    do: {<<a, b, c, d>>, :ip}
+  defp normalize_addr({a, b, c, d})
+       when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255,
+       do: {<<a, b, c, d>>, :ip}
 
   defp normalize_addr({a, b, c, d, e, f, g, h})
        when a in 0..0xFFFF and b in 0..0xFFFF and c in 0..0xFFFF and d in 0..0xFFFF and

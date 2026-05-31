@@ -67,6 +67,7 @@ defmodule Linx.Netfilter.RulesetTest do
   describe "add_table!/4" do
     test "raises on duplicate" do
       rs = Ruleset.new() |> Ruleset.add_table!(:inet, "x")
+
       assert_raise ArgumentError, ~r/duplicate_table/, fn ->
         Ruleset.add_table!(rs, :inet, "x")
       end

@@ -24,7 +24,7 @@ defmodule Linx.Netfilter.Verdict do
 
   `:reject` is not a verdict — it's a statement that constructs an
   ICMP/TCP-RST/ICMPX response *then* drops. Construct it via
-  `Linx.Netfilter.Expr.reject` (N2).
+  `Linx.Netfilter.Expr.reject`.
 
   ## Construction
 
@@ -47,7 +47,8 @@ defmodule Linx.Netfilter.Verdict do
   queue numbers. The bang variant raises `ArgumentError`.
 
   Wire encoding (the integer codes the kernel expects in
-  `NFT_DATA_VERDICT`) is N2's concern — this struct is pure data.
+  `NFT_DATA_VERDICT`) is handled elsewhere — this struct is pure
+  data.
 
   ## References
 
@@ -155,8 +156,11 @@ defmodule Linx.Netfilter.Verdict do
   """
   @spec valid?(t()) :: boolean()
   def valid?(%__MODULE__{kind: k, target: nil}) when k in @simple_kinds, do: true
-  def valid?(%__MODULE__{kind: k, target: t}) when k in [:jump, :goto] and is_binary(t) and t != "",
-    do: true
+
+  def valid?(%__MODULE__{kind: k, target: t})
+      when k in [:jump, :goto] and is_binary(t) and t != "",
+      do: true
+
   def valid?(%__MODULE__{kind: :queue, target: n}) when is_integer(n) and n >= 0, do: true
   def valid?(_), do: false
 

@@ -15,8 +15,8 @@ defmodule Linx.Netfilter.Map do
 
   Same as `Linx.Netfilter.Set`, plus:
 
-    * `:data_type` — value-type atom. The basic atomic types,
-      `:verdict`, or (N4) a concatenation.
+    * `:data_type` — value-type atom. The basic atomic types or
+      `:verdict`. Concatenations are not yet implemented.
 
   ## Construction
 
@@ -233,4 +233,11 @@ defmodule Linx.Netfilter.Map do
 
   defp validate_pos_int_or_nil(field, other),
     do: {:error, {:bad_map, {:bad_field, field, other}}}
+
+  defimpl Inspect do
+    def inspect(%Linx.Netfilter.Map{} = m, _opts) do
+      "#Linx.Netfilter.Map<#{m.name}(#{m.key_type}→#{m.data_type}): " <>
+        "#{length(m.elements)} elements>"
+    end
+  end
 end

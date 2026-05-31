@@ -6,7 +6,7 @@ defmodule Linx.NFT.ParserTest do
   defp parse!(source, opts \\ []) do
     {:ok, tokens} = Tokenizer.tokenize(source, opts)
 
-    case Parser.parse(tokens, [file: Keyword.get(opts, :file, "nofile"), source: source]) do
+    case Parser.parse(tokens, file: Keyword.get(opts, :file, "nofile"), source: source) do
       {:ok, items} -> items
       {:error, err} -> flunk("expected ok, got error: #{Exception.message(err)}")
     end
@@ -14,7 +14,7 @@ defmodule Linx.NFT.ParserTest do
 
   defp parse_err(source, opts \\ []) do
     {:ok, tokens} = Tokenizer.tokenize(source, opts)
-    {:error, err} = Parser.parse(tokens, [file: Keyword.get(opts, :file, "nofile"), source: source])
+    {:error, err} = Parser.parse(tokens, file: Keyword.get(opts, :file, "nofile"), source: source)
     err
   end
 
@@ -160,7 +160,8 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:payload, :ip, :saddr, _}, :eq, {:address, :cidr_v4, "10.0.0.0/8", _}, _},
+               {:match, {:payload, :ip, :saddr, _}, :eq, {:address, :cidr_v4, "10.0.0.0/8", _},
+                _},
                {:verdict, :drop, _}
              ] = stmts
     end
@@ -257,7 +258,8 @@ defmodule Linx.NFT.ParserTest do
 
       assert [
                {:match, {:ct, :state, _}, :eq,
-                {:set_inline, [{:identifier, "established", _}, {:identifier, "related", _}], _}, _},
+                {:set_inline, [{:identifier, "established", _}, {:identifier, "related", _}], _},
+                _},
                {:verdict, :accept, _}
              ] = stmts
     end
@@ -386,6 +388,7 @@ defmodule Linx.NFT.ParserTest do
       """
 
       assert [{:table, _, _, [{:set, _, opts, _}], _}] = parse!(src)
+
       assert [
                {:address, :ipv4, "10.0.0.1", _},
                {:address, :ipv4, "10.0.0.2", _}
@@ -447,8 +450,8 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, :inet, "appliance", body, _}] = parse!(src)
       assert length(body) == 2
 
-      [{:chain, "input", input_opts, input_rules, _},
-       {:chain, "forward", forward_opts, _, _}] = body
+      [{:chain, "input", input_opts, input_rules, _}, {:chain, "forward", forward_opts, _, _}] =
+        body
 
       assert {:type, :filter} in input_opts
       assert {:hook, :input} in input_opts

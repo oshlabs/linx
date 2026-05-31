@@ -23,7 +23,7 @@ sections in the source when interpretation is non-obvious.
   meaningful inside a container.
 - **`uts_namespaces(7)`**, **`ipc_namespaces(7)`** — analogous
   references for the UTS / IPC subtrees.
-- **`setns(2)`** — the syscall the S3 NIF wraps for cross-namespace
+- **`setns(2)`** — the syscall the cross-namespace NIF wraps for
   reads and writes. Particularly the "Description" of valid
   namespace types and the "Notes" on what passing `0` for the
   second argument means (autodetect from the file's type).
@@ -58,18 +58,18 @@ sections in the source when interpretation is non-obvious.
   conf-file layer (not in Linx).
 - **`nerves_system_*` defconfigs** — for the Nerves use case, the
   set of `CONFIG_*` kernel options that determines which sysctls
-  exist on a given device. `Linx.Sysctl.list/0` (S2) is the way to
+  exist on a given device. `Linx.Sysctl.list/0` is the way to
   discover what's actually present at runtime.
 
 ## In-repo cross-references
 
-- `docs/mount/PLAN.md` — the `:in :: :self | {:pid, n} | {:path, p}`
+- `Linx.Mount` — the `:in :: :self | {:pid, n} | {:path, p}`
   option shape and the setns-on-a-throwaway-pthread pattern.
-  `Linx.Sysctl`'s S3 NIF is structurally identical.
+  `Linx.Sysctl`'s cross-namespace NIF is structurally identical.
 - `lib/linx/mount.ex` and `c_src/linx_mount.c` — the precedent the
-  S3 implementation will mirror end-to-end.
-- `docs/user/PLAN.md` — the pure-Elixir-procfs precedent for S0–S2
+  cross-namespace implementation mirrors end-to-end.
+- `Linx.User` — the pure-Elixir-procfs precedent
   (no NIF, no Port).
 - `lib/linx/cgroup.ex` — another pure-procfs subsystem, useful as
   a reference for `%Linx.Cgroup.Error{}`-style structured errors
-  that `Linx.Sysctl.Error` will mirror in S1.
+  that `Linx.Sysctl.Error` mirrors.

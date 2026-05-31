@@ -5,23 +5,26 @@ defmodule Linx.Netfilter.Set do
 
   Sets are the kernel's high-performance match primitive: a rule
   saying "if source IP is in @blocklist drop" hashes once into the
-  set rather than scanning a hundred individual rules. N4 adds
-  concatenations, dynamic sets, and intervals.
+  set rather than scanning a hundred individual rules.
+  Concatenations, dynamic sets, and intervals are not yet
+  implemented (see `docs/netfilter/DESIGN.md`).
 
   ## Fields
 
     * `:name` — set name (unique within the table).
     * `:table` — owning table's name; `nil` for free-standing sets.
-    * `:key_type` — element-type atom. N1 accepts the basic atomic
-      types: `:ipv4_addr`, `:ipv6_addr`, `:ether_addr`,
-      `:inet_proto`, `:inet_service`, `:mark`, `:ifname`. N4 adds
-      concatenations (`{:concat, [type1, type2, ...]}`).
+    * `:key_type` — element-type atom. The basic atomic types are
+      accepted: `:ipv4_addr`, `:ipv6_addr`, `:ether_addr`,
+      `:inet_proto`, `:inet_service`, `:mark`, `:ifname`.
+      Concatenations (`{:concat, [type1, type2, ...]}`) are not yet
+      implemented.
     * `:flags` — list. Currently accepted: `:constant`,
       `:interval`, `:timeout`, `:dynamic`, `:auto_merge`,
-      `:anonymous`. Behaviour of the timeout / dynamic / interval
-      flags lands fully with N4; the value-type slot is here today.
+      `:anonymous`. The timeout / dynamic / interval flags are not
+      yet fully implemented; the value-type slot is here today.
     * `:elements` — list of element values matching `:key_type`.
-      Element-type validation is N1 (basic check) → N4 (strict).
+      Element-type validation is a basic check; strict validation
+      is not yet implemented.
     * `:timeout` — default element lifetime in ms; `nil` for no
       timeout (default).
     * `:gc_interval` — kernel's gc cadence in ms; `nil` to let the
@@ -190,29 +193,42 @@ defmodule Linx.Netfilter.Set do
 
   defp validate_pos_int_or_nil(field, other),
     do: {:error, {:bad_set, {:bad_field, field, other}}}
+
+  defimpl Inspect do
+    def inspect(%Linx.Netfilter.Set{} = s, _opts) do
+      "#Linx.Netfilter.Set<#{s.name}(#{s.key_type}): #{length(s.elements)} elements>"
+    end
+  end
 end
 
 defmodule Linx.Netfilter.Set.Element do
   @moduledoc false
 
-  # Loose element-shape checking. The wire codec (N4) will do
-  # strict validation when it actually serialises; N1's job is just
-  # to catch obvious mismatches at construction time.
+  # Loose element-shape checking — just catches obvious mismatches
+  # at construction time. Strict validation is not yet implemented.
 
   def check(el, :ipv4_addr) do
     cond do
-      is_binary(el) and byte_size(el) == 4 -> :ok
+      is_binary(el) and byte_size(el) == 4 ->
+        :ok
+
       match?({a, b, c, d} when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255, el) ->
         :ok
-      is_binary(el) -> :ok  # textual "1.2.3.4" form — accepted, parsed later
-      true -> {:error, {:not_ipv4, el}}
+
+      # textual "1.2.3.4" form — accepted, parsed later
+      is_binary(el) ->
+        :ok
+
+      true ->
+        {:error, {:not_ipv4, el}}
     end
   end
 
   def check(el, :ipv6_addr) do
     cond do
       is_binary(el) and byte_size(el) == 16 -> :ok
-      is_binary(el) -> :ok  # textual "::1" form
+      # textual "::1" form
+      is_binary(el) -> :ok
       true -> {:error, {:not_ipv6, el}}
     end
   end
@@ -220,7 +236,8 @@ defmodule Linx.Netfilter.Set.Element do
   def check(el, :ether_addr) do
     cond do
       is_binary(el) and byte_size(el) == 6 -> :ok
-      is_binary(el) -> :ok  # textual "aa:bb:..." form
+      # textual "aa:bb:..." form
+      is_binary(el) -> :ok
       true -> {:error, {:not_ether, el}}
     end
   end
@@ -230,6 +247,7 @@ defmodule Linx.Netfilter.Set.Element do
   def check(el, :inet_proto), do: {:error, {:not_inet_proto, el}}
 
   def check(el, :inet_service) when is_integer(el) and el in 0..65_535, do: :ok
+
   def check({lo, hi}, :inet_service)
       when is_integer(lo) and is_integer(hi) and lo in 0..65_535 and hi in 0..65_535,
       do: :ok

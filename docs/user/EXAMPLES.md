@@ -10,12 +10,6 @@ process's `/proc/<pid>/...`. **Write** operations need either
 *or* a single-line identity map that the kernel allows for
 unprivileged callers.
 
-> ✅ **All foundation milestones shipped (U0–U2).** Scaffolding,
-> the write side, the read side, the `setup_maps/2` convenience,
-> and the `%Linx.User.Error{}` + `%Linx.User.Map{}` value types.
-> See `PLAN.md` for what was built and `COVERAGE.md` for what's
-> deferred.
-
 ## Detecting user-namespace support
 
 ```elixir
@@ -97,8 +91,8 @@ Per `user_namespaces(7)`: an unprivileged caller (no
 the namespace still permits `setgroups(2)`. Writing `"deny"` to
 `/proc/<pid>/setgroups` first is the kernel-mandated dance.
 Privileged callers can skip it, but the call is idempotent and
-costless — so the canonical sequence (and the eventual
-`setup_maps/2` convenience in U2) always does the deny first.
+costless — so the canonical sequence (and the
+`setup_maps/2` convenience) always does the deny first.
 
 ```elixir
 # Skip the deny only if you're sure you have CAP_SETGID in the

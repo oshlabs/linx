@@ -14,7 +14,7 @@ defmodule Linx.Netfilter.Flowtable do
     * `:name` — flowtable name (unique within the table).
     * `:table` — owning table's name.
     * `:hook` — kernel-side, flowtables can only attach to the
-      forward / ingress hooks; N1 stores whatever you set.
+      forward / ingress hooks; Linx stores whatever you set.
     * `:priority` — integer or named atom; same shape as `Chain`'s
       priority.
     * `:devices` — list of interface name strings.
@@ -75,7 +75,9 @@ defmodule Linx.Netfilter.Flowtable do
   @spec new!(String.t(), keyword()) :: t()
   def new!(name, opts \\ []) do
     case new(name, opts) do
-      {:ok, ft} -> ft
+      {:ok, ft} ->
+        ft
+
       {:error, {:bad_flowtable, reason}} ->
         raise ArgumentError, "invalid flowtable: #{inspect(reason)}"
     end

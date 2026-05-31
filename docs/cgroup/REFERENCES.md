@@ -32,7 +32,7 @@ sections in the source when interpretation is non-obvious.
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — the checkpoint protocol that
+- `Linx.Process` — the checkpoint protocol that
   `Linx.Cgroup.add_process/2` composes with.
 - `lib/linx/netlink/error.ex` — pattern for `Linx.Cgroup.Error`'s
   shape and `Exception` impl.
@@ -42,6 +42,5 @@ sections in the source when interpretation is non-obvious.
 `silo/lib/cgroup.ex` is the predecessor implementation that informed
 this design — the surface verbs, the curated stats set, the
 file-I/O-only approach all carry over. The key differences vs.
-silo's version are documented in `PLAN.md`'s "What needs to change
-for Linx" reasoning (no baked-in parent path, struct errors, struct
+silo's version are documented in Linx's design rationale (no baked-in parent path, struct errors, struct
 stats, typed setters).

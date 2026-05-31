@@ -85,7 +85,7 @@ defmodule Linx.TtyTest do
   end
 
   describe "attach/2 session-running guard" do
-    test "refuses with :session_terminated when the workload has already exited" do
+    test "refuses with :no_process when the workload has already exited" do
       # /bin/true exits immediately on proceed. After we observe the
       # :exited event, info/1 reports stage = :exited; attach should
       # refuse rather than wedge.
@@ -94,66 +94,62 @@ defmodule Linx.TtyTest do
       :ok = Linx.Process.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :session_terminated} = Tty.attach(:group_leader, session)
-      assert {:error, :session_terminated} = Tty.attach(:controlling, session)
+      assert {:error, :no_process} = Tty.attach(:group_leader, session)
+      assert {:error, :no_process} = Tty.attach(:controlling, session)
     end
 
-    test "refuses with :session_ended when the session pid is gone" do
+    test "refuses with :no_process when the session pid is gone" do
       # A non-Linx-Process pid that exits immediately. info/1 catches
-      # the GenServer.call exit and returns :session_ended.
+      # the GenServer.call exit and returns :no_process.
       dead_pid = spawn(fn -> :ok end)
       ref = Process.monitor(dead_pid)
       assert_receive {:DOWN, ^ref, :process, ^dead_pid, _}, 500
 
-      assert {:error, :session_ended} = Tty.attach(:group_leader, dead_pid)
-      assert {:error, :session_ended} = Tty.attach(:controlling, dead_pid)
+      assert {:error, :no_process} = Tty.attach(:group_leader, dead_pid)
+      assert {:error, :no_process} = Tty.attach(:controlling, dead_pid)
     end
 
-    test "format_error/1 explains :session_terminated" do
-      msg = Tty.format_error(:session_terminated)
+    test "format_error/1 explains :no_process" do
+      msg = Tty.format_error(:no_process)
       assert is_binary(msg)
       assert msg =~ "terminal"
-      assert msg =~ "Linx.Process.spawn"
-    end
-
-    test "format_error/1 explains :session_ended" do
-      msg = Tty.format_error(:session_ended)
-      assert is_binary(msg)
       assert msg =~ "Linx.Process.spawn"
     end
   end
 
   describe "NIF scaffolding" do
-    test "version/0 reflects the running milestone" do
+    test "version/0 returns the NIF identifier" do
       v = Tty.version()
       assert is_binary(v)
-      assert String.starts_with?(v, "linx_tty ")
-      # T3 marker -- bumped per milestone in c_src/linx_tty.c.
-      assert String.ends_with?(v, "(T3)")
+      assert v == "linx_tty"
     end
   end
 
   describe "window_size/1 (TIOCGWINSZ)" do
     test "returns ENOTTY on a non-tty fd" do
       # fd 0 in `mix test` is the BEAM's stdin, generally not a tty.
-      assert {:error, {:ioctl, :enotty}} = Tty.window_size(0)
+      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :enotty}} = Tty.window_size(0)
     end
 
     test "returns EBADF on a closed/invalid fd" do
       # fd 99999 is far past anything ExUnit holds open.
-      assert {:error, {:ioctl, :ebadf}} = Tty.window_size(99_999)
+      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :ebadf}} = Tty.window_size(99_999)
     end
   end
 
   describe "set_window_size/2 (TIOCSWINSZ)" do
     test "returns ENOTTY on a non-tty fd" do
       ws = %Linx.Tty.WindowSize{rows: 24, cols: 80, xpixel: 0, ypixel: 0}
-      assert {:error, {:ioctl, :enotty}} = Tty.set_window_size(0, ws)
+
+      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :enotty}} =
+               Tty.set_window_size(0, ws)
     end
 
     test "rejects window dimensions that wouldn't fit in struct winsize" do
       ws = %Linx.Tty.WindowSize{rows: 24, cols: 80, xpixel: 0, ypixel: 70_000}
-      assert {:error, {:ioctl, :einval}} = Tty.set_window_size(0, ws)
+
+      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :einval}} =
+               Tty.set_window_size(0, ws)
     end
   end
 
@@ -177,9 +173,9 @@ defmodule Linx.TtyTest do
           # And it's idempotent against the already-closed fd.
           assert :ok =
                    Tty.restore_and_close(fd, saved) or
-                     match?({:error, {_, _}}, Tty.restore_and_close(fd, saved))
+                     match?({:error, %Linx.Tty.Error{}}, Tty.restore_and_close(fd, saved))
 
-        {:error, {:open, :enxio}} ->
+        {:error, %Linx.Tty.Error{operation: :open, errno: :enxio}} ->
           :ok
 
         other ->
@@ -195,7 +191,7 @@ defmodule Linx.TtyTest do
           assert inspect(saved) == "#Linx.Tty.Saved<…>"
           assert :ok = Tty.restore_and_close(fd, saved)
 
-        {:error, {:open, :enxio}} ->
+        {:error, %Linx.Tty.Error{operation: :open, errno: :enxio}} ->
           :ok
       end
     end
@@ -293,7 +289,7 @@ defmodule Linx.TtyTest do
       assert {:ok, {:exited, 0}} = Linx.Tty.__pump__(attach_port, session)
     end
 
-    test "propagates pre-exec errors as {:error, %{errno, stage}}" do
+    test "propagates pre-exec errors as {:error, %Linx.Process.Error{}}" do
       # execve fails on a missing binary; the session emits
       # {:linx_process, :error, _, :execve}. The pump translates that
       # into the public error shape.
@@ -304,7 +300,7 @@ defmodule Linx.TtyTest do
       {:ok, {_user_fd, attach_fd}} = Linx.Tty.Native.socketpair()
       attach_port = :erlang.open_port({:fd, attach_fd, attach_fd}, [:binary, :stream])
 
-      assert {:error, %{errno: 2, stage: :execve}} =
+      assert {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}} =
                Linx.Tty.__pump__(attach_port, session)
     end
   end
@@ -404,7 +400,7 @@ defmodule Linx.TtyTest do
       gl = fake_gl(self())
       reader = spawn_link(fn -> Process.sleep(:infinity) end)
 
-      assert {:error, %{errno: 2, stage: :execve}} =
+      assert {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}} =
                Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil)
     end
 

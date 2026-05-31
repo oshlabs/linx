@@ -25,6 +25,19 @@ defmodule Linx.Netlink.Rtnl.Rule do
   the effective table — taking `:table_ext` when present, falling back to
   `:table`.
 
+  ## Example
+
+      {:ok, sock} = Rtnl.open()
+
+      :ok = Rule.add(sock, from: "10.0.0.0/24", table: 100)
+      :ok = Rule.add(sock, fwmark: 0x1, table: 100, priority: 200)
+
+      {:ok, rules} = Rule.list(sock)
+      # => [..., #Linx.Netlink.Rtnl.Rule<priority=200 fwmark=0x1 table=100>,
+      #     #Linx.Netlink.Rtnl.Rule<from=10.0.0.0/24 table=100>]
+
+      :ok = Rule.delete(sock, from: "10.0.0.0/24", table: 100)
+
   The wire format — `struct fib_rule_hdr` and the `FRA_*` attributes
   (`include/uapi/linux/fib_rules.h`) — is declared with the
   `Linx.Netlink.Codec` DSL.

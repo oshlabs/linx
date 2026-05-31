@@ -27,8 +27,7 @@ defmodule Linx.Seccomp do
       facility at all) and `arch/0` (which architecture we're
       building filters for).
 
-    * **Filter construction.** Two layers (per
-      `docs/seccomp/PLAN.md` D7):
+    * **Filter construction.** Two layers:
 
       - **Sugar:** `allow_list/2` ("only these syscalls"),
         `deny_list/2` ("not these"), and the fluent
@@ -42,7 +41,7 @@ defmodule Linx.Seccomp do
         itself built.
 
     * **Install.** `install/2` is checkpoint-bound, the same shape
-      as `Linx.Capabilities.drop_bounding/2` — it's the K2 commit
+      as `Linx.Capabilities.drop_bounding/2` — the same commit
       pattern, because the kernel forbids cross-thread seccomp
       installation. The child agent in `linx_process.c` does the
       actual `seccomp(2)` call at the parked checkpoint.
@@ -53,8 +52,6 @@ defmodule Linx.Seccomp do
   natural home is the **Silo** project that builds on Linx.
 
   ## Motivating composition
-
-  Lands fully at S2 (currently in flight):
 
       {:ok, c} = Linx.Process.spawn(argv: ["/usr/sbin/nginx"],
                                     no_new_privs: true)
@@ -74,20 +71,16 @@ defmodule Linx.Seccomp do
   A bug that tries `execve(2)` (not on the list) kills the process;
   the kernel never enters `do_execve`.
 
-  ## Status
+  ## Forward compatibility
 
-  S0 + S1 + S2 shipped: detection (`supported?/0`, `arch/0`),
-  constants (`Linx.Seccomp.Constants`), the per-arch syscall table
-  (`Linx.Seccomp.Syscalls`), `%Linx.Seccomp.Filter{}`,
-  `%Linx.Seccomp.Error{}`, the build verbs (`allow_list/2`,
-  `deny_list/2`, `from_rules/1`, `to_rules/1`),
-  `Linx.Seccomp.Builder`, and `install/2` against a parked
-  `Linx.Process` session (with the matching `no_new_privs:` opt on
-  `Linx.Process.spawn/1` / `enter/2`). Per-argument matching
-  (`allow_if/3`) is the deferred S1.5 surface; multi-arch routing
-  and `SECCOMP_USER_NOTIF` are deferred to future work. See
-  `docs/seccomp/PLAN.md` for the design notes and `COVERAGE.md`
-  for the feature matrix.
+  `Linx.Seccomp.Syscalls.from_number/2` returns `:unknown` for a syscall
+  number outside Linx's per-arch table rather than crashing, so decoding
+  a filter that references a newer syscall degrades gracefully.
+  Construction is strict the other way: an unknown syscall *atom* is
+  rejected at build time, since a typo must never silently widen a filter.
+
+  Per-argument matching (`allow_if/3`), multi-arch routing, and
+  `SECCOMP_USER_NOTIF` are deferred to future work.
   """
 
   alias Linx.Seccomp.Builder
@@ -174,7 +167,7 @@ defmodule Linx.Seccomp do
   Convenience for `Linx.Seccomp.Builder.new/0` — start an empty
   builder pipeline.
 
-  ## Example (lands fully with S1)
+  ## Example
 
       Linx.Seccomp.builder()
       |> Linx.Seccomp.Builder.allow(:read)
@@ -191,7 +184,7 @@ defmodule Linx.Seccomp do
   Options:
 
     * `:default` — the action for non-listed syscalls. Defaults to
-      `:kill_process` per `docs/seccomp/PLAN.md` D1: allow-lists are
+      `:kill_process` — allow-lists are
       contracts ("I have enumerated what's safe"); a syscall outside
       is a bug or attack and should fail loudly.
 
@@ -226,7 +219,7 @@ defmodule Linx.Seccomp do
   Options:
 
     * `:default` — the action for non-listed syscalls. Defaults to
-      `:allow` per `docs/seccomp/PLAN.md` D1: deny-lists are
+      `:allow` — deny-lists are
       graceful-degradation shapes (Docker's default profile).
 
     * `:deny_action` — the action for listed syscalls. Defaults to
@@ -269,8 +262,8 @@ defmodule Linx.Seccomp do
   this list shape"; Linx's job starts here.
 
   The filter targets the current host architecture (see `arch/0`).
-  Filters built for one arch don't install on another; per
-  `docs/seccomp/PLAN.md` D5 multi-arch filters are deferred.
+  Filters built for one arch don't install on another; multi-arch
+  filters are deferred.
 
   ## Returns
 
@@ -328,7 +321,7 @@ defmodule Linx.Seccomp do
   end
 
   def from_rules(other) do
-    {:error, {:bad_rules_arg, other}}
+    {:error, {:bad_rules, other}}
   end
 
   @doc """
@@ -369,8 +362,7 @@ defmodule Linx.Seccomp do
   caller didn't pass `no_new_privs: true` to `Linx.Process.spawn/1`
   or because the workload isn't privileged enough to install
   without NNP), the agent sets it automatically before the
-  `seccomp(2)` call — the "be helpful" path per
-  `docs/seccomp/PLAN.md` D2. Callers who want the principled
+  `seccomp(2)` call — the "be helpful" path. Callers who want the principled
   posture should still pass the spawn opt; the auto-set is just a
   fallback so an unprivileged caller who forgot doesn't get a
   confusing `EPERM`.
@@ -381,7 +373,7 @@ defmodule Linx.Seccomp do
       yet. Wait for `{:linx_process, :ready, _}` first.
     * `{:error, :running}` — past `proceed/1`, the child has
       `execve`'d; installing now is too late.
-    * `{:error, :already_terminated}` — the session emitted its
+    * `{:error, :no_process}` — the session emitted its
       terminal event.
 
   Kernel-level install failures arrive asynchronously as
@@ -405,21 +397,21 @@ defmodule Linx.Seccomp do
           | {:error,
              :not_ready
              | :running
-             | :already_terminated}
+             | :no_process}
   def install(session, %Filter{bpf: bpf}) when is_pid(session) and is_binary(bpf) do
     GenServer.call(session, {:seccomp_install, bpf})
   end
 
   # ── Validation helpers ────────────────────────────────────────
-  # Used by from_rules/1 + the sugar verbs. Tagged-tuple errors per
-  # `docs/seccomp/PLAN.md`'s S1 contract.
+  # Used by from_rules/1 + the sugar verbs. Tagged-tuple errors for
+  # caller-side validation (unknown syscall, bad action, duplicate rule).
 
   defp validate_arch(:unsupported), do: {:error, {:unsupported_arch, :unsupported}}
   defp validate_arch(arch) when is_atom(arch), do: :ok
 
   # Walk the rules list, accumulating seen syscalls to detect
   # duplicates. Short-circuits on the first malformed rule / unknown
-  # syscall / duplicate per the PLAN's S1 contract.
+  # syscall / duplicate.
   defp validate_rules(rules, arch) do
     do_validate_rules(rules, arch, MapSet.new())
   end

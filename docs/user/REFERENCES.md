@@ -34,17 +34,17 @@ sections in the source when interpretation is non-obvious.
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — `Linx.Process` namespace machinery; the
+- `Linx.Process` — `Linx.Process` namespace machinery; the
   `:user` namespace and how it's selected at `spawn/1`.
 - `lib/linx/mount/error.ex` — pattern for `Linx.User.Error`'s shape
   and `Exception` impl. (`Linx.Cgroup.Error` is equivalent.)
 
 ## Adjacent userspace tooling (for context, not implementation)
 
-- **`newuidmap(1)` / `newgidmap(1)`** — setuid helpers shipped with
+- **`newuidmap(1)` / `newgidmap(1)`** — setuid helpers distributed with
   the `shadow` / `uidmap` package; let unprivileged callers write
   multi-range maps using `/etc/subuid` and `/etc/subgid`. **Out of
-  scope for U0–U2**; potential follow-up.
+  scope**; potential follow-up.
 - **`unshare(1)`** — userspace tool that does essentially what
   `Linx.Process.spawn(namespaces: [:user, ...])` plus
   `Linx.User.setup_maps/2` will do together.

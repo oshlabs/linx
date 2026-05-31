@@ -10,6 +10,22 @@ defmodule Linx.Netlink.Rtnl.Route do
   Address-typed fields (`:dst`, `:gateway`) on a decoded `%Route{}` are
   `Linx.IP` structs; verbs accept strings or `Linx.IP`s.
 
+  ## Example
+
+      {:ok, sock} = Rtnl.open()
+
+      :ok = Route.add_default(sock, "10.0.0.1")
+      :ok = Route.add(sock, "192.168.9.0", 24, "10.0.0.254")
+
+      {:ok, routes} = Route.list(sock)
+      # => [#Linx.Netlink.Rtnl.Route<default via 10.0.0.1 oif=2>,
+      #     #Linx.Netlink.Rtnl.Route<192.168.9.0/24 via 10.0.0.254 oif=2>]
+
+      # Which route would win for a given destination?
+      {:ok, route} = Route.get(sock, "192.168.9.7")
+
+      :ok = Route.delete_default(sock, "10.0.0.1")
+
   The wire format — `struct rtmsg` and the `RTA_*` attributes
   (`include/uapi/linux/rtnetlink.h`) — is declared with the
   `Linx.Netlink.Codec` DSL.

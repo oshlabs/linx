@@ -81,7 +81,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#define LINX_SYSCTL_VERSION "linx_sysctl 0.1.0 (S3)"
+#define LINX_SYSCTL_VERSION "linx_sysctl"
 
 /* Per-file read cap. Sysctl files are bounded by the kernel; the
  * largest knobs we know of (lists of registered congestion-control

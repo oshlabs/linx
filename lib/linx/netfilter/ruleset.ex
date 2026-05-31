@@ -8,7 +8,7 @@ defmodule Linx.Netfilter.Ruleset do
   pipeline DSL — `new/0`, `add_table/3`, `add_chain/4`,
   `add_rule/4`, `add_set/3`, `add_map/3`, `add_object/3`,
   `add_flowtable/3` — is how authoring-time code builds one. The
-  `~NFT` sigil (N8) compiles to the same DSL calls.
+  `~NFT` sigil compiles to the same DSL calls.
 
   ## Fields
 
@@ -210,7 +210,8 @@ defmodule Linx.Netfilter.Ruleset do
   end
 
   @doc "Bang variant."
-  @spec add_rule!(t(), table_ref(), String.t(), Rule.t() | [Rule.expression_input()], keyword()) :: t()
+  @spec add_rule!(t(), table_ref(), String.t(), Rule.t() | [Rule.expression_input()], keyword()) ::
+          t()
   def add_rule!(rs, table_ref, chain_name, rule_or_exprs, opts \\ []) do
     bang(add_rule(rs, table_ref, chain_name, rule_or_exprs, opts))
   end
@@ -328,5 +329,18 @@ defmodule Linx.Netfilter.Ruleset do
   defp bang({:error, reason}) do
     raise ArgumentError,
           "Linx.Netfilter.Ruleset operation failed: #{inspect(reason)}"
+  end
+
+  defimpl Inspect do
+    # Containers summarise rather than dump: a real ruleset can hold
+    # hundreds of rules that would drown a REPL. Pattern-match on the
+    # struct fields if you need the contents.
+    def inspect(%Linx.Netfilter.Ruleset{tables: tables}, _opts) do
+      chains = Enum.flat_map(Map.values(tables), &Map.values(&1.chains))
+      rules = Enum.reduce(chains, 0, fn c, acc -> acc + length(c.rules) end)
+
+      "#Linx.Netfilter.Ruleset<#{map_size(tables)} tables, " <>
+        "#{length(chains)} chains, #{rules} rules>"
+    end
   end
 end

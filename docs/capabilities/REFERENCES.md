@@ -47,19 +47,19 @@ non-obvious.
 - **`capsh(1)`** — interactive shell for inspecting and
   modifying caps. Useful for cross-checking the read side.
 - **`setpriv(1)`** — `util-linux` tool that does
-  drop-before-exec, much like what K2's agent commands
+  drop-before-exec, much like what the agent commands
   implement.
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — the checkpoint protocol that the
-  write side hooks into. K2 adds three new commands to that
+- `Linx.Process` — the checkpoint protocol that the
+  write side hooks into, adding three new commands to that
   protocol.
 - `lib/linx/user/error.ex` — pattern for
   `Linx.Capabilities.Error`'s shape and Exception impl.
 - `lib/linx/process.ex` `await_proceed` and the existing
   checkpoint-window command set (`:proceed`, `:abort`,
-  `:pty_winsize`) — K2 adds to this.
+  `:pty_winsize`) — the write side adds to this.
 
 ## Out of scope — pointers for future work
 

@@ -247,7 +247,7 @@ no buffered-signal dance.
 | Pre-`:ready` | `:ok` — buffered, fires at the checkpoint |
 | `:ready` (parked) | `:ok` — immediate abort |
 | `:running` | `{:error, :running}` — past the line; use `signal/2` |
-| Already terminal | `{:error, :already_terminated}` |
+| Already terminal | `{:error, :no_process}` |
 
 The pre-`:ready` buffering mirrors `signal/2`'s shape — both verbs
 let you express intent before the agent is ready to act on it.
@@ -260,7 +260,7 @@ let you express intent before the agent is ready to act on it.
   cancel the workload cleanly.
 - **Checkpoint-only verification.** A test that wants to confirm
   the namespaces were created correctly without actually running
-  anything in them — e.g. the `Linx.Mount` M4 pivot_root test
+  anything in them — e.g. the `Linx.Mount` pivot_root test
   pivots the child's mount namespace, verifies via mountinfo, and
   aborts.
 - **User-cancellation flow.** A consumer of Linx that's spawning
@@ -428,10 +428,7 @@ iex> P.pty_set_winsize(c, %{rows: 42, cols: 132, xpixel: 0, ypixel: 0})
 :ok
 ```
 
-This is the primitive the [`Linx.Tty`](../tty/) subsystem composes
+This is the primitive the `Linx.Tty` subsystem composes
 with — `Linx.Tty.attach/2` calls `pty_set_winsize/2` automatically at
 entry, seeding the workload with the caller's terminal size.
 
-## Not yet implemented
-
-`info/1` is still a stub. See `PLAN.md` for the roadmap.

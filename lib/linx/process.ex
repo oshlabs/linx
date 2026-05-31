@@ -75,7 +75,7 @@ defmodule Linx.Process do
       connect for `{:connect_unix, _}`, or the PTY slave's `TIOCSCTTY`).
     * `:execve` — `execve(2)` returned (i.e. failed).
     * `:cap_drop_bounding`, `:cap_set_thread`, `:cap_set_ambient` —
-      one of the K2 capability syscalls failed in the child
+      one of the capability syscalls failed in the child
       (`Linx.Capabilities`).
     * `:seccomp_install` — `seccomp(SECCOMP_SET_MODE_FILTER, …)` failed
       in the child (`Linx.Seccomp.install/2`). Common errno is `EINVAL`
@@ -112,17 +112,6 @@ defmodule Linx.Process do
       synthesised by the BEAM-side GenServer on
       `{port, {:exit_status, _}}` when no other terminal has been
       recorded yet, so the owner never hangs.
-
-  ## Status
-
-  P0–P6 shipped: scaffolding, `spawn/1` with the checkpoint protocol,
-  `signal/2` / `wait/1`, `enter/2` (setns + fork into a target's
-  namespaces), PTY mode (`stdio: :pty` + `pty_master/1` /
-  `pty_write/2` / `pty_set_winsize/3`), `abort/1`, `host_pid/1`. The
-  K2 cap commands (`drop_bounding/2` / `set_thread_sets/2` /
-  `set_ambient/2`) live in `Linx.Capabilities` but hook into this
-  module's checkpoint window. `info/1` is still a stub. See
-  `docs/process/PLAN.md` for the roadmap.
   """
 
   use GenServer
@@ -132,7 +121,7 @@ defmodule Linx.Process do
   # The pid that `spawn/1` and `enter/2` return is the GenServer pid.
   @type t :: pid()
 
-  # The kinds of namespace the child may be cloned into (P1) or join (P3).
+  # The kinds of namespace the child may be cloned into or join.
   # Each maps to a CLONE_NEW* flag in the C agent.
   @type namespace :: :net | :mount | :pid | :uts | :ipc | :user | :cgroup | :time
 
@@ -281,7 +270,7 @@ defmodule Linx.Process do
 
   Returns `:ok`, `{:error, :not_ready}` if the agent has not yet
   reported `:ready` (i.e. there is no checkpoint to advance past),
-  or `{:error, :already_terminated}` if the workload has already
+  or `{:error, :no_process}` if the workload has already
   reached a terminal stage — calling `proceed/1` on a session
   whose workload has already exited / aborted / errored is a
   no-op the GenServer refuses cleanly rather than sending a
@@ -298,7 +287,7 @@ defmodule Linx.Process do
   Signals delivered before the workload has `execve`'d (between
   `spawn/1` and `proceed/1`, or before the agent emits `:running`) are
   buffered and flushed in order at the moment of `:running`. Signals
-  delivered after the workload has exited return `{:error, :ended}`.
+  delivered after the workload has exited return `{:error, :no_process}`.
 
   This is fire-and-forget — `signal/2` returns as soon as the signal
   has been handed to the agent (or buffered), without waiting for the
@@ -344,13 +333,13 @@ defmodule Linx.Process do
     * **`:ready` (parked)** — primary case; immediate abort.
     * **`:running`** — `{:error, :running}`. The workload is
       past the checkpoint; use `signal/2` to terminate it.
-    * **Already terminal** — `{:error, :already_terminated}`.
+    * **Already terminal** — `{:error, :no_process}`.
 
   Fire-and-forget — `abort/1` returns as soon as the agent has
   the request. Use `wait/1` to block on the `:aborted` terminal
   event.
   """
-  @spec abort(t()) :: :ok | {:error, :running | :already_terminated}
+  @spec abort(t()) :: :ok | {:error, :running | :no_process}
   def abort(session) when is_pid(session) do
     GenServer.call(session, :abort)
   end
@@ -407,11 +396,12 @@ defmodule Linx.Process do
     * `{:ok, {:signaled, signum}}` — workload was killed by `signum`.
     * `{:ok, :aborted}` — `abort/1` was called from the checkpoint;
       the workload never ran.
-    * `{:error, %{errno: errno, stage: stage}}` — a pre-exec failure;
-      the workload never ran.
+    * `{:error, %Linx.Process.Error{}}` — a pre-exec failure; the
+      workload never ran. (The same failure also reaches the owner as
+      the positional event `{:linx_process, :error, errno, stage}`.)
     * `{:error, :timeout}` — `timeout` elapsed before any terminal
       event arrived. The session is still alive; call `wait/1` again.
-    * `{:error, :session_ended}` — the session GenServer is gone (e.g.
+    * `{:error, :no_process}` — the session GenServer is gone (e.g.
       the agent crashed before reporting a terminal event).
 
   Multiple processes may wait on the same session concurrently; all
@@ -426,7 +416,7 @@ defmodule Linx.Process do
     GenServer.call(session, :wait, timeout)
   catch
     :exit, {:timeout, _} -> {:error, :timeout}
-    :exit, _ -> {:error, :session_ended}
+    :exit, _ -> {:error, :no_process}
   end
 
   @doc """
@@ -452,7 +442,7 @@ defmodule Linx.Process do
   def info(session) when is_pid(session) do
     GenServer.call(session, :info)
   catch
-    :exit, _ -> {:error, :session_ended}
+    :exit, _ -> {:error, :no_process}
   end
 
   @doc """
@@ -460,7 +450,7 @@ defmodule Linx.Process do
   input on its stdin.
 
   Returns `{:error, :no_pty}` if the session was not started with
-  `stdio: :pty`; `{:error, :session_ended}` if the workload has already
+  `stdio: :pty`; `{:error, :no_process}` if the workload has already
   terminated (reached any of `:exited` / `:signaled` / `:aborted` /
   `:errored`) — the call refuses immediately rather than firing a
   Port.command at an agent that's been collected or is about to be.
@@ -488,7 +478,7 @@ defmodule Linx.Process do
   back if the ioctl fails.
 
   Returns `{:error, :no_pty}` if the session wasn't started with
-  `stdio: :pty`; `{:error, :session_ended}` if the workload has
+  `stdio: :pty`; `{:error, :no_process}` if the workload has
   already terminated.
   """
   @spec pty_set_winsize(
@@ -570,7 +560,7 @@ defmodule Linx.Process do
       :error -> {:ok, false}
       {:ok, true} -> {:ok, true}
       {:ok, false} -> {:ok, false}
-      {:ok, _other} -> {:error, :bad_no_new_privs}
+      {:ok, other} -> {:error, {:bad_no_new_privs, other}}
     end
   end
 
@@ -579,7 +569,7 @@ defmodule Linx.Process do
       [head | _] = argv when is_binary(head) ->
         if Enum.all?(argv, &is_binary/1),
           do: {:ok, argv},
-          else: {:error, :bad_argv}
+          else: {:error, {:bad_argv, argv}}
 
       _ ->
         {:error, :argv_required}
@@ -593,8 +583,8 @@ defmodule Linx.Process do
           do: {:ok, list},
           else: {:error, {:bad_namespaces, list -- @valid_namespaces}}
 
-      _ ->
-        {:error, :bad_namespaces}
+      other ->
+        {:error, {:bad_namespaces, {:not_a_list, other}}}
     end
   end
 
@@ -611,8 +601,8 @@ defmodule Linx.Process do
           do: {:ok, list},
           else: {:error, {:bad_namespaces, list -- @valid_namespaces}}
 
-      _ ->
-        {:error, :bad_namespaces}
+      other ->
+        {:error, {:bad_namespaces, {:not_a_list, other}}}
     end
   end
 
@@ -624,10 +614,10 @@ defmodule Linx.Process do
       {:ok, list} when is_list(list) ->
         if Enum.all?(list, &is_binary/1),
           do: {:ok, list},
-          else: {:error, :bad_env}
+          else: {:error, {:bad_env, {:not_all_binaries, list}}}
 
-      _ ->
-        {:error, :bad_env}
+      other ->
+        {:error, {:bad_env, {:not_a_list, other}}}
     end
   end
 
@@ -640,7 +630,7 @@ defmodule Linx.Process do
       :error -> {:ok, nil}
       {:ok, atom} when atom in @valid_stdio_atoms -> {:ok, atom}
       {:ok, list} when is_list(list) -> validate_per_fd_stdio(list)
-      _ -> {:error, :bad_stdio}
+      other -> {:error, {:bad_stdio, other}}
     end
   end
 
@@ -652,8 +642,8 @@ defmodule Linx.Process do
           {:error, _} = err -> {:halt, err}
         end
 
-      _other, _ ->
-        {:halt, {:error, :bad_stdio}}
+      other, _ ->
+        {:halt, {:error, {:bad_stdio, {:bad_fd_entry, other}}}}
     end)
     |> case do
       {:ok, pairs} -> {:ok, Enum.reverse(pairs)}
@@ -666,7 +656,7 @@ defmodule Linx.Process do
   defp validate_per_fd_directive({:connect_unix, path}) when is_binary(path),
     do: :ok
 
-  defp validate_per_fd_directive(_), do: {:error, :bad_stdio}
+  defp validate_per_fd_directive(other), do: {:error, {:bad_stdio, {:bad_directive, other}}}
 
   # --- GenServer ------------------------------------------------------------
 
@@ -718,7 +708,7 @@ defmodule Linx.Process do
   # :ready) and Port.command lands on a collected agent.
   def handle_call(:proceed, _from, %{result: result} = state)
       when result != nil do
-    {:reply, {:error, :already_terminated}, state}
+    {:reply, {:error, :no_process}, state}
   end
 
   def handle_call(:proceed, _from, %{port: port, child_pid: child_pid} = state)
@@ -733,7 +723,7 @@ defmodule Linx.Process do
 
   # Terminal event already arrived -- nothing to abort.
   def handle_call(:abort, _from, %{result: result} = state) when result != nil do
-    {:reply, {:error, :already_terminated}, state}
+    {:reply, {:error, :no_process}, state}
   end
 
   # Already past the checkpoint -- abort is only valid pre-execve.
@@ -755,10 +745,10 @@ defmodule Linx.Process do
     {:reply, :ok, %{state | pending_abort?: true}}
   end
 
-  # K2 -- Linx.Capabilities write verbs. Three commands, all only
+  # Linx.Capabilities write verbs. Three commands, all only
   # valid at the :ready checkpoint (between `:ready` and `proceed/1` /
   # `abort/1`). State-machine guards mirror what's documented on the
-  # Linx.Capabilities verbs: :already_terminated > :running >
+  # Linx.Capabilities verbs: :no_process > :running >
   # :not_ready > forward.
   for cmd_arity <- [{:cap_drop_bounding, 2}, {:cap_set_ambient, 2}, {:cap_set_thread, 4}] do
     {cmd, arity} = cmd_arity
@@ -766,12 +756,12 @@ defmodule Linx.Process do
     # Terminal first.
     def handle_call({unquote(cmd), _} = _call, _from, %{result: result} = state)
         when result != nil and unquote(arity) == 2 do
-      {:reply, {:error, :already_terminated}, state}
+      {:reply, {:error, :no_process}, state}
     end
 
     def handle_call({unquote(cmd), _, _, _} = _call, _from, %{result: result} = state)
         when result != nil and unquote(arity) == 4 do
-      {:reply, {:error, :already_terminated}, state}
+      {:reply, {:error, :no_process}, state}
     end
 
     # Past the checkpoint -- the agent is no longer in await_proceed.
@@ -826,8 +816,8 @@ defmodule Linx.Process do
     {:reply, :ok, state}
   end
 
-  # S2 -- Linx.Seccomp.install/2. Same state-machine guards as the
-  # K2 cap commands (:already_terminated > :running > :not_ready >
+  # Linx.Seccomp.install/2. Same state-machine guards as the
+  # cap commands (:no_process > :running > :not_ready >
   # forward). The wire frame is {:seccomp_install, <<bpf>>}; the
   # agent forwards it verbatim to the child, which sets NNP (if not
   # on) and calls seccomp(SECCOMP_SET_MODE_FILTER) before execve.
@@ -836,7 +826,7 @@ defmodule Linx.Process do
 
   def handle_call({:seccomp_install, _bpf}, _from, %{result: result} = state)
       when result != nil do
-    {:reply, {:error, :already_terminated}, state}
+    {:reply, {:error, :no_process}, state}
   end
 
   def handle_call({:seccomp_install, _bpf}, _from, %{running?: true} = state) do
@@ -884,7 +874,7 @@ defmodule Linx.Process do
   # target.
   def handle_call({:signal, _signum}, _from, %{result: result} = state)
       when result != nil do
-    {:reply, {:error, :ended}, state}
+    {:reply, {:error, :no_process}, state}
   end
 
   # Pre-running: buffer signals; flushed in handle_info on :running.
@@ -916,7 +906,7 @@ defmodule Linx.Process do
   # to be.
   def handle_call({:pty_write, _bytes}, _from, %{result: result} = state)
       when result != nil do
-    {:reply, {:error, :session_ended}, state}
+    {:reply, {:error, :no_process}, state}
   end
 
   def handle_call({:pty_write, bytes}, _from, %{pty?: true, port: port} = state)
@@ -930,7 +920,7 @@ defmodule Linx.Process do
   end
 
   def handle_call({:pty_write, _bytes}, _from, state) do
-    {:reply, {:error, :session_ended}, state}
+    {:reply, {:error, :no_process}, state}
   end
 
   def handle_call(:pty_master, _from, %{pty?: true} = state) do
@@ -947,7 +937,7 @@ defmodule Linx.Process do
   # firing a no-op Port.command at a closing agent.
   def handle_call({:pty_winsize, _ws}, _from, %{result: result} = state)
       when result != nil do
-    {:reply, {:error, :session_ended}, state}
+    {:reply, {:error, :no_process}, state}
   end
 
   def handle_call({:pty_winsize, _ws}, _from, %{pty?: false} = state) do
@@ -955,7 +945,7 @@ defmodule Linx.Process do
   end
 
   def handle_call({:pty_winsize, _ws}, _from, %{port: nil} = state) do
-    {:reply, {:error, :session_ended}, state}
+    {:reply, {:error, :no_process}, state}
   end
 
   def handle_call({:pty_winsize, ws}, _from, %{port: port} = state) do
@@ -973,7 +963,7 @@ defmodule Linx.Process do
   # result) into one stage atom for %Linx.Process.Info{}. Terminal
   # stages win over pre-terminal -- once `result` is set, that's the
   # answer regardless of the other fields.
-  defp compute_stage(%{result: {:exited, _}}),  do: :exited
+  defp compute_stage(%{result: {:exited, _}}), do: :exited
   defp compute_stage(%{result: {:signaled, _}}), do: :signaled
   defp compute_stage(%{result: :aborted}), do: :aborted
   defp compute_stage(%{result: {:error, _}}), do: :errored
@@ -1010,7 +1000,7 @@ defmodule Linx.Process do
     send(state.owner, {:linx_process, :error, code, :agent_died})
 
     {:noreply,
-     finalise(%{state | port: nil}, {:error, %{errno: code, stage: :agent_died}})}
+     finalise(%{state | port: nil}, {:error, Linx.Process.Error.from_agent(code, :agent_died)})}
   end
 
   def handle_info({port, {:exit_status, _code}}, %{port: port} = state) do
@@ -1087,7 +1077,7 @@ defmodule Linx.Process do
 
   defp handle_agent_frame({:error, errno, stage}, state) do
     send(state.owner, {:linx_process, :error, errno, stage})
-    {:noreply, finalise(state, {:error, %{errno: errno, stage: stage}})}
+    {:noreply, finalise(state, {:error, Linx.Process.Error.from_agent(errno, stage)})}
   end
 
   defp handle_agent_frame({:pty_out, bytes}, state) do
@@ -1102,10 +1092,10 @@ defmodule Linx.Process do
 
   # Any waiters still in the queue when the GenServer goes down -- e.g.
   # the spawn/1 caller dies before a terminal event arrives -- get
-  # :session_ended so they don't sit blocked forever.
+  # :no_process so they don't sit blocked forever.
   @impl true
   def terminate(_reason, state) do
-    Enum.each(state.waiters, &GenServer.reply(&1, {:error, :session_ended}))
+    Enum.each(state.waiters, &GenServer.reply(&1, {:error, :no_process}))
     :ok
   end
 

@@ -45,4 +45,20 @@ defmodule Linx.MACTest do
       assert inspect(~MAC"02:aa:bb:cc:dd:ee") == ~s|~MAC"02:aa:bb:cc:dd:ee"|
     end
   end
+
+  describe "decode/1 (codec entry point)" do
+    test "decodes a 6-byte Ethernet address to a %MAC{}" do
+      assert MAC.decode(<<0x00, 0x11, 0x22, 0x33, 0x44, 0x55>>) ==
+               %MAC{bytes: <<0x00, 0x11, 0x22, 0x33, 0x44, 0x55>>}
+    end
+
+    test "decodes an empty link-layer address to nil (e.g. an INCOMPLETE neighbour)" do
+      assert MAC.decode(<<>>) == nil
+    end
+
+    test "decodes a non-6-byte address to nil rather than crashing" do
+      # 20-byte Infiniband-style address Linx doesn't model.
+      assert MAC.decode(:binary.copy(<<0>>, 20)) == nil
+    end
+  end
 end

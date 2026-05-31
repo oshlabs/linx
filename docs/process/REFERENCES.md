@@ -13,7 +13,7 @@ The syscalls and namespace concepts `Linx.Process` exposes:
   syscall that creates the child; `CLONE_NEW*` flags pick which
   namespaces are fresh.
 - [`setns(2)`](https://man7.org/linux/man-pages/man2/setns.2.html) — what
-  P3's `enter/2` uses to join an existing process's namespaces.
+  `enter/2` uses to join an existing process's namespaces.
 - [`execve(2)`](https://man7.org/linux/man-pages/man2/execve.2.html) —
   the child's final act after the checkpoint.
 - [`unshare(2)`](https://man7.org/linux/man-pages/man2/unshare.2.html) —
@@ -60,8 +60,7 @@ The agent talks ETF to the BEAM over fd 3/4:
 - [tini](https://github.com/krallin/tini),
   [dumb-init](https://github.com/Yelp/dumb-init),
   [catatonit](https://github.com/openSUSE/catatonit) — established
-  upstream `mini_init` binaries. See `PLAN.md`'s Deferred section for
-  how they relate.
+  upstream `mini_init` binaries.
 - [runc's `libcontainer`](https://github.com/opencontainers/runc) — the
   reference container-runtime implementation in Go; `nsenter`,
   `setns_init`, and the checkpoint relay design parallel `linx_process`.

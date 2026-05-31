@@ -89,7 +89,8 @@ defmodule Linx.NFT.Runtime do
 
   @doc "Encodes an IPv4 input to its 4-byte big-endian form."
   @spec encode_ipv4!(term()) :: <<_::32>>
-  def encode_ipv4!({a, b, c, d}) when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255 do
+  def encode_ipv4!({a, b, c, d})
+      when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255 do
     <<a, b, c, d>>
   end
 

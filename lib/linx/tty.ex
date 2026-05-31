@@ -35,8 +35,8 @@ defmodule Linx.Tty do
 
   When the BEAM has no controlling terminal at all (redirected stdio,
   some CI environments), opening `/dev/tty` fails cleanly with
-  `{:error, {:open, :enxio}}` — a typed error a caller can pattern-match
-  on, not a crash.
+  `{:error, %Linx.Tty.Error{operation: :open, errno: :enxio}}` — a typed
+  error a caller can pattern-match on, not a crash.
 
   ## `/dev/tty` is the BEAM's terminal, not necessarily yours
 
@@ -64,16 +64,16 @@ defmodule Linx.Tty do
       `:sshd_sup` in the GL's `"$ancestors"` chain). Call
       `Linx.Tty.format_error/1` on the atom for the hint.
 
-    * `attach(:group_leader, session)` (T6.1) pumps through the
+    * `attach(:group_leader, session)` pumps through the
       caller's group leader instead of `/dev/tty`, working over
       SSH, `:remsh`, and locally as a universal alternative to
       `:controlling`. See `attach/2`'s docstring for the
       mechanism (`:io.setopts(echo: false)` + a linked reader
       sub-process + `:io.put_chars/2` for output + polled winsize).
 
-  Both modes also refuse `{:error, :session_terminated}` (or
-  `:session_ended` for a dead session pid) when called against a
-  session whose workload has already exited — without this the
+  Both modes also refuse `{:error, :no_process}` when called against
+  a session whose workload has already exited (or whose GenServer is
+  gone) — without this the
   pump would set itself up waiting for `:pty_out` events that
   can never arrive, and Ctrl-C wouldn't help (`ssh_cli`
   intercepts it and the pump's reaction is to write `<<3>>` to a
@@ -120,18 +120,6 @@ defmodule Linx.Tty do
 
   Coexists with `prim_tty_sighandler` (iex's own SIGWINCH consumer):
   `:gen_event` broadcasts to every registered handler.
-
-  ## Status
-
-  T0–T5 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
-  window-size propagation, coexistence with `iex`'s tty driver, and
-  runtime SIGWINCH-driven resize updates. T6.0 + T6.1 shipped on
-  branch `tty-group-leader-attach`: the SSH-aware refusal guard on
-  `attach(:controlling, _)`, the `Linx.Tty.format_error/1` helper,
-  and the `attach(:group_leader, _)` mode that pumps via the
-  Erlang I/O protocol — works over SSH, `:remsh`, and locally as
-  a universal alternative to `:controlling`. See
-  `docs/tty/PLAN.md` for the roadmap.
   """
 
   alias Linx.Tty.Native
@@ -160,7 +148,7 @@ defmodule Linx.Tty do
   def __error_stages__, do: @error_stages
 
   @doc """
-  Returns the linx_tty NIF version string — sanity that the native
+  Returns the linx_tty NIF identifier string — sanity that the native
   library loaded and its ABI is reachable.
   """
   @spec version() :: binary()
@@ -172,10 +160,11 @@ defmodule Linx.Tty do
 
   Returns `{:ok, fd, saved}` on success — `fd` for wrapping with
   `:erlang.open_port({:fd, fd, fd}, [...])`, `saved` for
-  `restore_and_close/2`. `{:error, {stage, errno}}` covers the failure
-  paths (`stage` is one of `:open`, `:tcgetattr`, `:tcsetattr`); the
-  most common case — BEAM without a controlling terminal — surfaces
-  as `{:error, {:open, :enxio}}`.
+  `restore_and_close/2`. `{:error, %Linx.Tty.Error{}}` covers the
+  failure paths (`operation` is one of `:open`, `:tcgetattr`,
+  `:tcsetattr`); the most common case — BEAM without a controlling
+  terminal — surfaces as
+  `{:error, %Linx.Tty.Error{operation: :open, errno: :enxio}}`.
 
   Pair every successful call with `restore_and_close/2` (idiomatically
   in a `try/after`) so the user's terminal can never be left stuck in
@@ -185,7 +174,7 @@ defmodule Linx.Tty do
   def open_controlling_raw do
     case Native.open_controlling_raw() do
       {:ok, fd, saved_bin} -> {:ok, fd, %Saved{termios: saved_bin}}
-      {:error, _} = err -> err
+      {:error, _} = err -> wrap_tty_error(err)
     end
   end
 
@@ -198,7 +187,7 @@ defmodule Linx.Tty do
   """
   @spec restore_and_close(fd(), Saved.t()) :: :ok | {:error, term()}
   def restore_and_close(fd, %Saved{termios: saved_bin}) when is_integer(fd) do
-    Native.restore_and_close(fd, saved_bin)
+    wrap_tty_error(Native.restore_and_close(fd, saved_bin))
   end
 
   @doc """
@@ -212,7 +201,7 @@ defmodule Linx.Tty do
         {:ok, %WindowSize{rows: rows, cols: cols, xpixel: xp, ypixel: yp}}
 
       {:error, _} = err ->
-        err
+        wrap_tty_error(err)
     end
   end
 
@@ -221,15 +210,22 @@ defmodule Linx.Tty do
   (`ioctl(TIOCSWINSZ)`).
 
   The common path for setting the workload's window size goes through
-  the agent — `Linx.Process.pty_set_winsize/2` (lands in T3). This
+  the agent — `Linx.Process.pty_set_winsize/2`. This
   verb is for the rare case of mutating a tty fd held directly by the
   caller.
   """
   @spec set_window_size(fd(), WindowSize.t()) :: :ok | {:error, term()}
   def set_window_size(fd, %WindowSize{rows: r, cols: c, xpixel: xp, ypixel: yp})
       when is_integer(fd) do
-    Native.set_window_size(fd, {r, c, xp, yp})
+    wrap_tty_error(Native.set_window_size(fd, {r, c, xp, yp}))
   end
+
+  # Wrap the linx_tty NIF's {:error, {stage, errno}} pairs in a
+  # %Linx.Tty.Error{}; pass :ok / {:ok, _} through untouched.
+  defp wrap_tty_error({:error, {stage, errno}}),
+    do: {:error, Linx.Tty.Error.from_nif(stage, errno)}
+
+  defp wrap_tty_error(other), do: other
 
   @doc """
   Hands the caller's terminal over to `session`'s PTY master and
@@ -242,7 +238,7 @@ defmodule Linx.Tty do
       the BEAM's controlling terminal is the user's terminal
       (local iex on a terminal emulator, Nerves HDMI / UART
       console). Refuses with `{:error, :no_local_tty}` when the
-      caller is over SSH (the T6.0 guard).
+      caller is over SSH (the local-tty guard).
 
     * `:group_leader` — pump through the caller's
       `Process.group_leader/0` via Erlang's I/O protocol. Works
@@ -337,7 +333,7 @@ defmodule Linx.Tty do
   """
   @spec attach(:controlling | :group_leader, session()) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
-          | {:error, :no_local_tty | :session_terminated | :session_ended | :gl_eof | term()}
+          | {:error, :no_local_tty | :no_process | :gl_eof | term()}
   def attach(:controlling, session) when is_pid(session) do
     # Two preconditions in order:
     # 1. The session must still be running. Without this, attach
@@ -347,7 +343,7 @@ defmodule Linx.Tty do
     #    prior attach), and the pump hangs forever. Ctrl-C doesn't
     #    help over SSH because ssh_cli intercepts it and the pump's
     #    reaction is to send <<3>> to a dead session.
-    # 2. T6.0 guard: when the caller's terminal is fronted by
+    # 2. local-tty guard: when the caller's terminal is fronted by
     #    Erlang's SSH daemon, /dev/tty is the BEAM's controlling
     #    tty (the HDMI / UART console on Nerves) -- *not* the SSH
     #    session. Refuse cleanly rather than silently pumping bytes
@@ -414,13 +410,13 @@ defmodule Linx.Tty do
   defp ensure_session_running(session) do
     case Linx.Process.info(session) do
       {:ok, %{stage: stage}} when stage in [:exited, :signaled, :aborted, :errored] ->
-        {:error, :session_terminated}
+        {:error, :no_process}
 
       {:ok, _info} ->
         :ok
 
-      {:error, :session_ended} ->
-        {:error, :session_ended}
+      {:error, :no_process} ->
+        {:error, :no_process}
 
       {:error, _} = other ->
         other
@@ -429,7 +425,7 @@ defmodule Linx.Tty do
 
   @doc """
   Returns a human-readable description for error atoms `Linx.Tty`
-  returns. Currently covers `:no_local_tty` (the T6.0 guard's
+  returns. Currently covers `:no_local_tty` (the local-tty guard's
   refusal); falls back to `inspect/1` for any other shape so it can
   be safely chained at error sites without losing information.
   """
@@ -438,20 +434,15 @@ defmodule Linx.Tty do
     "Your iex appears to be over SSH (or :remsh); /dev/tty inside the " <>
       "BEAM is the BEAM's controlling terminal (e.g. the HDMI/UART " <>
       "console on Nerves), not your remote session. Use " <>
-      "Linx.Tty.attach(:group_leader, session) instead (T6.1)."
+      "Linx.Tty.attach(:group_leader, session) instead."
   end
 
-  def format_error(:session_terminated) do
-    "The session's workload has already reached a terminal stage " <>
-      "(exited / signaled / aborted / errored). attach/2 requires " <>
-      "a session that's still running. Inspect Linx.Process.info/1 " <>
-      "for the terminal stage and result; spawn a fresh session " <>
-      "via Linx.Process.spawn/1 to attach to a new workload."
-  end
-
-  def format_error(:session_ended) do
-    "The session's GenServer has terminated -- its pid is gone. " <>
-      "Spawn a fresh session via Linx.Process.spawn/1."
+  def format_error(:no_process) do
+    "There is no live workload for this session -- it has reached a " <>
+      "terminal stage (exited / signaled / aborted / errored), or its " <>
+      "GenServer is gone. attach/2 requires a running session. Inspect " <>
+      "Linx.Process.info/1 for the terminal stage and result, or spawn " <>
+      "a fresh session via Linx.Process.spawn/1."
   end
 
   def format_error(other), do: inspect(other)
@@ -472,7 +463,7 @@ defmodule Linx.Tty do
       # the workload's raw terminal bytes through to the caller's
       # terminal emulator. Without this, backspace from the workload's
       # PTY echo (`\b \b`) renders as `^( ^(`, vim's TUI sequences get
-      # mangled, etc. See T6.1.1 in `docs/tty/PLAN.md`.
+      # mangled, etc.
       #
       # Returns an opaque "saved" value (or `nil` if the driver
       # doesn't look like ssh_cli / user_drv with a `:prim_tty` state)
@@ -637,7 +628,7 @@ defmodule Linx.Tty do
         {:ok, {:signaled, signum}}
 
       {:linx_process, :error, errno, stage} ->
-        {:error, %{errno: errno, stage: stage}}
+        {:error, Linx.Process.Error.from_agent(errno, stage)}
     after
       poll_ms ->
         new_ws = maybe_forward_winsize(gl, session, last_ws)
@@ -771,7 +762,7 @@ defmodule Linx.Tty do
   # `:prim_tty.output_mode/1`, swaps in a `:prim_tty.reinit/2`'d
   # version with the new output mode, and shouts the previous mode
   # back to us through a one-shot ref. Same kind of OTP-internals
-  # coupling T4 already accepts for `:prim_tty.disable_reader/1`.
+  # coupling we already accept for `:prim_tty.disable_reader/1`.
   # Scanning rather than hard-coding the field index makes us
   # resilient to ssh_cli / user_drv record-layout reshuffles across
   # OTP versions.
@@ -931,8 +922,8 @@ defmodule Linx.Tty do
   # registered.
   #
   # Soft-fails: SIGWINCH propagation is a quality-of-life feature; if
-  # OTP's signal infrastructure isn't available we degrade to the
-  # initial-seed-only behaviour T3 gave us, without crashing attach.
+  # OTP's signal infrastructure isn't available we degrade to
+  # initial-seed-only behaviour, without crashing attach.
   defp arm_sigwinch(id) do
     try do
       :os.set_signal(:sigwinch, :handle)
@@ -998,7 +989,7 @@ defmodule Linx.Tty do
         {:ok, {:signaled, signum}}
 
       {:linx_process, :error, errno, stage} ->
-        {:error, %{errno: errno, stage: stage}}
+        {:error, Linx.Process.Error.from_agent(errno, stage)}
     end
   end
 end

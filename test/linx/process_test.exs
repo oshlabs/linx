@@ -13,7 +13,7 @@ defmodule Linx.ProcessTest do
     end
 
     test "rejects an :argv with non-binary elements" do
-      assert {:error, :bad_argv} = P.spawn(argv: ["/bin/true", :nope])
+      assert {:error, {:bad_argv, _}} = P.spawn(argv: ["/bin/true", :nope])
     end
 
     test "rejects an unknown namespace atom" do
@@ -22,7 +22,7 @@ defmodule Linx.ProcessTest do
     end
 
     test "rejects a non-list :env" do
-      assert {:error, :bad_env} = P.spawn(argv: ["/bin/true"], env: "PATH=/bin")
+      assert {:error, {:bad_env, _}} = P.spawn(argv: ["/bin/true"], env: "PATH=/bin")
     end
   end
 
@@ -138,14 +138,14 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :signaled, 9}, 2_000
     end
 
-    test "signal/2 after the workload has ended returns {:error, :ended}" do
+    test "signal/2 after the workload has ended returns {:error, :no_process}" do
       {:ok, session} = P.spawn(argv: ["/bin/true"])
       assert_receive {:linx_process, :ready, _}, 2_000
       :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
       # The workload no longer exists.
-      assert {:error, :ended} = P.signal(session, 15)
+      assert {:error, :no_process} = P.signal(session, 15)
     end
   end
 
@@ -259,16 +259,16 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :signaled, 9}, 2_000
     end
 
-    test "abort/1 after the session has terminated returns :already_terminated" do
+    test "abort/1 after the session has terminated returns :no_process" do
       {:ok, session} = P.spawn(argv: ["/bin/true"])
       assert_receive {:linx_process, :ready, _}, 2_000
       :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :already_terminated} = P.abort(session)
+      assert {:error, :no_process} = P.abort(session)
     end
 
-    test "proceed/1 after the session has terminated returns :already_terminated" do
+    test "proceed/1 after the session has terminated returns :no_process" do
       # Same shape as the abort/1 terminal-guard test -- proceed
       # and abort are sibling checkpoint verbs.
       {:ok, session} = P.spawn(argv: ["/bin/true"])
@@ -276,7 +276,7 @@ defmodule Linx.ProcessTest do
       :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :already_terminated} = P.proceed(session)
+      assert {:error, :no_process} = P.proceed(session)
     end
 
     test "wait/1 with a timeout sees :aborted as a terminal" do
@@ -333,11 +333,11 @@ defmodule Linx.ProcessTest do
     end
 
     test "rejects an unknown :stdio atom" do
-      assert {:error, :bad_stdio} = P.spawn(argv: ["/bin/true"], stdio: :tty)
+      assert {:error, {:bad_stdio, _}} = P.spawn(argv: ["/bin/true"], stdio: :tty)
     end
 
     test "rejects an invalid per-fd directive" do
-      assert {:error, :bad_stdio} =
+      assert {:error, {:bad_stdio, _}} =
                P.spawn(argv: ["/bin/true"], stdio: [stdin: :something_weird])
     end
 
@@ -439,7 +439,7 @@ defmodule Linx.ProcessTest do
       assert {:ok, {:exited, 0}} = P.wait(session, 2_000)
     end
 
-    test "pty_write/2 refuses with :session_ended after the workload has terminated" do
+    test "pty_write/2 refuses with :no_process after the workload has terminated" do
       {:ok, session} = P.spawn(argv: ["/bin/true"], stdio: :pty)
       assert_receive {:linx_process, :ready, _}, 2_000
       :ok = P.proceed(session)
@@ -447,16 +447,16 @@ defmodule Linx.ProcessTest do
 
       # Workload has exited. Sending pty_write should refuse rather
       # than fire a Port.command at a closing agent.
-      assert {:error, :session_ended} = P.pty_write(session, "ignored")
+      assert {:error, :no_process} = P.pty_write(session, "ignored")
     end
 
-    test "pty_set_winsize/2 refuses with :session_ended after the workload has terminated" do
+    test "pty_set_winsize/2 refuses with :no_process after the workload has terminated" do
       {:ok, session} = P.spawn(argv: ["/bin/true"], stdio: :pty)
       assert_receive {:linx_process, :ready, _}, 2_000
       :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :session_ended} = P.pty_set_winsize(session, {24, 80, 0, 0})
+      assert {:error, :no_process} = P.pty_set_winsize(session, {24, 80, 0, 0})
     end
 
     test "pty_set_winsize/2 accepts a struct-shaped map" do
@@ -634,7 +634,7 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :error, 2, :execve}, 2_000
 
       assert {:ok, %Info{stage: :errored} = info} = P.info(session)
-      assert info.result == {:error, %{errno: 2, stage: :execve}}
+      assert info.result == {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}}
     end
 
     test "pty? is true when stdio: :pty" do
@@ -660,7 +660,7 @@ defmodule Linx.ProcessTest do
       Process.exit(session, :kill)
       assert_receive {:DOWN, ^ref, :process, ^session, _}, 1_000
 
-      assert {:error, :session_ended} = P.info(session)
+      assert {:error, :no_process} = P.info(session)
     end
   end
 
@@ -728,7 +728,7 @@ defmodule Linx.ProcessTest do
         host_pid: 12345,
         child_pid: nil,
         pty?: false,
-        result: {:error, %{errno: 2, stage: :execve}}
+        result: {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}}
       }
 
       assert inspect(info) ==
@@ -830,7 +830,7 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :error, 4, :agent_died}, 2_000
 
       # wait/1 also sees the synthesised terminal.
-      assert {:error, %{errno: 4, stage: :agent_died}} =
+      assert {:error, %Linx.Process.Error{stage: :agent_died, code: 4}} =
                P.wait(session, 500)
 
       # The real workload is still actually running because we faked
@@ -875,7 +875,7 @@ defmodule Linx.ProcessTest do
 
       assert_receive {:linx_process, :error, _exit_code, :agent_died}, 2_000
 
-      assert {:error, %{stage: :agent_died}} = P.wait(session, 500)
+      assert {:error, %Linx.Process.Error{stage: :agent_died}} = P.wait(session, 500)
     end
 
     test "malformed request: agent emits :malformed_request on its own" do

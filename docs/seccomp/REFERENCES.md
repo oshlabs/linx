@@ -52,7 +52,7 @@ sections in the source when interpretation is non-obvious.
 ## Syscall number sources
 
 These are the canonical references for the `Linx.Seccomp.Syscalls`
-hand-curated table. See `docs/seccomp/PLAN.md` "Extending the
+hand-curated table. See `Linx.Seccomp` "Extending the
 syscall table" for the procedure.
 
 - **x86_64:** `arch/x86/entry/syscalls/syscall_64.tbl` in the
@@ -98,9 +98,9 @@ The web-readable upstream:
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — the checkpoint protocol that S2
-  hooks into. S2 adds one new agent command to that protocol.
-- `docs/capabilities/PLAN.md` — the K2 commit pattern S2
+- `Linx.Process` — the checkpoint protocol that `Linx.Seccomp`
+  hooks into, adding one new agent command to that protocol.
+- `Linx.Capabilities` — the commit pattern `Linx.Seccomp`
   mirrors exactly (per-thread syscalls applied by the child
   agent at the checkpoint).
 - `lib/linx/capabilities.ex` — pattern for the public verb +
@@ -108,7 +108,7 @@ The web-readable upstream:
 - `lib/linx/capabilities/error.ex` — pattern for
   `Linx.Seccomp.Error`'s shape and Exception impl.
 - `c_src/linx_process.c` — `child_read_command()` and
-  `await_proceed()` are where S2's new branches land.
+  `await_proceed()` are where the new branches land.
 
 ## Out of scope — pointers for future work
 
@@ -116,7 +116,7 @@ The web-readable upstream:
   than cBPF (loops, maps, helper functions). A future
   `Linx.Seccomp.EBpf` might layer on top.
 - **`SECCOMP_RET_USER_NOTIF`** — kernel-to-userspace decision
-  delegation. Documented in `seccomp_unotify(2)`. Future S3 or
+  delegation. Documented in `seccomp_unotify(2)`. A future
   sibling module.
 - **`PTRACE_SECCOMP_GET_FILTER`** — extracting an installed
   filter from a running process via ptrace. See `ptrace(2)`.

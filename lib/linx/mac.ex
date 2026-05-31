@@ -84,8 +84,14 @@ defmodule Linx.MAC do
   def encode(%__MODULE__{bytes: bytes}), do: bytes
 
   @doc false
-  @spec decode(<<_::48>>) :: t
+  # A 6-byte Ethernet address decodes to a %MAC{}. Anything else decodes
+  # to nil rather than crashing the dump: an INCOMPLETE/FAILED neighbour
+  # carries an empty NDA_LLADDR, and non-Ethernet links (Infiniband, …)
+  # carry link-layer addresses Linx doesn't model. Callers already treat
+  # a nil lladdr as "no address" (e.g. Rtnl.Neighbour's Inspect).
+  @spec decode(binary) :: t | nil
   def decode(<<_::48>> = bytes), do: %__MODULE__{bytes: bytes}
+  def decode(_other), do: nil
 
   defimpl Inspect do
     def inspect(mac, _opts), do: ~s|~MAC"#{Linx.MAC.to_string(mac)}"|

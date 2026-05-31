@@ -11,12 +11,6 @@ user *inside* their own namespace — e.g. as `root` inside a
 container's user ns — but writes from the BEAM to the host's
 namespace still need real root.
 
-> 🟢 **S0–S3 shipped.** `supported?/0`, host-side reads/writes,
-> subtree walking, the full cross-namespace `:in` option, plus the
-> `%Linx.Sysctl.Entry{}` and `%Linx.Sysctl.Error{}` value types
-> are in. See `PLAN.md` for the roadmap and `COVERAGE.md` for the
-> per-feature status.
-
 ## Detecting sysctl support
 
 ```elixir

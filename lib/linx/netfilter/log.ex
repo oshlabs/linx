@@ -185,7 +185,8 @@ defmodule Linx.Netfilter.Log do
 
   defp send_pf_unbinds(sock, families) do
     Enum.each(families, fn family ->
-      _ = send_cfg_cmd(sock, family_num_for_log(family), 4, 0)  # PF_UNBIND
+      # PF_UNBIND
+      _ = send_cfg_cmd(sock, family_num_for_log(family), 4, 0)
     end)
 
     :ok

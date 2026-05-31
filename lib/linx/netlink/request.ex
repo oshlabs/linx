@@ -115,7 +115,7 @@ defmodule Linx.Netlink.Request do
     end
   end
 
-  defp classify_error(%Message{}), do: {:error, :malformed_error}
+  defp classify_error(%Message{}), do: {:error, %Error{errno: :malformed_error, code: nil}}
 
   # Extract NLMSGERR_ATTR_MSG from an error reply's payload, or nil if the
   # kernel did not include the extended-ack TLVs.

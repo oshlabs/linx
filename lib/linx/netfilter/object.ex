@@ -13,11 +13,11 @@ defmodule Linx.Netfilter.Object do
 
     * `:name` — object name (unique within the table for its kind).
     * `:table` — owning table's name.
-    * `:kind` — object kind atom. N1 accepts the canonical kinds;
-      per-kind data shapes are validated as those land.
+    * `:kind` — object kind atom. The canonical kinds are accepted;
+      per-kind data shapes are not yet validated.
     * `:data` — kind-specific value (map / keyword / struct).
-      Opaque to N1's validator; per-kind shape validation will be
-      added when each kind's wire codec ships.
+      Opaque to the validator; per-kind shape validation is not yet
+      implemented.
     * `:handle` — kernel-assigned handle; `nil` until pushed.
     * `:comment` — round-trips via object userdata.
 
@@ -83,8 +83,8 @@ defmodule Linx.Netfilter.Object do
   @doc """
   Builds an object of the given kind.
 
-  `data` is kind-specific; in N1 it's stored opaquely (per-kind
-  shape validation lands with each kind's wire codec).
+  `data` is kind-specific; it's stored opaquely (per-kind shape
+  validation is not yet implemented).
   """
   @spec new(kind(), String.t(), term(), keyword()) ::
           {:ok, t()} | {:error, {:bad_object, term()}}

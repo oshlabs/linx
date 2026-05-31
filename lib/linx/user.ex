@@ -41,7 +41,7 @@ defmodule Linx.User do
   ns) writes `gid_map`, the kernel requires
   `/proc/<pid>/setgroups` first contain `"deny"`. Skipping it
   returns EPERM. `deny_setgroups/1` is the primitive; the
-  `setup_maps/2` convenience (lands in U2) does this in the right
+  `setup_maps/2` convenience does this in the right
   order automatically.
 
   ## Composition with `Linx.Process`
@@ -67,14 +67,11 @@ defmodule Linx.User do
   coupling, exactly the way `Linx.Netlink` / `Linx.Cgroup` /
   `Linx.Mount` integration works.
 
-  ## Status
+  ## Forward compatibility
 
-  All foundation milestones shipped (U0–U2): `supported?/0`,
-  `deny_setgroups/1`, `set_uid_map/2`, `set_gid_map/2`,
-  `read_uid_map/1`, `read_gid_map/1`, `setup_maps/2`, plus the
-  `Linx.User.Error` and `Linx.User.Map` shapes. See
-  `docs/user/PLAN.md` for what was built and `COVERAGE.md` for
-  what's deferred.
+  `read_uid_map/1` / `read_gid_map/1` parse the map files defensively —
+  a line that isn't three non-negative integers is skipped rather than
+  crashing the read.
   """
 
   alias Linx.User.Error
@@ -145,7 +142,7 @@ defmodule Linx.User do
       :ok = Linx.User.set_uid_map(host_pid, [{0, my_uid, 1}])
 
       # A multi-range identity map (needs CAP_SETUID or
-      # newuidmap(1) — deferred U3 territory):
+      # newuidmap(1)):
       :ok = Linx.User.set_uid_map(host_pid,
         [{0, 0, 1}, {1, 100_000, 65_536}])
 
@@ -170,7 +167,7 @@ defmodule Linx.User do
 
   **Unprivileged callers must call `deny_setgroups/1` first** —
   the kernel returns `EPERM` otherwise. The
-  `Linx.User.setup_maps/2` convenience (lands in U2) does this
+  `Linx.User.setup_maps/2` convenience does this
   sequence automatically.
   """
   @spec set_gid_map(pid_target(), [mapping()]) ::
@@ -209,8 +206,8 @@ defmodule Linx.User do
 
   defp validate_entry({inside, outside, length})
        when is_integer(inside) and inside >= 0 and
-            is_integer(outside) and outside >= 0 and
-            is_integer(length) and length > 0 do
+              is_integer(outside) and outside >= 0 and
+              is_integer(length) and length > 0 do
     {:ok, "#{inside} #{outside} #{length}\n"}
   end
 
@@ -322,8 +319,7 @@ defmodule Linx.User do
   """
   @spec setup_maps(pid_target(), keyword()) ::
           :ok
-          | {:error,
-             Error.t() | {:bad_map, term()} | {:bad_setgroups, term()}}
+          | {:error, Error.t() | {:bad_map, term()} | {:bad_setgroups, term()}}
   def setup_maps(pid, opts) when is_integer(pid) and pid > 0 and is_list(opts) do
     with {:ok, uid} <- fetch_required(opts, :uid),
          {:ok, gid} <- fetch_required(opts, :gid),

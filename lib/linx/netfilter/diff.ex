@@ -24,8 +24,8 @@ defmodule Linx.Netfilter.Diff do
       stable positional position with no neighbour changes).
     * **Chains**: most attribute changes (type, hook, priority)
       can't be replaced — emit `:delete_chain` + `:create_chain`.
-      For N5 we conservatively delete+create on any difference.
-    * **Tables**: flags / use_count differences → no-op (the N5
+      We conservatively delete+create on any difference.
+    * **Tables**: flags / use_count differences → no-op (the
       diff treats tables as opaque containers; their lifecycle is
       managed via the `:owner` flag).
     * **Sets / maps**: declaration changes (key_type, data_type,
@@ -179,6 +179,7 @@ defmodule Linx.Netfilter.Diff do
       |> MapSet.difference(from_names)
       |> Enum.flat_map(fn name ->
         chain = Map.fetch!(to_map, name)
+
         rule_creates =
           Enum.map(chain.rules, fn rule ->
             {:create_rule, family, table_name, name, rule, :append}

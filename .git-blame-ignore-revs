@@ -1,0 +1,5 @@
+# Bulk reformats — ignored by `git blame`.
+# Configure locally with: git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# style: mix format the entire tree
+73168fe4d6ba5ceaa48a5b8a7076e4555dd84cb4

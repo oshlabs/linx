@@ -99,7 +99,7 @@ source when interpretation is non-obvious.
 - **[`phoenix_live_view/lib/phoenix_live_view/tag_engine/compiler.ex`](https://github.com/phoenixframework/phoenix_live_view/blob/main/lib/phoenix_live_view/tag_engine/compiler.ex)**
   (~1348 LOC) — the AST-to-compiled-Elixir pattern.
 - **[`phoenix_live_view/lib/phoenix_live_view/html_formatter.ex`](https://github.com/phoenixframework/phoenix_live_view/blob/main/lib/phoenix_live_view/html_formatter.ex)**
-  (~657 LOC) — `mix format` plugin reference for N9.
+  (~657 LOC) — `mix format` plugin reference for the formatter.
 
 ## Production-shape references
 
@@ -135,14 +135,14 @@ source when interpretation is non-obvious.
 
 ## In-repo cross-references
 
-- `docs/netlink/PLAN.md` — `Linx.Netlink.Rtnl`'s codec DSL +
+- `Linx.Netlink` — `Linx.Netlink.Rtnl`'s codec DSL +
   socket plumbing; `Linx.Netlink.Nfnl` mirrors the family-specific
   parts for netfilter.
-- `docs/seccomp/PLAN.md` — the value-type-with-codec precedent
+- `Linx.Seccomp` — the value-type-with-codec precedent
   (`%Linx.Seccomp.Filter{}` is the small-scale version of what
   `%Linx.Netfilter.Ruleset{}` is at large scale).
-- `docs/process/PLAN.md` — the checkpoint composition story;
+- `Linx.Process` — the checkpoint composition story;
   every cross-namespace verb (Mount, User, Capabilities, Seccomp,
   Sysctl, Netfilter) hooks in the same way.
-- `docs/sysctl/PLAN.md` — the most recent "build a subsystem from
+- `Linx.Sysctl` — the most recent "build a subsystem from
   scratch" template; Netfilter's milestone shape borrows from it.

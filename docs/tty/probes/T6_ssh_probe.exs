@@ -1,5 +1,5 @@
-# Linx.Tty T6 probe — answers the three empirical questions from
-# docs/tty/PLAN.md § T6 "Open questions" about the SSH path.
+# Linx.Tty T6 probe — answers the three empirical questions about the
+# T6 SSH-path handling.
 #
 # Paste this whole block into an `iex` session reached *over SSH* on
 # the target Nerves device (i.e. `ssh nerves-foo.local`, then iex).

@@ -8,7 +8,7 @@ defmodule Linx.MixProject do
     [
       app: :linx,
       version: @version,
-      elixir: "~> 1.19",
+      elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       # Custom compilers for the project's native code, run as part of
       # `mix compile`:
@@ -23,9 +23,26 @@ defmodule Linx.MixProject do
           [:netlink_nif, :linx_process, :linx_tty, :linx_mount, :linx_sysctl],
       deps: deps(),
       name: "Linx",
-      description: "Linux kernel interfaces for Elixir — netlink, and more.",
+      description:
+        "Linux kernel interface primitives for Elixir: netlink/rtnetlink/nf_tables, " <>
+          "process & namespace lifecycle, PTY, cgroup v2, mounts, user namespaces, " <>
+          "capabilities, seccomp, and sysctl.",
       source_url: @source_url,
+      package: package(),
       docs: docs()
+    ]
+  end
+
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{"GitHub" => @source_url},
+      # Ship the C sources (c_src) so the NIF/Port custom compilers can build
+      # them on the consumer's machine. priv/ artifacts are built per-machine
+      # and never shipped; the docs/ extras are dev-time `mix docs` material,
+      # omitted to keep the package lean.
+      files: ~w(lib c_src mix.exs README.md LICENSE CHANGELOG.md),
+      maintainers: ["Leon de Rooij"]
     ]
   end
 
@@ -35,7 +52,8 @@ defmodule Linx.MixProject do
 
   defp deps do
     [
-      {:ex_doc, "~> 0.34", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:stream_data, "~> 1.0", only: :test, runtime: false}
     ]
   end
 
@@ -47,110 +65,48 @@ defmodule Linx.MixProject do
       output: "_build/docs",
       extras: [
         "README.md",
+        "CHANGELOG.md",
         "AGENTS.md",
         "docs/netlink/EXAMPLES.md",
-        "docs/netlink/PLAN.md",
-        "docs/netlink/COVERAGE.md",
         "docs/netlink/REFERENCES.md",
         "docs/process/EXAMPLES.md",
-        "docs/process/PLAN.md",
-        "docs/process/COVERAGE.md",
         "docs/process/REFERENCES.md",
         "docs/tty/EXAMPLES.md",
-        "docs/tty/PLAN.md",
-        "docs/tty/COVERAGE.md",
         "docs/tty/REFERENCES.md",
         "docs/cgroup/EXAMPLES.md",
-        "docs/cgroup/PLAN.md",
-        "docs/cgroup/COVERAGE.md",
         "docs/cgroup/REFERENCES.md",
         "docs/mount/EXAMPLES.md",
-        "docs/mount/PLAN.md",
-        "docs/mount/COVERAGE.md",
         "docs/mount/REFERENCES.md",
         "docs/user/EXAMPLES.md",
-        "docs/user/PLAN.md",
-        "docs/user/COVERAGE.md",
         "docs/user/REFERENCES.md",
         "docs/capabilities/EXAMPLES.md",
-        "docs/capabilities/PLAN.md",
-        "docs/capabilities/COVERAGE.md",
         "docs/capabilities/REFERENCES.md",
         "docs/seccomp/EXAMPLES.md",
-        "docs/seccomp/PLAN.md",
-        "docs/seccomp/COVERAGE.md",
         "docs/seccomp/REFERENCES.md",
         "docs/sysctl/EXAMPLES.md",
-        "docs/sysctl/PLAN.md",
-        "docs/sysctl/COVERAGE.md",
         "docs/sysctl/REFERENCES.md",
         "docs/netfilter/EXAMPLES.md",
-        "docs/netfilter/PLAN.md",
-        "docs/netfilter/COVERAGE.md",
-        "docs/netfilter/TODO.md",
-        "docs/netfilter/REFERENCES.md"
+        "docs/netfilter/DESIGN.md",
+        "docs/netfilter/REFERENCES.md",
+        {:LICENSE, [title: "License"]}
       ],
       source_ref: "v#{@version}",
+      # Per-subsystem pages: EXAMPLES.md (recipes) + REFERENCES.md
+      # (citations). The retired PLAN.md/COVERAGE.md design docs moved
+      # into the moduledocs; Netfilter keeps a forward-looking DESIGN.md.
       groups_for_extras: [
-        "Netlink — guides": ["docs/netlink/EXAMPLES.md"],
-        "Netlink — design": [
-          "docs/netlink/PLAN.md",
-          "docs/netlink/COVERAGE.md",
-          "docs/netlink/REFERENCES.md"
-        ],
-        "Process — guides": ["docs/process/EXAMPLES.md"],
-        "Process — design": [
-          "docs/process/PLAN.md",
-          "docs/process/COVERAGE.md",
-          "docs/process/REFERENCES.md"
-        ],
-        "Tty — guides": ["docs/tty/EXAMPLES.md"],
-        "Tty — design": [
-          "docs/tty/PLAN.md",
-          "docs/tty/COVERAGE.md",
-          "docs/tty/REFERENCES.md"
-        ],
-        "Cgroup — guides": ["docs/cgroup/EXAMPLES.md"],
-        "Cgroup — design": [
-          "docs/cgroup/PLAN.md",
-          "docs/cgroup/COVERAGE.md",
-          "docs/cgroup/REFERENCES.md"
-        ],
-        "Mount — guides": ["docs/mount/EXAMPLES.md"],
-        "Mount — design": [
-          "docs/mount/PLAN.md",
-          "docs/mount/COVERAGE.md",
-          "docs/mount/REFERENCES.md"
-        ],
-        "User — guides": ["docs/user/EXAMPLES.md"],
-        "User — design": [
-          "docs/user/PLAN.md",
-          "docs/user/COVERAGE.md",
-          "docs/user/REFERENCES.md"
-        ],
-        "Capabilities — guides": ["docs/capabilities/EXAMPLES.md"],
-        "Capabilities — design": [
-          "docs/capabilities/PLAN.md",
-          "docs/capabilities/COVERAGE.md",
-          "docs/capabilities/REFERENCES.md"
-        ],
-        "Seccomp — guides": ["docs/seccomp/EXAMPLES.md"],
-        "Seccomp — design": [
-          "docs/seccomp/PLAN.md",
-          "docs/seccomp/COVERAGE.md",
-          "docs/seccomp/REFERENCES.md"
-        ],
-        "Sysctl — guides": ["docs/sysctl/EXAMPLES.md"],
-        "Sysctl — design": [
-          "docs/sysctl/PLAN.md",
-          "docs/sysctl/COVERAGE.md",
-          "docs/sysctl/REFERENCES.md"
-        ],
-        "Netfilter — guides": ["docs/netfilter/EXAMPLES.md"],
-        "Netfilter — design": [
-          "docs/netfilter/PLAN.md",
-          "docs/netfilter/COVERAGE.md",
-          "docs/netfilter/TODO.md",
+        Netlink: ["docs/netlink/EXAMPLES.md", "docs/netlink/REFERENCES.md"],
+        Process: ["docs/process/EXAMPLES.md", "docs/process/REFERENCES.md"],
+        Tty: ["docs/tty/EXAMPLES.md", "docs/tty/REFERENCES.md"],
+        Cgroup: ["docs/cgroup/EXAMPLES.md", "docs/cgroup/REFERENCES.md"],
+        Mount: ["docs/mount/EXAMPLES.md", "docs/mount/REFERENCES.md"],
+        User: ["docs/user/EXAMPLES.md", "docs/user/REFERENCES.md"],
+        Capabilities: ["docs/capabilities/EXAMPLES.md", "docs/capabilities/REFERENCES.md"],
+        Seccomp: ["docs/seccomp/EXAMPLES.md", "docs/seccomp/REFERENCES.md"],
+        Sysctl: ["docs/sysctl/EXAMPLES.md", "docs/sysctl/REFERENCES.md"],
+        Netfilter: [
+          "docs/netfilter/EXAMPLES.md",
+          "docs/netfilter/DESIGN.md",
           "docs/netfilter/REFERENCES.md"
         ],
         "Repo-wide": ["AGENTS.md"]
@@ -163,10 +119,12 @@ defmodule Linx.MixProject do
         ],
         Process: [
           Linx.Process,
+          Linx.Process.Error,
           Linx.Process.Info
         ],
         Tty: [
           Linx.Tty,
+          Linx.Tty.Error,
           Linx.Tty.Saved,
           Linx.Tty.WindowSize,
           Linx.Tty.Native

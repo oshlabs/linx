@@ -151,10 +151,10 @@ defmodule Linx.Seccomp.Constants do
     eopnotsupp: 95
   }
 
-  @code_to_errno (for {atom, code} <- @errno_to_code,
-                      atom not in [:enotsup],
-                      into: %{},
-                      do: {code, atom})
+  @code_to_errno for {atom, code} <- @errno_to_code,
+                     atom not in [:enotsup],
+                     into: %{},
+                     do: {code, atom}
 
   @doc """
   Convert a seccomp action to its 32-bit wire value.

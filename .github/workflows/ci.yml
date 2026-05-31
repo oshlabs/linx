@@ -1,0 +1,71 @@
+name: CI
+
+# Runs on PRs targeting main (so you see green/red before merging) and on
+# pushes to main (which is what the README badge tracks). Plain pushes to a
+# feature branch trigger nothing until a PR is opened.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (elixir ${{ matrix.elixir }} / otp ${{ matrix.otp }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Floor — the lowest supported pairing (consumer floor is
+          # ~> 1.15 / OTP 26, forced by Linx.Tty's prim_tty use).
+          - elixir: "1.15"
+            otp: "26"
+          # Midpoint, for breadth across the supported range.
+          - elixir: "1.17"
+            otp: "27"
+          # Latest — mirrors the pinned dev toolchain (.tool-versions).
+          # Formatter output is version-sensitive, so the format check
+          # runs only on this cell.
+          - elixir: "1.19"
+            otp: "28"
+            lint: true
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Check formatting
+        if: matrix.lint
+        run: mix format --check-formatted
+
+      - name: Compile (warnings as errors)
+        run: mix compile --warnings-as-errors
+
+      # The :integration tests (root / privileged kernel access) are
+      # excluded by default in test_helper.exs, so this runs the
+      # non-privileged suite. A privileged job is a planned follow-up.
+      - name: Run tests
+        run: mix test --warnings-as-errors

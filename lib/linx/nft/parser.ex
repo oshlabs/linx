@@ -67,14 +67,13 @@ defmodule Linx.NFT.Parser do
 
   ## Scope notes
 
-  N8b ships the structural shape and the slice of the grammar
-  needed for the canonical `~NFT` examples in
+  The parser covers the structural shape and the slice of the
+  grammar needed for the canonical `~NFT` examples in
   `docs/netfilter/EXAMPLES.md`. The set of recognised statement
-  / lhs / rhs shapes will grow per future N8 sub-commit as the
-  compiler (N8c) and the long-tail extension milestones add
-  callers. The architectural commitments — recursive descent,
-  raise-on-mismatch, file:line:column on every AST node — are
-  finalised here.
+  / lhs / rhs shapes will grow as the compiler and long-tail
+  extensions add callers (see `docs/netfilter/DESIGN.md`). The
+  architectural commitments — recursive descent, raise-on-mismatch,
+  file:line:column on every AST node — are finalised here.
   """
 
   alias Linx.NFT.ParseError
@@ -244,7 +243,9 @@ defmodule Linx.NFT.Parser do
         parse_table_body(skip_seps(rest2), state, [{:comment, comment} | acc])
 
       [tok | _] ->
-        raise_unexpected!(state, tok,
+        raise_unexpected!(
+          state,
+          tok,
           "expected `chain`, `set`, `map`, `vmap`, `counter`, `quota`, `limit`, `flowtable`, `comment`, or `}`"
         )
     end
@@ -287,7 +288,9 @@ defmodule Linx.NFT.Parser do
 
       # `policy drop|accept` — stand-alone directive after `type ...`.
       [{:identifier, "policy", _meta} | rest] ->
-        {policy, rest2} = expect_one_of_atom!(rest, @policy_atoms, state, "policy (`accept`|`drop`)")
+        {policy, rest2} =
+          expect_one_of_atom!(rest, @policy_atoms, state, "policy (`accept`|`drop`)")
+
         parse_chain_body(skip_seps(rest2), state, [{:policy, policy} | opts], stmts)
 
       # `devices = { ifname, ... }` or `device "ifname"` for ingress/egress chains.
@@ -322,11 +325,20 @@ defmodule Linx.NFT.Parser do
   # offset by `+ N` / `- N`. Compiler resolves the named aliases.
   defp parse_priority(tokens, state) do
     case tokens do
-      [{:dash, _}, {:integer, n, meta} | rest] -> {{:integer, -n, meta}, rest}
-      [{:integer, n, meta} | rest] -> {{:integer, n, meta}, rest}
-      [{:identifier, name, meta} | rest] -> parse_priority_alias(name, meta, rest)
-      [tok | _] -> raise_unexpected!(state, tok, "expected priority value (integer or named alias)")
-      [] -> raise_eof!(state, "expected priority value")
+      [{:dash, _}, {:integer, n, meta} | rest] ->
+        {{:integer, -n, meta}, rest}
+
+      [{:integer, n, meta} | rest] ->
+        {{:integer, n, meta}, rest}
+
+      [{:identifier, name, meta} | rest] ->
+        parse_priority_alias(name, meta, rest)
+
+      [tok | _] ->
+        raise_unexpected!(state, tok, "expected priority value (integer or named alias)")
+
+      [] ->
+        raise_eof!(state, "expected priority value")
     end
   end
 
@@ -398,7 +410,9 @@ defmodule Linx.NFT.Parser do
         parse_collection_body(skip_seps(rest2), state, [{:comment, comment} | acc])
 
       [tok | _] ->
-        raise_unexpected!(state, tok,
+        raise_unexpected!(
+          state,
+          tok,
           "expected `type`, `flags`, `timeout`, `gc-interval`, `size`, `elements`, `comment`, or `}`"
         )
     end
@@ -483,8 +497,12 @@ defmodule Linx.NFT.Parser do
     end
   end
 
-  defp parse_object_inline([{:stmt_sep, _} | _] = tokens, _state, acc), do: {Enum.reverse(acc), tokens}
-  defp parse_object_inline([{:rbrace, _} | _] = tokens, _state, acc), do: {Enum.reverse(acc), tokens}
+  defp parse_object_inline([{:stmt_sep, _} | _] = tokens, _state, acc),
+    do: {Enum.reverse(acc), tokens}
+
+  defp parse_object_inline([{:rbrace, _} | _] = tokens, _state, acc),
+    do: {Enum.reverse(acc), tokens}
+
   defp parse_object_inline([], _state, acc), do: {Enum.reverse(acc), []}
 
   defp parse_object_inline([{:identifier, key, _} | rest], state, acc) do
@@ -731,8 +749,12 @@ defmodule Linx.NFT.Parser do
 
   defp parse_counter_stmt(tokens, meta, state) do
     case tokens do
-      [{:identifier, "packets", _}, {:integer, p, _},
-       {:identifier, "bytes", _}, {:integer, b, _} | rest] ->
+      [
+        {:identifier, "packets", _},
+        {:integer, p, _},
+        {:identifier, "bytes", _},
+        {:integer, b, _} | rest
+      ] ->
         {{:counter, [packets: p, bytes: b], meta}, rest}
 
       [{:identifier, "name", _} | rest] ->
@@ -970,9 +992,9 @@ defmodule Linx.NFT.Parser do
 
   defp parse_single_value([{:identifier, name, meta} | rest], _state) do
     # Could be a symbolic value (`established`, `tcp`, an interface
-    # name like `eth0`) or the start of a more complex value. For
-    # N8b we treat it as a bare identifier; the compiler is in
-    # charge of mapping `established` → `:established`, etc.
+    # name like `eth0`) or the start of a more complex value. We
+    # treat it as a bare identifier; the compiler is in charge of
+    # mapping `established` → `:established`, etc.
     {{:identifier, name, meta}, rest}
   end
 
@@ -1179,11 +1201,16 @@ defmodule Linx.NFT.Parser do
     families = ~w(ip ip6 inet arp bridge netdev)
 
     case tokens do
-      [{:identifier, name, _meta} | rest] when name in ["ip", "ip6", "inet", "arp", "bridge", "netdev"] ->
+      [{:identifier, name, _meta} | rest]
+      when name in ["ip", "ip6", "inet", "arp", "bridge", "netdev"] ->
         {String.to_atom(name), rest}
 
       [tok | _] ->
-        raise_unexpected!(state, tok, "expected table family (one of #{Enum.join(families, "|")})")
+        raise_unexpected!(
+          state,
+          tok,
+          "expected table family (one of #{Enum.join(families, "|")})"
+        )
 
       [] ->
         raise_eof!(state, "expected table family")

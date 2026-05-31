@@ -23,5 +23,22 @@ defmodule Linx.Netlink do
 
   Each protocol family then lives in its own namespace. The first is
   rtnetlink — the kernel's networking interface — under `Linx.Netlink.Rtnl`.
+
+  ## Example
+
+      # List the host's network interfaces.
+      {:ok, sock} = Linx.Netlink.Rtnl.open()
+      {:ok, links} = Linx.Netlink.Rtnl.Link.list(sock)
+      :ok = Linx.Netlink.Socket.close(sock)
+
+  ## Protocol families
+
+  Two protocol families are supported: **rtnetlink** (`Linx.Netlink.Rtnl` —
+  links, addresses, routes, neighbours, rules) and **nfnetlink**
+  (`Linx.Netlink.Nfnl` — the transport under `Linx.Netfilter`). The
+  wire layers (`Socket`, `Message`, `Attr`, `Request`, `Codec`) are
+  family-agnostic and shared across both. A concurrent-request
+  connection process, a multicast monitor, and generic netlink
+  (`NETLINK_GENERIC`) are future work.
   """
 end

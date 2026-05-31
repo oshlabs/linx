@@ -13,6 +13,15 @@ defmodule Linx.Mount do
   cloned-child case — bind-mounting host paths, propagating mount
   changes between namespaces, debugging mount tables.
 
+  ## The classic mount API
+
+  Linx wraps the classic syscalls — `mount(2)`, `umount2(2)`,
+  `pivot_root(2)` — not the newer `fsopen`/`fsmount`/`move_mount`
+  family (Linux ≥ 5.2). The classic calls are universally documented,
+  map one-to-one onto the tools operators already know, and are
+  single-shot calls on the calling thread (no fork), so a NIF wraps
+  them safely. The fd-based API is deferred to a future revision.
+
   ## Cross-namespace via `:in`
 
   Every mutating verb takes an `:in` option naming the mount
@@ -42,14 +51,13 @@ defmodule Linx.Mount do
   The same call works post-`proceed/1` against a running container
   for hot-mounting volumes or remounting paths.
 
-  ## Status
+  ## Forward compatibility
 
-  All foundation milestones shipped (M0–M4): `list/0`, `list/1`,
-  the mountinfo parser, `mount/4`, `umount/2`, `bind/3`,
-  `remount/2`, `move/2`, the cross-namespace `:in` option,
-  `pivot_root/3`, plus `%Linx.Mount.Entry{}` and
-  `%Linx.Mount.Error{}`. See `docs/mount/PLAN.md` for what was
-  built and `COVERAGE.md` for what's deferred.
+  `list/0..1` parse `/proc/.../mountinfo` defensively: a line that
+  doesn't match the expected shape — or carries an optional-field tag
+  Linx doesn't recognise — is silently skipped rather than crashing the
+  whole parse. A future kernel adding optional fields can't break a
+  mount-table read.
   """
 
   import Bitwise, only: [|||: 2]
@@ -210,8 +218,12 @@ defmodule Linx.Mount do
 
   defp parse_propagation(tag) do
     case String.split(tag, ":", parts: 2) do
-      ["shared", n] -> with {:ok, i} <- parse_int(n), do: {:shared, i}, else: (_ -> :skip)
-      ["master", n] -> with {:ok, i} <- parse_int(n), do: {:master, i}, else: (_ -> :skip)
+      ["shared", n] ->
+        with {:ok, i} <- parse_int(n), do: {:shared, i}, else: (_ -> :skip)
+
+      ["master", n] ->
+        with {:ok, i} <- parse_int(n), do: {:master, i}, else: (_ -> :skip)
+
       ["propagate_from", n] ->
         with {:ok, i} <- parse_int(n), do: {:propagate_from, i}, else: (_ -> :skip)
 
@@ -243,6 +255,7 @@ defmodule Linx.Mount do
   # in the root, mount_point, and source fields. We handle any
   # \nnn three-digit octal sequence to stay defensive.
   @doc false
+  @spec unescape(binary()) :: binary()
   def unescape(s) when is_binary(s), do: unescape(s, <<>>)
 
   defp unescape(<<>>, acc), do: acc
@@ -279,13 +292,13 @@ defmodule Linx.Mount do
   | `:nodev` | `MS_NODEV` |
   | `:noexec` | `MS_NOEXEC` |
   | `:sync` | `MS_SYNCHRONOUS` |
-  | `:remount` | `MS_REMOUNT` (driven by `remount/2` in M2) |
+  | `:remount` | `MS_REMOUNT` (driven by `remount/2`) |
   | `:mandlock` | `MS_MANDLOCK` |
   | `:dirsync` | `MS_DIRSYNC` |
   | `:noatime` | `MS_NOATIME` |
   | `:nodiratime` | `MS_NODIRATIME` |
-  | `:bind` | `MS_BIND` (driven by `bind/3` in M2) |
-  | `:move` | `MS_MOVE` (driven by `move/2` in M2) |
+  | `:bind` | `MS_BIND` (driven by `bind/3`) |
+  | `:move` | `MS_MOVE` (driven by `move/2`) |
   | `:rec` | `MS_REC` — recursive variant |
   | `:silent` | `MS_SILENT` |
   | `:private` | `MS_PRIVATE` — propagation |
@@ -594,8 +607,11 @@ defmodule Linx.Mount do
 
   defp do_pivot_root(new_root, put_old, ns_path) do
     case Native.pivot_root(new_root, put_old, ns_path) do
-      :ok -> :ok
-      {:error, {stage, errno}} -> {:error, build_pivot_root_error(stage, errno, new_root, ns_path)}
+      :ok ->
+        :ok
+
+      {:error, {stage, errno}} ->
+        {:error, build_pivot_root_error(stage, errno, new_root, ns_path)}
     end
   end
 

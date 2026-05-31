@@ -39,7 +39,7 @@ defmodule Linx.Netlink.Nfnl.Codec do
   envelope types `0x10` / `0x11`, defined in `nfnetlink.h`). The kernel
   applies the inner messages atomically or rejects the batch whole.
   `batch_begin/1..2` and `batch_end/1` produce the envelope messages —
-  N1+ stitches them around the inner request stream.
+  the caller stitches them around the inner request stream.
 
   ## Why this is its own module, not part of `Linx.Netlink.Codec`
 
@@ -76,9 +76,8 @@ defmodule Linx.Netlink.Nfnl.Codec do
 
   # nf_tables (subsys 10) operation low-bytes. From
   # `include/uapi/linux/netfilter/nf_tables.h` (`enum nf_tables_msg_types`).
-  # Only `GETGEN` (request) is used by N0; `NEWGEN` (reply / broadcast)
-  # decoding lands in N6 with the monitor socket. Full opcode table is in
-  # `docs/netfilter/PLAN.md`.
+  # `GETGEN` (request) drives the `supported?` probe; `NEWGEN`
+  # (reply / broadcast) is decoded by the monitor socket.
   #
   # The enum values are zero-indexed and dense:
   #   NEWTABLE=0, GETTABLE=1, DELTABLE=2,
@@ -292,7 +291,7 @@ defmodule Linx.Netlink.Nfnl.Codec do
     }
   end
 
-  # --- NFT_MSG_GETGEN round-trip (N0 bring-up + supported?) ----------------
+  # --- NFT_MSG_GETGEN round-trip (supported?) ------------------------------
 
   @doc """
   Sends `NFT_MSG_GETGEN` and returns the kernel's reply.

@@ -218,6 +218,17 @@ defmodule Linx.NFT.TokenizerTest do
       # a time literal — we don't recognise sub-second units yet.
       assert [{:integer, 10, _}, {:identifier, "ms", _}] = tokens!("10ms")
     end
+
+    test "a digit-led IPv6 hextet ending in d is an address, not N days" do
+      # `d` is the only time unit that is also a hex digit, so a first
+      # hextet like `830d` followed by `:` must scan as an IPv6 literal,
+      # not the time literal "830 days". Regression for the round-trip
+      # property finding.
+      assert [{:ipv6, "830d:ba45:76cf:7320:8582:4c9:3ab5:d1cb", _}] =
+               tokens!("830d:ba45:76cf:7320:8582:4c9:3ab5:d1cb")
+
+      assert [{:cidr_v6, "830d::/16", _}] = tokens!("830d::/16")
+    end
   end
 
   describe "IPv6 / CIDR / MAC" do
@@ -349,7 +360,8 @@ defmodule Linx.NFT.TokenizerTest do
     test "carries file and snippet from the offending line" do
       src = "table inet x {\nchain ? input {\n}\n}\n"
 
-      assert {:error, %ParseError{file: "rules.nft", line: 2, column: 7, snippet: snip, message: msg}} =
+      assert {:error,
+              %ParseError{file: "rules.nft", line: 2, column: 7, snippet: snip, message: msg}} =
                Tokenizer.tokenize(src, file: "rules.nft")
 
       assert snip == "chain ? input {"
