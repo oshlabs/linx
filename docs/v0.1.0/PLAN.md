@@ -477,6 +477,63 @@ Document what's hard to test (`ENOMEM` mid-syscall) and accept the gap.
 
 ---
 
+## Progress tracker (live — update as work lands)
+
+**Phase 1 — Combined review: ✅ COMPLETE.** `AUDIT.md` written (114
+findings) and annotated with outcomes. All fixups shipped on
+`polish-v0.1.0`:
+  - D1 `:no_process` collapse (Process + Tty, incl. tests + docs).
+  - D2 error model: added `Linx.Process.Error` + `Linx.Tty.Error`;
+    `@impl Exception` on `Netlink.Error`; uniform `{:bad_*, _}`
+    validation tuples in Process; `Netlink.Error` keeps no `:operation`
+    (option c, documented). D3 summary `Inspect` on Netfilter containers
+    + `Seccomp.Builder`. Seccomp `:bad_rules_arg` → `:bad_rules`.
+  - Bonus fix: `Linx.MAC.decode/1` no longer crashes on a non-6-byte
+    link-layer address.
+  - Decided NOT to do: `supported?/0` parity (noise on always-present
+    subsystems); Netfilter verb renames (→ `DESIGN.md`). The audit's
+    `@spec` dimension over-reported — 5 of 6 were already covered.
+
+**Phase 2 — Docs consolidation: 🟡 IN PROGRESS.**
+  Done:
+  - Retired all ten `PLAN.md` + `COVERAGE.md` + `netfilter/TODO.md`;
+    promoted the two genuinely-absent rationales (Mount classic-API,
+    Sysctl "not a config applier"). All dangling refs fixed; `mix.exs`
+    docs IA reworked; `maintain-living-docs` memory updated;
+    `docs/netfilter/DESIGN.md` created.
+  - Netlink entry moduledocs (`Netlink`/`Rtnl`/`Nfnl`) brought to the
+    what/why/example/status shape (the audit's lone laggard).
+  - `## Forward compatibility` sections added (Mount, Cgroup, User,
+    Sysctl, Seccomp; Capabilities already had one).
+  - **`mix format` the whole tree** (it had never been format-clean) —
+    isolated commit + `.git-blame-ignore-revs`. The Phase-4
+    `--check-formatted` gate now passes.
+  Remaining:
+  - **README slim** (the big one) — 62 KB → ~10–15 KB standard shape.
+    Agreed structure: keep the tagline + "primitives, not a runtime"
+    framing + the headline composition example + install + license;
+    compress the ten per-subsystem sections to a 1–3 sentence blurb each
+    linking to the module docs; cut the deep per-subsystem API
+    walkthroughs (now in the moduledocs / `EXAMPLES.md`). Also add
+    `LICENSE` to `mix.exs` `extras` (or make its README link relative)
+    to clear the one remaining `mix docs` broken-link warning.
+  - Minor polish (low priority): inline examples on the five Netlink
+    *resource* modules (`Link`/`Address`/`Route`/`Neighbour`/`Rule` —
+    the entry modules already have them); optional forward-compat notes
+    for Netlink's codec + Process/Tty's version-locked agent protocol.
+
+**Phase 3 — Hardening: ⬜ NOT STARTED** (StreamData property tests,
+C ASan/UBSan, error-path coverage).
+
+**Phase 4 — Release: ⬜ NOT STARTED.** Known open items:
+  - Resolve the **Elixir/Erlang version floor** (`mix.exs` pins `~> 1.19`).
+  - `mix.exs` `package:` metadata is absent — add it + `CHANGELOG.md`.
+  - **`mix compile --warnings-as-errors` still fails** on pre-existing
+    clause-grouping warnings in `lib/linx/netfilter/encoder.ex`,
+    `lib/linx/nft/compiler.ex`, and `lib/linx/nft/formatter.ex` — group
+    the split clauses before the CI gate.
+  - `--check-formatted` already passes (done in Phase 2).
+
 ## Notes for resuming after context compaction
 
   - Branch `polish-v0.1.0`, already rebased onto current `main`
