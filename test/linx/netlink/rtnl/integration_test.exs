@@ -219,4 +219,59 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
              r.src == ~IP"10.0.0.0" and r.priority == 1000
            end)
   end
+
+  # --- Phase 1: route actuation parity (opts, replace, idempotency) ---------
+
+  test "replace/5 upserts: installs, then changes the gateway in place",
+       %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+
+    # No prior route: replace acts as create.
+    assert :ok = Route.replace(socket, "10.60.0.0", 24, "10.99.0.1")
+
+    {:ok, routes} = Route.list(socket)
+    assert Enum.any?(routes, &(&1.dst == ~IP"10.60.0.0" and &1.gateway == ~IP"10.99.0.1"))
+
+    # Existing route: replace updates the gateway in place (no delete+add).
+    assert :ok = Route.replace(socket, "10.60.0.0", 24, "10.99.0.3")
+
+    {:ok, routes2} = Route.list(socket)
+    matching = Enum.filter(routes2, &(&1.dst == ~IP"10.60.0.0"))
+    assert [%Route{gateway: ~IP"10.99.0.3"}] = matching
+  end
+
+  test "add/5 honours :table, :protocol and :metric; visible via list/1",
+       %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+
+    assert :ok =
+             Route.add(socket, "10.70.0.0", 24, "10.99.0.1",
+               table: 100,
+               protocol: :static,
+               metric: 50
+             )
+
+    {:ok, routes} = Route.list(socket)
+    assert r = Enum.find(routes, &(&1.dst == ~IP"10.70.0.0"))
+    assert Route.target_table(r) == 100
+    assert r.protocol == 4
+    assert r.priority == 50
+
+    assert :ok = Route.delete(socket, "10.70.0.0", 24, "10.99.0.1", table: 100, metric: 50)
+    {:ok, after_delete} = Route.list(socket)
+    refute Enum.any?(after_delete, &(&1.dst == ~IP"10.70.0.0"))
+  end
+
+  test "add/5 is strict (EEXIST on a duplicate) where replace/5 is idempotent",
+       %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+
+    assert :ok = Route.add(socket, "10.80.0.0", 24, "10.99.0.1")
+    assert {:error, %Error{errno: :eexist}} = Route.add(socket, "10.80.0.0", 24, "10.99.0.1")
+    # replace tolerates the existing route.
+    assert :ok = Route.replace(socket, "10.80.0.0", 24, "10.99.0.1")
+  end
 end

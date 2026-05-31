@@ -2,13 +2,42 @@ defmodule Linx.Netlink.Rtnl.Route do
   @moduledoc """
   rtnetlink routes — the `RTM_*ROUTE` messages.
 
-  `list/1` reads routes; `add/4`, `add_default/2`, `delete/4` and
-  `delete_default/2` install and remove them. IPv4 and IPv6 are both
-  supported — the address family is detected from the destination and
+  `list/1` reads routes; `add/5`, `add_default/3`, `replace/5`, `delete/5`
+  and `delete_default/3` install, update, and remove them. IPv4 and IPv6 are
+  both supported — the address family is detected from the destination and
   gateway, which must agree.
 
   Address-typed fields (`:dst`, `:gateway`) on a decoded `%Route{}` are
   `Linx.IP` structs; verbs accept strings or `Linx.IP`s.
+
+  ## Options
+
+  `add/5`, `replace/5`, `delete/5` (and their `*_default` forms) take an
+  options keyword:
+
+    * `:table` — routing table (1..2^32-1). Default `254` (the main table).
+    * `:protocol` — the route's origin tag (`rtm_protocol`). An integer
+      0..255, or one of `:kernel` (2), `:boot` (3, the default), `:static`
+      (4), `:ra` (9), `:dhcp` (16). This is the ownership marker a reconciler
+      uses to manage only its own routes (see the reconcile design notes).
+    * `:metric` — the route metric / `RTA_PRIORITY` (a `u32`); omitted when
+      not given, which the kernel treats as metric 0.
+
+  ## add vs replace
+
+    * `add/5` uses `NLM_F_CREATE | NLM_F_EXCL` — it errors (`:eexist`) if a
+      matching route already exists.
+    * `replace/5` uses `NLM_F_CREATE | NLM_F_REPLACE` — create-or-replace. It
+      installs the route if absent and overwrites it (e.g. a changed gateway)
+      if present. This is the idempotent upsert a reconciler applies, and the
+      only way to change a route's mutable attributes in place.
+
+  ## The two table representations
+
+  `struct rtmsg`'s `table` is a `u8`, so tables above 255 are conveyed via the
+  separate `RTA_TABLE` attribute (mapped to `:table_ext`); the kernel sets the
+  header byte to `RT_TABLE_UNSPEC` in that case. `target_table/1` returns the
+  effective table — taking `:table_ext` when present, falling back to `:table`.
 
   ## Example
 
@@ -17,11 +46,13 @@ defmodule Linx.Netlink.Rtnl.Route do
       :ok = Route.add_default(sock, "10.0.0.1")
       :ok = Route.add(sock, "192.168.9.0", 24, "10.0.0.254")
 
-      {:ok, routes} = Route.list(sock)
-      # => [#Linx.Netlink.Rtnl.Route<default via 10.0.0.1 oif=2>,
-      #     #Linx.Netlink.Rtnl.Route<192.168.9.0/24 via 10.0.0.254 oif=2>]
+      # Change the gateway in place (idempotent upsert):
+      :ok = Route.replace(sock, "192.168.9.0", 24, "10.0.0.253")
 
-      # Which route would win for a given destination?
+      # A route in a custom table, tagged with a dedicated protocol:
+      :ok = Route.add(sock, "10.50.0.0", 24, "10.0.0.1", table: 100, protocol: 4)
+
+      {:ok, routes} = Route.list(sock)
       {:ok, route} = Route.get(sock, "192.168.9.7")
 
       :ok = Route.delete_default(sock, "10.0.0.1")
@@ -54,6 +85,18 @@ defmodule Linx.Netlink.Rtnl.Route do
   @rt_scope_nowhere 255
   @rtn_unicast 1
 
+  # Named rtm_protocol values — include/uapi/linux/rtnetlink.h. A reconciler
+  # claims ownership by tagging its routes with a dedicated protocol number
+  # and reaping only routes carrying that tag.
+  @rtprot %{
+    redirect: 1,
+    kernel: 2,
+    boot: 3,
+    static: 4,
+    ra: 9,
+    dhcp: 16
+  }
+
   codec do
     # struct rtmsg — include/uapi/linux/rtnetlink.h.
     header do
@@ -72,7 +115,18 @@ defmodule Linx.Netlink.Rtnl.Route do
     attr(1, :dst, Linx.IP)
     attr(4, :oif, :u32)
     attr(5, :gateway, Linx.IP)
+    attr(6, :priority, :u32)
+    attr(15, :table_ext, :u32)
   end
+
+  @typedoc """
+  Options for `add/5`, `replace/5`, and `delete/5`. See the moduledoc.
+  """
+  @type opts :: [
+          table: pos_integer(),
+          protocol: 0..255 | atom(),
+          metric: non_neg_integer()
+        ]
 
   @doc "Lists every route in the socket's network namespace."
   @spec list(Socket.t()) :: {:ok, [t()]} | {:error, term}
@@ -110,12 +164,13 @@ defmodule Linx.Netlink.Rtnl.Route do
   @doc """
   Adds a route to `destination`/`prefix` via `gateway`.
 
+  Strict create: errors with `:eexist` if a matching route already exists.
   `destination` and `gateway` are each a string or an `Linx.IP`, and must
-  share an address family.
+  share an address family. See the moduledoc for `opts`.
   """
-  @spec add(Socket.t(), binary | IP.t(), non_neg_integer, binary | IP.t()) ::
+  @spec add(Socket.t(), binary | IP.t(), non_neg_integer, binary | IP.t(), opts) ::
           :ok | {:error, term}
-  def add(%Socket{} = socket, destination, prefix, gateway) when is_integer(prefix) do
+  def add(%Socket{} = socket, destination, prefix, gateway, opts \\ []) when is_integer(prefix) do
     write(
       socket,
       destination,
@@ -123,7 +178,30 @@ defmodule Linx.Netlink.Rtnl.Route do
       gateway,
       @rtm_newroute,
       @rt_scope_universe,
-      nlm_f_create() ||| nlm_f_excl() ||| nlm_f_ack()
+      nlm_f_create() ||| nlm_f_excl() ||| nlm_f_ack(),
+      opts
+    )
+  end
+
+  @doc """
+  Create-or-replace: installs the route if absent, overwrites it in place
+  (e.g. a changed gateway) if present.
+
+  Idempotent — the reconciler's apply verb. Same arguments as `add/5`.
+  """
+  @spec replace(Socket.t(), binary | IP.t(), non_neg_integer, binary | IP.t(), opts) ::
+          :ok | {:error, term}
+  def replace(%Socket{} = socket, destination, prefix, gateway, opts \\ [])
+      when is_integer(prefix) do
+    write(
+      socket,
+      destination,
+      prefix,
+      gateway,
+      @rtm_newroute,
+      @rt_scope_universe,
+      nlm_f_create() ||| nlm_f_replace() ||| nlm_f_ack(),
+      opts
     )
   end
 
@@ -131,17 +209,18 @@ defmodule Linx.Netlink.Rtnl.Route do
   Adds the default route (`0.0.0.0/0` for IPv4, `::/0` for IPv6) via
   `gateway`.
   """
-  @spec add_default(Socket.t(), binary | IP.t()) :: :ok | {:error, term}
-  def add_default(socket, gateway) do
+  @spec add_default(Socket.t(), binary | IP.t(), opts) :: :ok | {:error, term}
+  def add_default(socket, gateway, opts \\ []) do
     with {:ok, %IP{family: family} = gw_ip} <- coerce_ip(gateway) do
-      add(socket, default_destination(family), 0, gw_ip)
+      add(socket, default_destination(family), 0, gw_ip, opts)
     end
   end
 
   @doc "Deletes the route to `destination`/`prefix` via `gateway`."
-  @spec delete(Socket.t(), binary | IP.t(), non_neg_integer, binary | IP.t()) ::
+  @spec delete(Socket.t(), binary | IP.t(), non_neg_integer, binary | IP.t(), opts) ::
           :ok | {:error, term}
-  def delete(%Socket{} = socket, destination, prefix, gateway) when is_integer(prefix) do
+  def delete(%Socket{} = socket, destination, prefix, gateway, opts \\ [])
+      when is_integer(prefix) do
     write(
       socket,
       destination,
@@ -149,34 +228,61 @@ defmodule Linx.Netlink.Rtnl.Route do
       gateway,
       @rtm_delroute,
       @rt_scope_nowhere,
-      nlm_f_ack()
+      nlm_f_ack(),
+      opts
     )
   end
 
   @doc "Deletes the default route via `gateway`."
-  @spec delete_default(Socket.t(), binary | IP.t()) :: :ok | {:error, term}
-  def delete_default(socket, gateway) do
+  @spec delete_default(Socket.t(), binary | IP.t(), opts) :: :ok | {:error, term}
+  def delete_default(socket, gateway, opts \\ []) do
     with {:ok, %IP{family: family} = gw_ip} <- coerce_ip(gateway) do
-      delete(socket, default_destination(family), 0, gw_ip)
+      delete(socket, default_destination(family), 0, gw_ip, opts)
     end
   end
 
-  defp write(socket, destination, prefix, gateway, rtm, scope, flags) do
+  @doc """
+  Returns the effective routing table for a route, handling both the in-header
+  byte form and the `RTA_TABLE` extension used for tables above 255.
+  """
+  @spec target_table(t()) :: non_neg_integer
+  def target_table(%__MODULE__{table_ext: t}) when is_integer(t) and t > 0, do: t
+  def target_table(%__MODULE__{table: t}), do: t
+
+  @doc false
+  # Builds the %Route{} message for a write. Pure — no socket, no I/O — so the
+  # option resolution and table-splitting are unit-testable, and Phase-3
+  # reconcile can construct messages without a verb. `scope` is the rtm scope
+  # byte (universe for add/replace, nowhere for delete-match-any).
+  @spec build(binary | IP.t(), non_neg_integer, binary | IP.t(), 0..255, opts) ::
+          {:ok, t()} | {:error, term}
+  def build(destination, prefix, gateway, scope, opts \\ []) do
     with {:ok, %IP{family: family} = dst} <- coerce_ip(destination),
          {:ok, %IP{family: gw_family} = gw} <- coerce_ip(gateway),
          :ok <- check_families(family, gw_family),
-         :ok <- check_prefix(family, prefix) do
+         :ok <- check_prefix(family, prefix),
+         {:ok, table} <- resolve_table(opts),
+         {:ok, protocol} <- resolve_protocol(opts),
+         {:ok, metric} <- resolve_metric(opts) do
       message = %__MODULE__{
         family: family_int(family),
         dst_len: prefix,
-        table: @rt_table_main,
-        protocol: @rtprot_boot,
+        table: if(table <= 255, do: table, else: 0),
+        table_ext: if(table > 255, do: table, else: nil),
+        protocol: protocol,
         scope: scope,
         type: @rtn_unicast,
         dst: dst,
-        gateway: gw
+        gateway: gw,
+        priority: metric
       }
 
+      {:ok, message}
+    end
+  end
+
+  defp write(socket, destination, prefix, gateway, rtm, scope, flags, opts) do
+    with {:ok, message} <- build(destination, prefix, gateway, scope, opts) do
       case Request.talk(socket, rtm, flags, encode(message)) do
         {:ok, _} -> :ok
         {:error, _} = error -> error
@@ -194,6 +300,37 @@ defmodule Linx.Netlink.Rtnl.Route do
   defp check_prefix(:inet6, p) when p in 0..128, do: :ok
   defp check_prefix(_, p), do: {:error, {:bad_prefix, p}}
 
+  defp resolve_table(opts) do
+    case Keyword.get(opts, :table, @rt_table_main) do
+      n when is_integer(n) and n in 1..0xFFFFFFFF -> {:ok, n}
+      other -> {:error, {:bad_option, :table, other}}
+    end
+  end
+
+  defp resolve_protocol(opts) do
+    case Keyword.get(opts, :protocol, @rtprot_boot) do
+      n when is_integer(n) and n in 0..255 ->
+        {:ok, n}
+
+      a when is_atom(a) ->
+        case Map.fetch(@rtprot, a) do
+          {:ok, n} -> {:ok, n}
+          :error -> {:error, {:bad_option, :protocol, a}}
+        end
+
+      other ->
+        {:error, {:bad_option, :protocol, other}}
+    end
+  end
+
+  defp resolve_metric(opts) do
+    case Keyword.get(opts, :metric) do
+      nil -> {:ok, nil}
+      n when is_integer(n) and n in 0..0xFFFFFFFF -> {:ok, n}
+      other -> {:error, {:bad_option, :metric, other}}
+    end
+  end
+
   defp default_destination(:inet), do: "0.0.0.0"
   defp default_destination(:inet6), do: "::"
 
@@ -201,18 +338,30 @@ defmodule Linx.Netlink.Rtnl.Route do
   defp family_int(:inet6), do: @af_inet6
 
   defimpl Inspect do
-    def inspect(%{dst: dst, dst_len: dst_len, gateway: gateway, oif: oif}, _opts) do
+    alias Linx.Netlink.Rtnl.Route
+
+    def inspect(%Route{} = route, _opts) do
       dst_part =
         cond do
-          is_nil(dst) and dst_len == 0 -> "default"
-          dst -> "#{Linx.IP.to_string(dst)}/#{dst_len}"
+          is_nil(route.dst) and route.dst_len == 0 -> "default"
+          route.dst -> "#{Linx.IP.to_string(route.dst)}/#{route.dst_len}"
           true -> "?"
         end
 
-      gateway_part = if gateway, do: " via #{Linx.IP.to_string(gateway)}", else: ""
-      oif_part = if oif, do: " oif=#{oif}", else: ""
+      table = Route.target_table(route)
 
-      "#Linx.Netlink.Rtnl.Route<#{dst_part}#{gateway_part}#{oif_part}>"
+      extras =
+        [
+          route.gateway && "via #{Linx.IP.to_string(route.gateway)}",
+          route.oif && "oif=#{route.oif}",
+          is_integer(table) and table != 254 and "table=#{table}",
+          route.priority && "metric=#{route.priority}",
+          is_integer(route.protocol) and route.protocol != 3 and "proto=#{route.protocol}"
+        ]
+        |> Enum.filter(&is_binary/1)
+
+      body = Enum.join([dst_part | extras], " ")
+      "#Linx.Netlink.Rtnl.Route<#{body}>"
     end
   end
 end

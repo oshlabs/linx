@@ -216,6 +216,30 @@ IPv6 works through the same API — `Route.add(sock, "fd00::", 64, "fc00::1")`
 or `Route.add_default(sock, "fc00::1")`; the family is taken from the
 gateway and destination, which must agree.
 
+### In-place updates and route options
+
+`replace/5` is create-or-replace: install the route if absent, overwrite it
+in place (e.g. a changed gateway) if present. It is idempotent, where `add/5`
+is strict (`:eexist` on a duplicate).
+
+```elixir
+Route.add(sock, "10.99.0.0", 24, "10.0.42.1")       # strict; errors if present
+Route.replace(sock, "10.99.0.0", 24, "10.0.42.9")   # upsert; new gateway in place
+```
+
+`add/5`, `replace/5` and `delete/5` take `:table`, `:protocol` and `:metric`.
+
+```elixir
+# A route in a custom table, tagged with a dedicated protocol, at a metric.
+Route.add(sock, "10.50.0.0", 24, "10.0.42.1", table: 100, protocol: :static, metric: 50)
+Route.delete(sock, "10.50.0.0", 24, "10.0.42.1", table: 100, metric: 50)
+```
+
+`:protocol` (an integer, or `:kernel`/`:boot`/`:static`/`:ra`/`:dhcp`) is the
+ownership tag a reconciler uses to manage only its own routes; `:table`
+accepts any value (tables above 255 ride `RTA_TABLE` automatically);
+`:metric` is the route's `RTA_PRIORITY`.
+
 ## Neighbours
 
 Static ARP (IPv4) or NDP (IPv6) entries — mapping an IP to a MAC on a
