@@ -254,7 +254,7 @@ the agent:
 |---|---|
 | Pre-`:ready` (`:spawned` not yet processed) | `{:error, :not_ready}` |
 | Post-`proceed/1` (workload running) | `{:error, :running}` |
-| Post-terminal (`:exited`, `:signaled`, or `:aborted`) | `{:error, :already_terminated}` |
+| Post-terminal (`:exited`, `:signaled`, or `:aborted`) | `{:error, :no_process}` |
 | Unknown atom in `caps` | `{:error, {:bad_capability, atom}}` |
 | Missing key in `set_thread_sets/2` opts | `{:error, {:bad_thread_sets, {:missing, key}}}` |
 

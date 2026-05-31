@@ -247,7 +247,7 @@ no buffered-signal dance.
 | Pre-`:ready` | `:ok` — buffered, fires at the checkpoint |
 | `:ready` (parked) | `:ok` — immediate abort |
 | `:running` | `{:error, :running}` — past the line; use `signal/2` |
-| Already terminal | `{:error, :already_terminated}` |
+| Already terminal | `{:error, :no_process}` |
 
 The pre-`:ready` buffering mirrors `signal/2`'s shape — both verbs
 let you express intent before the agent is ready to act on it.

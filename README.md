@@ -737,7 +737,7 @@ Errors are structured: `%Linx.Capabilities.Error{path, operation, errno, code}` 
 
 The verbs are agent-side (the child applies them just before `execve`) — they can't be implemented as a NIF because `capset(2)` and `prctl(PR_CAP*)` are per-thread syscalls and the kernel rejects cross-thread calls. See "Going further: strip capabilities before the workload runs" above for the end-to-end recipe.
 
-**State-machine errors** mirror `Linx.Process.abort/1`: `{:error, :not_ready}` / `{:error, :running}` / `{:error, :already_terminated}`. Caller-side input errors: `{:error, {:bad_capability, atom}}` for unknown cap atoms, `{:error, {:bad_thread_sets, {:missing, key}}}` for `set_thread_sets/2` opts missing one of the three required keys. Kernel-level failures (the workload couldn't drop the cap, capset's subset rule was violated, etc.) arrive asynchronously as `{:linx_process, :error, errno, :cap_drop_bounding | :cap_set_thread | :cap_set_ambient}` on the owner's mailbox.
+**State-machine errors** mirror `Linx.Process.abort/1`: `{:error, :not_ready}` / `{:error, :running}` / `{:error, :no_process}`. Caller-side input errors: `{:error, {:bad_capability, atom}}` for unknown cap atoms, `{:error, {:bad_thread_sets, {:missing, key}}}` for `set_thread_sets/2` opts missing one of the three required keys. Kernel-level failures (the workload couldn't drop the cap, capset's subset rule was violated, etc.) arrive asynchronously as `{:linx_process, :error, errno, :cap_drop_bounding | :cap_set_thread | :cap_set_ambient}` on the owner's mailbox.
 
 **Root only for writes.** `PR_CAPBSET_DROP` and `capset(2)` require `CAP_SETPCAP` in the calling thread's effective set, which in practice means the BEAM runs as root.
 
@@ -806,7 +806,7 @@ P.proceed(c)
 
 The filter is installed by the child agent (`apply_seccomp` in `c_src/linx_process.c`) right before `execve(2)` — so even `execve` itself is gated by the filter, which is what makes the contract airtight. `seccomp(SECCOMP_SET_MODE_FILTER)` needs `PR_SET_NO_NEW_PRIVS` (or `CAP_SYS_ADMIN`); pass `no_new_privs: true` to `spawn/1` for the principled posture, or let `install/2` auto-set it for you.
 
-**State-machine errors** mirror `Linx.Capabilities`'s write verbs: `{:error, :not_ready}` / `{:error, :running}` / `{:error, :already_terminated}`. Caller-side build errors are tagged tuples: `{:error, {:unknown_syscall, atom}}`, `{:error, {:bad_action, _}}`, `{:error, {:duplicate_rule, atom}}`, `{:error, {:unsupported_arch, atom}}`. Kernel-level install failures arrive asynchronously as `{:linx_process, :error, errno, :seccomp_install | :seccomp_no_new_privs}` on the owner mailbox.
+**State-machine errors** mirror `Linx.Capabilities`'s write verbs: `{:error, :not_ready}` / `{:error, :running}` / `{:error, :no_process}`. Caller-side build errors are tagged tuples: `{:error, {:unknown_syscall, atom}}`, `{:error, {:bad_action, _}}`, `{:error, {:duplicate_rule, atom}}`, `{:error, {:unsupported_arch, atom}}`. Kernel-level install failures arrive asynchronously as `{:linx_process, :error, errno, :seccomp_install | :seccomp_no_new_privs}` on the owner mailbox.
 
 **`%Linx.Seccomp.Error{operation, errno, code}`** is the struct shape for non-tuple build failures (today just the `:e2big` case for filters that would overflow the 8-bit jump distance — the hand-curated tables are well under the limit, but the check is there for when the table grows).
 
