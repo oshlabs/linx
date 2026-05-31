@@ -304,6 +304,36 @@ Diff.addresses(desired_addrs, observed_addrs, owned)
 
 See the `Linx.Netlink.Rtnl.Diff` moduledoc for the full key/ownership table.
 
+### Single-shot reconcile
+
+`Linx.Netlink.Rtnl.Reconcile.reconcile/4` composes the diffs into one ordered,
+converging pass for **addresses and routes** on existing interfaces. You author
+the desired state by interface name; indices are resolved each pass. It applies
+addresses before routes (so a gateway is reachable), is fail-fast, and returns
+a report whose `:last_applied` you thread into the next pass.
+
+```elixir
+desired = %{
+  addresses: [{"eth0", "10.0.0.2", 24}],
+  routes: [{"10.50.0.0", 24, "10.0.0.1"}, {:default, "10.0.0.1"}]
+}
+
+{:ok, r} = Reconcile.reconcile(sock, desired)
+r.converged?        # true once the kernel matches
+r.applied           # the ops that ran this pass
+
+# Idempotent — a second pass with the threaded ownership does nothing.
+{:ok, r2} = Reconcile.reconcile(sock, desired, r.last_applied)
+r2.applied == []
+```
+
+Run it on a timer and it self-heals: delete an address by hand and the next
+pass restores it; drop one from `desired` and the next pass removes it — but
+only addresses *it* installed, never a foreign one that merely appeared.
+Routes are owned by `rtm_protocol` (default `76`, override with `:protocol`),
+so a route written by anything else is invisible to the reconciler and never
+touched. Link lifecycle, rules, and neighbours are out of this pass's scope.
+
 ## IP addresses, subnets, and MAC addresses
 
 IP addresses, subnets and MAC addresses are first-class values — `Linx.IP`,

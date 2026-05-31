@@ -274,4 +274,120 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     # replace tolerates the existing route.
     assert :ok = Route.replace(socket, "10.80.0.0", 24, "10.99.0.1")
   end
+
+  # --- Phase 4: single-shot reconcile (addresses + routes) ------------------
+
+  alias Linx.Netlink.Rtnl.Reconcile
+  alias Linx.Netlink.Rtnl.Reconcile.Report
+
+  defp has_addr?(socket, ip), do: Enum.any?(addrs(socket), &(&1.address == ip))
+  defp addrs(socket), do: (fn {:ok, a} -> a end).(Address.list(socket, "dummy0"))
+  defp owns_route?(socket, dst), do: Enum.any?(routes76(socket), &(&1.dst == dst))
+
+  defp routes76(socket),
+    do: (fn {:ok, r} -> Enum.filter(r, &(&1.protocol == 76)) end).(Route.list(socket))
+
+  test "reconcile converges addresses and routes, then is idempotent", %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+
+    desired = %{
+      addresses: [{"dummy0", "10.99.0.2", 24}],
+      routes: [{"10.50.0.0", 24, "10.99.0.1"}, {:default, "10.99.0.1"}]
+    }
+
+    assert {:ok, %Report{} = r} = Reconcile.reconcile(socket, desired)
+    assert r.converged?
+    assert r.failed == []
+    assert length(r.applied) == 3
+    assert has_addr?(socket, ~IP"10.99.0.2")
+    assert owns_route?(socket, ~IP"10.50.0.0")
+
+    # Second pass with the threaded last_applied: nothing to do.
+    assert {:ok, %Report{} = r2} = Reconcile.reconcile(socket, desired, r.last_applied)
+    assert r2.converged?
+    assert r2.applied == []
+  end
+
+  test "reconcile repairs drift: a hand-deleted address is restored", %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    desired = %{addresses: [{"dummy0", "10.99.0.2", 24}], routes: []}
+
+    assert {:ok, r} = Reconcile.reconcile(socket, desired)
+    assert has_addr?(socket, ~IP"10.99.0.2")
+
+    # Out-of-band drift.
+    assert :ok = Address.delete(socket, "dummy0", "10.99.0.2", 24)
+    refute has_addr?(socket, ~IP"10.99.0.2")
+
+    # Next pass restores it.
+    assert {:ok, r2} = Reconcile.reconcile(socket, desired, r.last_applied)
+    assert r2.converged?
+    assert [{:create, %Address{}}] = r2.applied
+    assert has_addr?(socket, ~IP"10.99.0.2")
+  end
+
+  test "reconcile deletes an owned address dropped from desired, leaves a foreign one",
+       %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+
+    # Own two addresses.
+    assert {:ok, r} =
+             Reconcile.reconcile(socket, %{
+               addresses: [{"dummy0", "10.99.0.2", 24}, {"dummy0", "10.99.0.3", 24}]
+             })
+
+    # A foreign address appears out of band (never owned by us).
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.9", 24)
+
+    # Desired now wants only .2; .3 is ours-and-unwanted, .9 is foreign.
+    assert {:ok, r2} =
+             Reconcile.reconcile(
+               socket,
+               %{addresses: [{"dummy0", "10.99.0.2", 24}]},
+               r.last_applied
+             )
+
+    assert r2.converged?
+    assert [{:delete, %Address{address: ~IP"10.99.0.3"}}] = r2.applied
+    assert has_addr?(socket, ~IP"10.99.0.2")
+    refute has_addr?(socket, ~IP"10.99.0.3")
+    # Foreign address untouched.
+    assert has_addr?(socket, ~IP"10.99.0.9")
+  end
+
+  test "reconcile updates a route's gateway in place", %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+
+    assert {:ok, r} = Reconcile.reconcile(socket, %{routes: [{"10.50.0.0", 24, "10.99.0.1"}]})
+    assert r.converged?
+
+    assert {:ok, r2} =
+             Reconcile.reconcile(
+               socket,
+               %{routes: [{"10.50.0.0", 24, "10.99.0.5"}]},
+               r.last_applied
+             )
+
+    assert [{:update, %Route{gateway: ~IP"10.99.0.5"}}] = r2.applied
+
+    matching = Enum.filter(routes76(socket), &(&1.dst == ~IP"10.50.0.0"))
+    assert [%Route{gateway: ~IP"10.99.0.5"}] = matching
+  end
+
+  test "reconcile ignores routes owned by another protocol", %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+    assert :ok = Address.add(socket, "dummy0", "10.99.0.2", 24)
+
+    # A foreign (static-protocol) route the reconciler must never touch.
+    assert :ok = Route.add(socket, "10.77.0.0", 24, "10.99.0.1", protocol: :static)
+
+    # Reconcile an empty desired: it must not delete the foreign route.
+    assert {:ok, r} = Reconcile.reconcile(socket, %{routes: []})
+    assert r.converged?
+    assert r.applied == []
+
+    {:ok, all} = Route.list(socket)
+    assert Enum.any?(all, &(&1.dst == ~IP"10.77.0.0" and &1.protocol == 4))
+  end
 end
