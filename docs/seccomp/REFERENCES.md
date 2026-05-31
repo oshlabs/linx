@@ -98,9 +98,9 @@ The web-readable upstream:
 
 ## In-repo cross-references
 
-- `Linx.Process` — the checkpoint protocol that S2
-  hooks into. S2 adds one new agent command to that protocol.
-- `Linx.Capabilities` — the K2 commit pattern S2
+- `Linx.Process` — the checkpoint protocol that `Linx.Seccomp`
+  hooks into, adding one new agent command to that protocol.
+- `Linx.Capabilities` — the commit pattern `Linx.Seccomp`
   mirrors exactly (per-thread syscalls applied by the child
   agent at the checkpoint).
 - `lib/linx/capabilities.ex` — pattern for the public verb +
@@ -108,7 +108,7 @@ The web-readable upstream:
 - `lib/linx/capabilities/error.ex` — pattern for
   `Linx.Seccomp.Error`'s shape and Exception impl.
 - `c_src/linx_process.c` — `child_read_command()` and
-  `await_proceed()` are where S2's new branches land.
+  `await_proceed()` are where the new branches land.
 
 ## Out of scope — pointers for future work
 
@@ -116,7 +116,7 @@ The web-readable upstream:
   than cBPF (loops, maps, helper functions). A future
   `Linx.Seccomp.EBpf` might layer on top.
 - **`SECCOMP_RET_USER_NOTIF`** — kernel-to-userspace decision
-  delegation. Documented in `seccomp_unotify(2)`. Future S3 or
+  delegation. Documented in `seccomp_unotify(2)`. A future
   sibling module.
 - **`PTRACE_SECCOMP_GET_FILTER`** — extracting an installed
   filter from a running process via ptrace. See `ptrace(2)`.

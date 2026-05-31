@@ -75,7 +75,7 @@ defmodule Linx.Process do
       connect for `{:connect_unix, _}`, or the PTY slave's `TIOCSCTTY`).
     * `:execve` — `execve(2)` returned (i.e. failed).
     * `:cap_drop_bounding`, `:cap_set_thread`, `:cap_set_ambient` —
-      one of the K2 capability syscalls failed in the child
+      one of the capability syscalls failed in the child
       (`Linx.Capabilities`).
     * `:seccomp_install` — `seccomp(SECCOMP_SET_MODE_FILTER, …)` failed
       in the child (`Linx.Seccomp.install/2`). Common errno is `EINVAL`
@@ -112,16 +112,6 @@ defmodule Linx.Process do
       synthesised by the BEAM-side GenServer on
       `{port, {:exit_status, _}}` when no other terminal has been
       recorded yet, so the owner never hangs.
-
-  ## Status
-
-  P0–P6 shipped: scaffolding, `spawn/1` with the checkpoint protocol,
-  `signal/2` / `wait/1`, `enter/2` (setns + fork into a target's
-  namespaces), PTY mode (`stdio: :pty` + `pty_master/1` /
-  `pty_write/2` / `pty_set_winsize/3`), `abort/1`, `host_pid/1`. The
-  K2 cap commands (`drop_bounding/2` / `set_thread_sets/2` /
-  `set_ambient/2`) live in `Linx.Capabilities` but hook into this
-  module's checkpoint window.
   """
 
   use GenServer
@@ -131,7 +121,7 @@ defmodule Linx.Process do
   # The pid that `spawn/1` and `enter/2` return is the GenServer pid.
   @type t :: pid()
 
-  # The kinds of namespace the child may be cloned into (P1) or join (P3).
+  # The kinds of namespace the child may be cloned into or join.
   # Each maps to a CLONE_NEW* flag in the C agent.
   @type namespace :: :net | :mount | :pid | :uts | :ipc | :user | :cgroup | :time
 
@@ -755,7 +745,7 @@ defmodule Linx.Process do
     {:reply, :ok, %{state | pending_abort?: true}}
   end
 
-  # K2 -- Linx.Capabilities write verbs. Three commands, all only
+  # Linx.Capabilities write verbs. Three commands, all only
   # valid at the :ready checkpoint (between `:ready` and `proceed/1` /
   # `abort/1`). State-machine guards mirror what's documented on the
   # Linx.Capabilities verbs: :no_process > :running >
@@ -826,8 +816,8 @@ defmodule Linx.Process do
     {:reply, :ok, state}
   end
 
-  # S2 -- Linx.Seccomp.install/2. Same state-machine guards as the
-  # K2 cap commands (:no_process > :running > :not_ready >
+  # Linx.Seccomp.install/2. Same state-machine guards as the
+  # cap commands (:no_process > :running > :not_ready >
   # forward). The wire frame is {:seccomp_install, <<bpf>>}; the
   # agent forwards it verbatim to the child, which sets NNP (if not
   # on) and calls seccomp(SECCOMP_SET_MODE_FILTER) before execve.

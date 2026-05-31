@@ -13,14 +13,6 @@ defmodule Linx.Netlink.Rtnl do
       {:ok, links} = Linx.Netlink.Rtnl.Link.list(sock)
       {:ok, addrs} = Linx.Netlink.Rtnl.Address.list(sock)
       :ok = Linx.Netlink.Socket.close(sock)
-
-  ## Status
-
-  Shipped resource modules: `Linx.Netlink.Rtnl.Link` (create / list /
-  configure / delete — macvlan, ipvlan, veth, vlan, bridge, dummy),
-  `Address`, `Route`, `Neighbour`, `Rule`, and read-only `Stats`. One
-  socket drives all of them; cross-namespace work opens the socket in
-  the target netns (`open({:pid, n})`).
   """
 
   alias Linx.Netlink.Socket

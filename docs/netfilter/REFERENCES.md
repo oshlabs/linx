@@ -99,7 +99,7 @@ source when interpretation is non-obvious.
 - **[`phoenix_live_view/lib/phoenix_live_view/tag_engine/compiler.ex`](https://github.com/phoenixframework/phoenix_live_view/blob/main/lib/phoenix_live_view/tag_engine/compiler.ex)**
   (~1348 LOC) — the AST-to-compiled-Elixir pattern.
 - **[`phoenix_live_view/lib/phoenix_live_view/html_formatter.ex`](https://github.com/phoenixframework/phoenix_live_view/blob/main/lib/phoenix_live_view/html_formatter.ex)**
-  (~657 LOC) — `mix format` plugin reference for N9.
+  (~657 LOC) — `mix format` plugin reference for the formatter.
 
 ## Production-shape references
 

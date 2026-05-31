@@ -58,14 +58,6 @@ defmodule Linx.Mount do
   Linx doesn't recognise — is silently skipped rather than crashing the
   whole parse. A future kernel adding optional fields can't break a
   mount-table read.
-
-  ## Status
-
-  All foundation milestones shipped (M0–M4): `list/0`, `list/1`,
-  the mountinfo parser, `mount/4`, `umount/2`, `bind/3`,
-  `remount/2`, `move/2`, the cross-namespace `:in` option,
-  `pivot_root/3`, plus `%Linx.Mount.Entry{}` and
-  `%Linx.Mount.Error{}`.
   """
 
   import Bitwise, only: [|||: 2]
@@ -300,13 +292,13 @@ defmodule Linx.Mount do
   | `:nodev` | `MS_NODEV` |
   | `:noexec` | `MS_NOEXEC` |
   | `:sync` | `MS_SYNCHRONOUS` |
-  | `:remount` | `MS_REMOUNT` (driven by `remount/2` in M2) |
+  | `:remount` | `MS_REMOUNT` (driven by `remount/2`) |
   | `:mandlock` | `MS_MANDLOCK` |
   | `:dirsync` | `MS_DIRSYNC` |
   | `:noatime` | `MS_NOATIME` |
   | `:nodiratime` | `MS_NODIRATIME` |
-  | `:bind` | `MS_BIND` (driven by `bind/3` in M2) |
-  | `:move` | `MS_MOVE` (driven by `move/2` in M2) |
+  | `:bind` | `MS_BIND` (driven by `bind/3`) |
+  | `:move` | `MS_MOVE` (driven by `move/2`) |
   | `:rec` | `MS_REC` — recursive variant |
   | `:silent` | `MS_SILENT` |
   | `:private` | `MS_PRIVATE` — propagation |

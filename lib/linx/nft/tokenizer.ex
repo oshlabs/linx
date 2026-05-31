@@ -81,10 +81,10 @@ defmodule Linx.NFT.Tokenizer do
   ## Extensibility
 
   All architectural decisions here were chosen for **incremental
-  extension**, since the N8 grammar scope is the ~85% subset and
-  the long tail of nft constructs (synproxy, secmark, osf, fib,
-  jhash, advanced ct, dup/fwd, tproxy, xfrm, tunnel) will be added
-  per-construct over time. Each addition becomes:
+  extension**, since the supported grammar is the common ~85%
+  subset and the long tail of nft constructs (synproxy, secmark,
+  osf, fib, jhash, advanced ct, dup/fwd, tproxy, xfrm, tunnel) will
+  be added per-construct over time. Each addition becomes:
 
     1. (Optional) a new start condition pushed from somewhere in
        `:default` — add a clause and a step function.

@@ -96,7 +96,7 @@ defmodule Linx.Capabilities.Constants do
   The bitmask of every cap bit Linx knows about — `OR` of
   `1 <<< to_bit(c)` for every `c` in `all/0`.
 
-  Used by the K1 procfs parser: if `kernel_mask &&& bnot(known_mask)`
+  Used by the procfs parser: if `kernel_mask &&& bnot(known_mask)`
   is non-zero, the kernel is reporting bits past Linx's table
   (likely a newer kernel with caps Linx hasn't catalogued).
   """
@@ -154,7 +154,7 @@ defmodule Linx.Capabilities.Constants do
 
   Iterates only over bits Linx knows about, so bits the kernel
   reports for caps newer than this table are silently dropped. The
-  K1 procfs parser surfaces this as a `Logger.warning` so consumers
+  procfs parser surfaces this as a `Logger.warning` so consumers
   can notice the kernel has outpaced Linx's table.
   """
   @spec from_bits(non_neg_integer()) :: MapSet.t(atom())

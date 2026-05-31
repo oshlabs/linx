@@ -156,7 +156,7 @@ defmodule Linx.Netfilter.Wire do
   defmacro nfta_verdict_chain_id, do: 3
 
   # ===========================================================
-  # Per-expression attribute sets (only the ones N2 ships)
+  # Per-expression attribute sets
   # ===========================================================
 
   # NFTA_IMMEDIATE_*

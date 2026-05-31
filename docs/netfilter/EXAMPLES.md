@@ -52,8 +52,8 @@ through it land in the target's nftables instance, not the host's.
 
 The kernel maintains a monotonic 32-bit counter that bumps on every
 successful ruleset commit. It's the key to optimistic concurrency
-(N5's `:reconcile` mode threads it through batches) and to
-exactly-once-from-snapshot monitoring (N6 buckets multicast events
+(the `:reconcile` mode threads it through batches) and to
+exactly-once-from-snapshot monitoring (the Monitor buckets multicast events
 by gen id).
 
 ```elixir
@@ -70,8 +70,8 @@ fills these in itself).
 
 Every `Linx.Netfilter` value is plain data — a `%Ruleset{}` is what
 you push to the kernel, what you pull back, and what you diff
-against. N1 ships the value types and the validator-setter
-pipeline DSL; the wire codec arrives in N2.
+against. The value types and the validator-setter
+pipeline DSL build the ruleset; the wire codec carries it to the kernel.
 
 ```elixir
 alias Linx.Netfilter.{Expr, Rule, Ruleset, Set, Verdict, Vmap}
@@ -125,7 +125,7 @@ the table.
 ## Tag-as-converged-identity
 
 Rules carry a `:tag` (atom) and a `:handle` (kernel-assigned,
-`nil` until pushed). N5's `:reconcile` mode uses the tag as the
+`nil` until pushed). The `:reconcile` mode uses the tag as the
 stable identity across pushes:
 
 ```elixir
@@ -140,7 +140,7 @@ Ruleset.add_rule(ruleset, "myapp", "input", [:drop], tag: :allow_all)
 # => {:error, {:bad_rule, {:duplicate_tag, :allow_all}}}
 ```
 
-## Creating a table (N2)
+## Creating a table
 
 Owner-flag is the default: when the socket closes, the kernel
 atomically destroys the table.
@@ -158,12 +158,12 @@ Opt out of owner cleanup with `persist: true`:
 ```elixir
 {:ok, ruleset} = Linx.Netfilter.create_table(sock, "myapp", persist: true)
 # Table survives socket close; clean up with `nft delete table` or
-# (when N2 ships destroy verbs in Linx itself) a future helper.
+# a future Linx helper, once destroy verbs land.
 ```
 
 ## Pushing a complete ruleset (`push/2 :replace`)
 
-Build the ruleset with the pipeline DSL (N1), then push it as one
+Build the ruleset with the pipeline DSL, then push it as one
 atomic batch. The kernel sees `DESTROYTABLE` (silent if missing)
 then `NEWTABLE` + all chains + all rules — old state for the named
 table is replaced cleanly.
@@ -232,7 +232,7 @@ Same shape as every Linx subsystem: BEAM owns the resource;
 BEAM crash → kernel reaps it. The unique Linx shape that no other
 firewall manager exposes naturally.
 
-## DNAT port-forward (N3)
+## DNAT port-forward
 
 Forward incoming TCP/8080 to an internal host's TCP/80. The
 `Expr.dnat_to/3` helper handles register allocation transparently
@@ -262,7 +262,7 @@ ruleset =
 raw binaries, strings (parsed via `Linx.IP.parse/1`), or
 `%Linx.IP{}` structs.
 
-## Masquerade (N3)
+## Masquerade
 
 Source-NAT to the outgoing interface's primary address — the
 right shape when the public IP isn't known at rule-write time
@@ -281,7 +281,7 @@ Add `flags: [:random]` or `:fully_random` to randomize port
 selection; `:persistent` to keep the same client on the same
 outbound port for connection stability.
 
-## Hairpin NAT (N3)
+## Hairpin NAT
 
 The DNAT-then-SNAT pattern for "talk to my public address from
 inside the LAN and have it reach the internal service correctly".
@@ -310,7 +310,7 @@ Ruleset.new()
      ]))
 ```
 
-## Redirect to local port (N3)
+## Redirect to local port
 
 DNAT to the local machine on a different port — the right shape
 for transparent proxies or port-shifting on a single host.
@@ -328,7 +328,7 @@ Ruleset.new()
      ]))
 ```
 
-## Named sets (N4)
+## Named sets
 
 A named set declared on a table, then referenced from rules with
 `Expr.lookup/2`. Elements round-trip through `push` and `pull/2`.
@@ -357,7 +357,7 @@ Element types: `:ipv4_addr` (4-tuple or 4-byte binary),
 `:inet_service` (port int), `:mark`, `:ifname`. The codec
 normalises element shapes for you on encode and decode.
 
-## Maps and vmaps (N4)
+## Maps and vmaps
 
 A typed map carries `key → value` associations. When the
 `:data_type` is `:verdict`, the map is a **verdict map** (vmap) —
@@ -400,7 +400,7 @@ NMap.new!("dnat_pool",
   elements: [{80, {10, 0, 0, 5}}, {443, {10, 0, 0, 6}}])
 ```
 
-## Anonymous sets (N4)
+## Anonymous sets
 
 Inline `{22, 80, 443}` literals in a rule — the encoder
 auto-generates a `NFT_SET_F_ANONYMOUS | NFT_SET_F_CONSTANT` set
@@ -421,7 +421,7 @@ Ruleset.new()
 
 The anonymous set lives and dies with the rule.
 
-## Reconcile push (N5) — minimal-change updates
+## Reconcile push — minimal-change updates
 
 `mode: :reconcile` is the LiveView-of-firewalls form: instead of
 rebuilding the entire table on every push, Linx pulls the
@@ -509,7 +509,7 @@ case patch do
 end
 ```
 
-## Monitor — live ruleset events (N6)
+## Monitor — live ruleset events
 
 Subscribe to `NFNLGRP_NFTABLES` multicast events. The owner pid
 receives `{:linx_netfilter, :event, %Event{}}` for every committed
@@ -569,7 +569,7 @@ end
 Default `SO_RCVBUF` is 4 MiB; pass `:rcvbuf` to `subscribe/2` to
 raise it further if your environment is heavily churned.
 
-## NFLOG (N7) — per-packet observability
+## NFLOG — per-packet observability
 
 Subscribe to a NFLOG group via `log_listen/2`, then push rules
 with `Expr.log/1` that route matching packets to that group. The

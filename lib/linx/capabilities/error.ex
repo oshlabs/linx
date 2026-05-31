@@ -7,8 +7,8 @@ defmodule Linx.Capabilities.Error do
   shape:
 
     * `:path` — the procfs path the operation targeted.
-    * `:operation` — what we were trying to do, as an atom. K1
-      uses `:read`; future operations would extend this.
+    * `:operation` — what we were trying to do, as an atom. The
+      read path uses `:read`; future operations would extend this.
     * `:errno` — the POSIX errno as an atom (`:enoent`, `:eacces`,
       …), or `:bad_status` if the file existed but didn't contain
       the five `Cap*:` lines we expected.
@@ -37,7 +37,7 @@ defmodule Linx.Capabilities.Error do
           :unparseable
       end
 
-  Pre-exec failures from the K2 *write* side don't surface as
+  Pre-exec failures from the *write* side don't surface as
   `%Linx.Capabilities.Error{}` — they come through
   `Linx.Process`'s `{:linx_process, :error, errno, stage}` shape
   with stage atoms like `:cap_drop_bounding`. This struct is for

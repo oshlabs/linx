@@ -41,7 +41,7 @@ defmodule Linx.Seccomp do
         itself built.
 
     * **Install.** `install/2` is checkpoint-bound, the same shape
-      as `Linx.Capabilities.drop_bounding/2` — it's the K2 commit
+      as `Linx.Capabilities.drop_bounding/2` — the same commit
       pattern, because the kernel forbids cross-thread seccomp
       installation. The child agent in `linx_process.c` does the
       actual `seccomp(2)` call at the parked checkpoint.
@@ -52,8 +52,6 @@ defmodule Linx.Seccomp do
   natural home is the **Silo** project that builds on Linx.
 
   ## Motivating composition
-
-  Lands fully at S2 (currently in flight):
 
       {:ok, c} = Linx.Process.spawn(argv: ["/usr/sbin/nginx"],
                                     no_new_privs: true)
@@ -81,18 +79,8 @@ defmodule Linx.Seccomp do
   Construction is strict the other way: an unknown syscall *atom* is
   rejected at build time, since a typo must never silently widen a filter.
 
-  ## Status
-
-  S0 + S1 + S2 shipped: detection (`supported?/0`, `arch/0`),
-  constants (`Linx.Seccomp.Constants`), the per-arch syscall table
-  (`Linx.Seccomp.Syscalls`), `%Linx.Seccomp.Filter{}`,
-  `%Linx.Seccomp.Error{}`, the build verbs (`allow_list/2`,
-  `deny_list/2`, `from_rules/1`, `to_rules/1`),
-  `Linx.Seccomp.Builder`, and `install/2` against a parked
-  `Linx.Process` session (with the matching `no_new_privs:` opt on
-  `Linx.Process.spawn/1` / `enter/2`). Per-argument matching
-  (`allow_if/3`) is the deferred S1.5 surface; multi-arch routing
-  and `SECCOMP_USER_NOTIF` are deferred to future work.
+  Per-argument matching (`allow_if/3`), multi-arch routing, and
+  `SECCOMP_USER_NOTIF` are deferred to future work.
   """
 
   alias Linx.Seccomp.Builder
@@ -179,7 +167,7 @@ defmodule Linx.Seccomp do
   Convenience for `Linx.Seccomp.Builder.new/0` — start an empty
   builder pipeline.
 
-  ## Example (lands fully with S1)
+  ## Example
 
       Linx.Seccomp.builder()
       |> Linx.Seccomp.Builder.allow(:read)
@@ -423,7 +411,7 @@ defmodule Linx.Seccomp do
 
   # Walk the rules list, accumulating seen syscalls to detect
   # duplicates. Short-circuits on the first malformed rule / unknown
-  # syscall / duplicate per the PLAN's S1 contract.
+  # syscall / duplicate.
   defp validate_rules(rules, arch) do
     do_validate_rules(rules, arch, MapSet.new())
   end

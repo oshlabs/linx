@@ -7,10 +7,6 @@ that *changes* the cgroup hierarchy — `create/1`, `add_process/2`,
 `write/3`, `destroy/1` — needs root. Start with `./sudorun.sh iex
 -S mix`.
 
-> ✅ **All foundation milestones shipped (C0–C4).** Lifecycle, raw
-> I/O, errors, freeze/thaw, typed limits, stats, and controller
-> delegation are all in.
-
 ## Detecting cgroup v2
 
 ```elixir
@@ -217,12 +213,12 @@ The memory, pids, and cpu controllers must be enabled in the
 `pids.max` / `cpu.max` to even exist in the child. On a systemd
 host this is the default at the root. When it isn't, the kernel
 surfaces `ENOENT` on the write — the interface file isn't there.
-`enable_controllers/2` (landing in C4) is the helper that flips a
+`enable_controllers/2` is the helper that flips a
 parent's subtree control on.
 
 ## End-to-end: limit a workload before it execs
 
-Combining C1 (placement at the checkpoint) and C2 (limits):
+Combining placement at the checkpoint and limits:
 
 ```elixir
 iex> alias Linx.Process, as: P

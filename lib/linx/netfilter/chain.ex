@@ -106,7 +106,7 @@ defmodule Linx.Netfilter.Chain do
 
   # Named priority atoms commonly used in nft scripts. Bridge has
   # its own set with overlapping names — resolution to integers is
-  # the wire codec's job (N2). We accept these atoms here and pass
+  # the wire codec's job. We accept these atoms here and pass
   # them through.
   @known_priority_names [:raw, :mangle, :dstnat, :filter, :security, :srcnat, :out]
 

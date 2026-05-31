@@ -90,7 +90,7 @@ defmodule Linx.Netfilter do
       files. Modelled on Phoenix LiveView's HEEx.
 
   Both call the same validator-setter functions; both produce the
-  same value. Pipeline DSL lands in N1; `~NFT` lands in N8.
+  same value.
 
   ## Composition with `Linx.Process`
 
@@ -110,18 +110,6 @@ defmodule Linx.Netfilter do
   `Linx.Process` has zero awareness of netfilter; the checkpoint is
   the only coupling, exactly the way `Linx.Sysctl` / `Linx.Mount` /
   every other subsystem composes.
-
-  ## Status
-
-  N0 — scaffolding only. `supported?/0` is functional;
-  `Linx.Netlink.Nfnl` + `Linx.Netlink.Nfnl.Codec` provide the
-  transport + `nfgenmsg` / batch / `GETGEN` codec primitives. The
-  value-type surface and pipeline DSL land in N1; the wire codec
-  for tables/chains/rules + minimal expressions in N2; NAT in N3;
-  sets/maps in N4; diff + `:reconcile` + CAS in N5; subscription
-  in N6; NFLOG in N7. **v1.0 release** at N7. The `~NFT` sigil +
-  `nftables.conf` codec arrives in N8; `mix format` plugin in N9.
-  **v1.5 release** at N9.
 
   See `docs/netfilter/DESIGN.md` for design work deferred past 0.1.0.
 
@@ -237,11 +225,11 @@ defmodule Linx.Netfilter do
 
   Modes:
 
-    * `:replace` (default, N2) — for each table in `ruleset`, the
+    * `:replace` (default) — for each table in `ruleset`, the
       kernel sees `DESTROYTABLE` (silent-if-missing, 6.3+) then
       `NEWTABLE` plus all its chains and rules. Other tables in
       the netns are untouched.
-    * `:reconcile` (N5) — minimal-diff push with `NFTA_BATCH_GENID`
+    * `:reconcile` — minimal-diff push with `NFTA_BATCH_GENID`
       CAS for cooperative concurrency.
 
   Returns `:ok` on success, or `{:error, %Linx.Netfilter.Error{}}`

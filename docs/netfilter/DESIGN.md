@@ -22,7 +22,7 @@ table inet myfw {
 """
 ```
 
-**The catch.** The formatter renders any construct outside the N8 grammar
+**The catch.** The formatter renders any construct outside the supported grammar
 subset as a `# <unsupported expression: …>` comment, which does **not**
 round-trip. So `Inspect`-as-`~NFT` needs a fallback: if a ruleset uses
 features the formatter can't faithfully emit, fall back to the 0.1.0

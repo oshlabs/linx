@@ -28,7 +28,7 @@ defmodule Linx.Capabilities do
   manipulation is **per-thread** — `capset(2)`, `prctl(PR_CAPBSET_*)`,
   and `prctl(PR_CAP_AMBIENT_*)` all operate on the *calling thread*.
   So the child agent in `Linx.Process` has to do its own cap
-  configuration. The K2 write verbs (`drop_bounding/2`,
+  configuration. The write verbs (`drop_bounding/2`,
   `set_thread_sets/2`, `set_ambient/2`) are checkpoint-bound: only
   valid in the `:ready` (parked) state, same shape as
   `Linx.Process.proceed/1` / `abort/1`.
@@ -69,15 +69,7 @@ defmodule Linx.Capabilities do
   would otherwise grant more, because `:cap_setpcap` was dropped
   from `:bounding` too.
 
-  ## Status
-
-  All three foundation milestones (K0 + K1 + K2) shipped. The
-  module exposes `supported?/0`, the constants table
-  (`Linx.Capabilities.Constants`), `%Linx.Capabilities.State{}`,
-  `%Linx.Capabilities.Error{}`, the read verb `read/1`, and the
-  three checkpoint-window write verbs `drop_bounding/2`,
-  `set_thread_sets/2`, `set_ambient/2`. See
-  `docs/capabilities/EXAMPLES.md` for end-to-end recipes.
+  See `docs/capabilities/EXAMPLES.md` for end-to-end recipes.
   """
 
   require Logger
@@ -260,7 +252,7 @@ defmodule Linx.Capabilities do
     * `{:error, :no_process}` — session has ended.
     * `{:error, {:bad_capability, atom}}` — `caps` contains an
       atom Linx doesn't recognise. Validation happens before
-      anything is shipped to the agent.
+      anything is sent to the agent.
 
   Kernel-level failures (the workload didn't have the required
   privilege to drop a particular cap, etc.) arrive asynchronously

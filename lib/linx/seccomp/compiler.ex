@@ -1,6 +1,6 @@
 defmodule Linx.Seccomp.Compiler do
   @moduledoc false
-  # cBPF emitter — the risky bit of S1.
+  # cBPF emitter.
   #
   # Takes a list of validated `{action, syscall_atom}` rules + a
   # default action + a target arch atom and emits a binary cBPF

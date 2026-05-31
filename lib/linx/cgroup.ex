@@ -59,14 +59,6 @@ defmodule Linx.Cgroup do
   a `*.stat` file (a counter a newer kernel added) is silently dropped,
   so the returned `%Stats{}` stays valid. Reach for `read/2` to get any
   raw field without a typed reader.
-
-  ## Status
-
-  All foundation milestones shipped (C0–C4): `supported?/0`,
-  `create/1`, `destroy/1`, `add_process/2`, `read/2`, `write/3`,
-  `freeze/1`, `thaw/1`, `set_memory_max/2`, `set_pids_max/2`,
-  `set_cpu_max/2`, `stats/1`, `enable_controllers/2`, plus the
-  `Linx.Cgroup.Error` and `Linx.Cgroup.Stats` shapes.
   """
 
   alias Linx.Cgroup.{Error, Stats}
@@ -221,8 +213,8 @@ defmodule Linx.Cgroup do
   the atom `:max` to clear the limit.
 
   Requires the `memory` controller to be enabled in the parent's
-  `cgroup.subtree_control` (see `enable_controllers/2`, landing in
-  C4). If the controller isn't delegated, the kernel returns
+  `cgroup.subtree_control` (see `enable_controllers/2`). If the
+  controller isn't delegated, the kernel returns
   ENOENT on the write because the interface file doesn't exist.
   """
   @spec set_memory_max(cgroup(), non_neg_integer() | :max) :: :ok | {:error, Error.t()}

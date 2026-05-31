@@ -52,10 +52,10 @@ defmodule Linx.NFT do
 
   The grammar slice currently supported matches the
   `Linx.NFT.Compiler` capabilities (see that module's `@moduledoc`).
-  The N8 milestone targets the ~85% subset; the long tail
-  (`synproxy`, `secmark`, `osf`, `fib`, `jhash`, advanced ct
-  fields, `dup`/`fwd`, ipsec contexts) lands as later
-  per-construct additions.
+  It targets the common ~85% subset; the long tail (`synproxy`,
+  `secmark`, `osf`, `fib`, `jhash`, advanced ct fields,
+  `dup`/`fwd`, ipsec contexts) is not yet implemented (see
+  `docs/netfilter/DESIGN.md`).
 
   ## Interpolation
 

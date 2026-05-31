@@ -67,14 +67,13 @@ defmodule Linx.NFT.Parser do
 
   ## Scope notes
 
-  N8b ships the structural shape and the slice of the grammar
-  needed for the canonical `~NFT` examples in
+  The parser covers the structural shape and the slice of the
+  grammar needed for the canonical `~NFT` examples in
   `docs/netfilter/EXAMPLES.md`. The set of recognised statement
-  / lhs / rhs shapes will grow per future N8 sub-commit as the
-  compiler (N8c) and the long-tail extension milestones add
-  callers. The architectural commitments — recursive descent,
-  raise-on-mismatch, file:line:column on every AST node — are
-  finalised here.
+  / lhs / rhs shapes will grow as the compiler and long-tail
+  extensions add callers (see `docs/netfilter/DESIGN.md`). The
+  architectural commitments — recursive descent, raise-on-mismatch,
+  file:line:column on every AST node — are finalised here.
   """
 
   alias Linx.NFT.ParseError
@@ -993,9 +992,9 @@ defmodule Linx.NFT.Parser do
 
   defp parse_single_value([{:identifier, name, meta} | rest], _state) do
     # Could be a symbolic value (`established`, `tcp`, an interface
-    # name like `eth0`) or the start of a more complex value. For
-    # N8b we treat it as a bare identifier; the compiler is in
-    # charge of mapping `established` → `:established`, etc.
+    # name like `eth0`) or the start of a more complex value. We
+    # treat it as a bare identifier; the compiler is in charge of
+    # mapping `established` → `:established`, etc.
     {{:identifier, name, meta}, rest}
   end
 

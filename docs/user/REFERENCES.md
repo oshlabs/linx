@@ -41,10 +41,10 @@ sections in the source when interpretation is non-obvious.
 
 ## Adjacent userspace tooling (for context, not implementation)
 
-- **`newuidmap(1)` / `newgidmap(1)`** — setuid helpers shipped with
+- **`newuidmap(1)` / `newgidmap(1)`** — setuid helpers distributed with
   the `shadow` / `uidmap` package; let unprivileged callers write
   multi-range maps using `/etc/subuid` and `/etc/subgid`. **Out of
-  scope for U0–U2**; potential follow-up.
+  scope**; potential follow-up.
 - **`unshare(1)`** — userspace tool that does essentially what
   `Linx.Process.spawn(namespaces: [:user, ...])` plus
   `Linx.User.setup_maps/2` will do together.

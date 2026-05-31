@@ -21,7 +21,7 @@ The syscalls and concepts `Linx.Tty` exposes:
   pseudoterminal overview. Pair to `Linx.Process`'s `stdio: :pty`.
 - [`ptmx(4)`](https://man7.org/linux/man-pages/man4/ptmx.4.html) —
   `/dev/ptmx` and the multiplexor PTY creation path. (Used by
-  `Linx.Process` in T0 era; a future standalone `Linx.Tty.openpt/0`
+  `Linx.Process` originally; a future standalone `Linx.Tty.openpt/0`
   would land here.)
 
 ## Prior art
@@ -42,7 +42,7 @@ The syscalls and concepts `Linx.Tty` exposes:
   surface looks like.
 - `docker attach` / `kubectl exec -it` — the user-experience target.
   Their implementations are the canonical "TTY-aware byte relay";
-  `Linx.Tty.attach/2` (T2) follows the same shape: open local raw,
+  `Linx.Tty.attach/2` follows the same shape: open local raw,
   pump bytes both ways, restore on exit.
 
 ## NIF mechanics
@@ -63,7 +63,7 @@ The syscalls and concepts `Linx.Tty` exposes:
   goals (Erlang's interactive shell, not `docker attach`); included
   for completeness.
 
-## I/O protocol and group leaders (T6 / `attach(:group_leader, _)`)
+## I/O protocol and group leaders (`attach(:group_leader, _)`)
 
 The SSH-compatible attach mode pumps bytes through the caller's
 group leader instead of `/dev/tty`. The 2026-05-27 SSH probe on a
@@ -87,7 +87,7 @@ line-discipline lives in `:group`. References:
   (byte-oriented; used when `echo=false` *or* `dumb=true`).
   Reading the kernel-10.6.3 copy at
   `~/.nerves/artifacts/nerves_system_rpi5-portable-2.0.3/staging/usr/lib/erlang/lib/kernel-10.6.3/src/group.erl`
-  was what unlocked T6.1's mechanism: the routing logic in
+  was what unlocked the `:group_leader` mechanism: the routing logic in
   `server/3` (line 244) and `get_chars_dumb/5` (line 1152). No
   OTP-internals coupling is required — `:io.setopts(echo: false)`
   reaches the state field through documented public API.
@@ -100,7 +100,7 @@ line-discipline lives in `:group`. References:
 - [Erlang `ssh` user's guide — `ssh_cli`](https://www.erlang.org/doc/man/ssh_cli.html)
   — the SSH shell-channel handler. *Below* the `:group` / `:user_drv`
   stack; produces the byte stream those processes line-edit. The
-  original T6 sketch wrongly placed line-discipline here.
+  original sketch wrongly placed line-discipline here.
 - [`nerves_ssh`](https://github.com/nerves-project/nerves_ssh) —
   the Nerves wrapper around `:ssh.daemon` that ships in the
   default Nerves config. Composes `ssh_subsystem_fwup` (firmware
@@ -120,6 +120,6 @@ abstraction — every C program that wants direct terminal access (`vi`,
 
 The trade-off shows up when `/dev/tty` is **not** the user's terminal —
 SSH, `:remsh`, embedded device consoles where the BEAM is wired to
-a serial port the user can't reach. T6's `attach(:group_leader, _)`
+a serial port the user can't reach. The `attach(:group_leader, _)`
 is the deliberate "fall back to the group leader anyway" mode for
 those environments, with the corresponding loss of raw-mode fidelity.

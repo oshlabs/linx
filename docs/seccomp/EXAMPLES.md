@@ -12,10 +12,7 @@ also plain — no installation, no root. Installation
 needs a parked session and (typically) `no_new_privs: true` or
 root.
 
-> **Status: live.** S0–S2 are shipped — detection, syscall table,
-> filter construction, BPF compiler, and kernel-side install at the
-> `Linx.Process` checkpoint. Per-arg matching (`allow_if/3`)
-> is the deferred S1.5 surface.
+> Per-arg matching (`allow_if/3`) is not yet available.
 
 ## Detecting seccomp support
 
@@ -155,7 +152,7 @@ iex> Linx.Seccomp.from_rules({[:not_a_rule], :allow})
 ```
 
 The `%Linx.Seccomp.Error{}` struct is reserved for kernel-side
-failures (S2's `:install` / `:set_no_new_privs` operations) and
+failures (the `:install` / `:set_no_new_privs` operations) and
 the rare `:build` failure that doesn't fit a tagged tuple — today
 just `:e2big` for filters that overflow the 255-instruction jump
 limit.

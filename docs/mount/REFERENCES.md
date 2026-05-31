@@ -34,7 +34,7 @@ sections in the source when interpretation is non-obvious.
   `clone(CLONE_NEWNS)`, `setns(CLONE_NEWNS)`, and the mount
   namespace.
 - **`nsenter(1)`** — the userspace tool that does, essentially,
-  what our M3 `:in` option does. The semantics our cross-namespace
+  what our `:in` option does. The semantics our cross-namespace
   mounts match.
 
 ## In-repo cross-references

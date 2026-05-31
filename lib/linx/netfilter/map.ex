@@ -15,8 +15,8 @@ defmodule Linx.Netfilter.Map do
 
   Same as `Linx.Netfilter.Set`, plus:
 
-    * `:data_type` — value-type atom. The basic atomic types,
-      `:verdict`, or (N4) a concatenation.
+    * `:data_type` — value-type atom. The basic atomic types or
+      `:verdict`. Concatenations are not yet implemented.
 
   ## Construction
 

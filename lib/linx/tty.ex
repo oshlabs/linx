@@ -64,7 +64,7 @@ defmodule Linx.Tty do
       `:sshd_sup` in the GL's `"$ancestors"` chain). Call
       `Linx.Tty.format_error/1` on the atom for the hint.
 
-    * `attach(:group_leader, session)` (T6.1) pumps through the
+    * `attach(:group_leader, session)` pumps through the
       caller's group leader instead of `/dev/tty`, working over
       SSH, `:remsh`, and locally as a universal alternative to
       `:controlling`. See `attach/2`'s docstring for the
@@ -120,17 +120,6 @@ defmodule Linx.Tty do
 
   Coexists with `prim_tty_sighandler` (iex's own SIGWINCH consumer):
   `:gen_event` broadcasts to every registered handler.
-
-  ## Status
-
-  T0–T5 shipped: scaffolding, termios + ioctl primitives, `attach/2`,
-  window-size propagation, coexistence with `iex`'s tty driver, and
-  runtime SIGWINCH-driven resize updates. T6.0 + T6.1 shipped on
-  branch `tty-group-leader-attach`: the SSH-aware refusal guard on
-  `attach(:controlling, _)`, the `Linx.Tty.format_error/1` helper,
-  and the `attach(:group_leader, _)` mode that pumps via the
-  Erlang I/O protocol — works over SSH, `:remsh`, and locally as
-  a universal alternative to `:controlling`.
   """
 
   alias Linx.Tty.Native
@@ -221,7 +210,7 @@ defmodule Linx.Tty do
   (`ioctl(TIOCSWINSZ)`).
 
   The common path for setting the workload's window size goes through
-  the agent — `Linx.Process.pty_set_winsize/2` (lands in T3). This
+  the agent — `Linx.Process.pty_set_winsize/2`. This
   verb is for the rare case of mutating a tty fd held directly by the
   caller.
   """
@@ -249,7 +238,7 @@ defmodule Linx.Tty do
       the BEAM's controlling terminal is the user's terminal
       (local iex on a terminal emulator, Nerves HDMI / UART
       console). Refuses with `{:error, :no_local_tty}` when the
-      caller is over SSH (the T6.0 guard).
+      caller is over SSH (the local-tty guard).
 
     * `:group_leader` — pump through the caller's
       `Process.group_leader/0` via Erlang's I/O protocol. Works
@@ -354,7 +343,7 @@ defmodule Linx.Tty do
     #    prior attach), and the pump hangs forever. Ctrl-C doesn't
     #    help over SSH because ssh_cli intercepts it and the pump's
     #    reaction is to send <<3>> to a dead session.
-    # 2. T6.0 guard: when the caller's terminal is fronted by
+    # 2. local-tty guard: when the caller's terminal is fronted by
     #    Erlang's SSH daemon, /dev/tty is the BEAM's controlling
     #    tty (the HDMI / UART console on Nerves) -- *not* the SSH
     #    session. Refuse cleanly rather than silently pumping bytes
@@ -436,7 +425,7 @@ defmodule Linx.Tty do
 
   @doc """
   Returns a human-readable description for error atoms `Linx.Tty`
-  returns. Currently covers `:no_local_tty` (the T6.0 guard's
+  returns. Currently covers `:no_local_tty` (the local-tty guard's
   refusal); falls back to `inspect/1` for any other shape so it can
   be safely chained at error sites without losing information.
   """
@@ -445,7 +434,7 @@ defmodule Linx.Tty do
     "Your iex appears to be over SSH (or :remsh); /dev/tty inside the " <>
       "BEAM is the BEAM's controlling terminal (e.g. the HDMI/UART " <>
       "console on Nerves), not your remote session. Use " <>
-      "Linx.Tty.attach(:group_leader, session) instead (T6.1)."
+      "Linx.Tty.attach(:group_leader, session) instead."
   end
 
   def format_error(:no_process) do
@@ -773,7 +762,7 @@ defmodule Linx.Tty do
   # `:prim_tty.output_mode/1`, swaps in a `:prim_tty.reinit/2`'d
   # version with the new output mode, and shouts the previous mode
   # back to us through a one-shot ref. Same kind of OTP-internals
-  # coupling T4 already accepts for `:prim_tty.disable_reader/1`.
+  # coupling we already accept for `:prim_tty.disable_reader/1`.
   # Scanning rather than hard-coding the field index makes us
   # resilient to ssh_cli / user_drv record-layout reshuffles across
   # OTP versions.
@@ -933,8 +922,8 @@ defmodule Linx.Tty do
   # registered.
   #
   # Soft-fails: SIGWINCH propagation is a quality-of-life feature; if
-  # OTP's signal infrastructure isn't available we degrade to the
-  # initial-seed-only behaviour T3 gave us, without crashing attach.
+  # OTP's signal infrastructure isn't available we degrade to
+  # initial-seed-only behaviour, without crashing attach.
   defp arm_sigwinch(id) do
     try do
       :os.set_signal(:sigwinch, :handle)

@@ -9,10 +9,6 @@ the calling thread to have `CAP_SYS_ADMIN` in the target user
 namespace (root in the simple case). Start with `./sudorun.sh iex
 -S mix`.
 
-> ✅ **All foundation milestones shipped (M0–M4).** Read side,
-> mutating verbs, cross-namespace `:in`, `pivot_root/3`, errors,
-> the `Entry` and `Error` value types.
-
 ## Reading the mount table
 
 `list/0` parses `/proc/self/mountinfo` into a list of
@@ -55,7 +51,7 @@ iex> root.mount_options
 inspecting a container's mount table without entering its
 namespace. This is just a file read; no setns required (`list/1`
 runs entirely in the BEAM's own namespace; only the mutating
-verbs in M3+ need the throwaway-thread setns dance).
+verbs that cross into another namespace need the throwaway-thread setns dance).
 
 ```elixir
 iex> {:ok, ct_mounts} = Linx.Mount.list({:pid, container_pid})
@@ -79,7 +75,7 @@ Errors:
 - `{:error, :eacces}` — the BEAM can't read that file (typically
   another user's `/proc/<pid>/`).
 
-In M1 these get wrapped in `%Linx.Mount.Error{}` for consistency
+These get wrapped in `%Linx.Mount.Error{}` for consistency
 with the mutating verbs.
 
 ### Propagation entries
@@ -108,8 +104,6 @@ for backslash. `Linx.Mount` decodes them transparently:
 iex> entry.mount_point
 "/mnt/with spaces"
 ```
-
-## (Will land with M1 — basic mount + umount)
 
 ## Bind, remount, move
 
@@ -426,7 +420,7 @@ pivot_root requires the calling thread's CWD to be inside
 `fs_struct` and `chdir`s into `new_root` before the syscall — so
 the BEAM's CWD stays at whatever it was. The chdir is a
 worker-thread concern; the caller doesn't observe it. Same
-`unshare(CLONE_FS)` trick the M3 cross-namespace path uses.
+`unshare(CLONE_FS)` trick the cross-namespace path uses.
 
 ### Error stages
 

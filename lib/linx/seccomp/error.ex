@@ -20,7 +20,7 @@ defmodule Linx.Seccomp.Error do
       `:seccomp_install` or `:seccomp_no_new_privs`. The struct is
       used to normalise those errno-bearing tuples for callers that
       prefer one error type. `:operation` is `:install` or
-      `:set_no_new_privs`. (Lands with S2.)
+      `:set_no_new_privs`.
 
   ## Fields
 

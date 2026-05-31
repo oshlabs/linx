@@ -5,23 +5,26 @@ defmodule Linx.Netfilter.Set do
 
   Sets are the kernel's high-performance match primitive: a rule
   saying "if source IP is in @blocklist drop" hashes once into the
-  set rather than scanning a hundred individual rules. N4 adds
-  concatenations, dynamic sets, and intervals.
+  set rather than scanning a hundred individual rules.
+  Concatenations, dynamic sets, and intervals are not yet
+  implemented (see `docs/netfilter/DESIGN.md`).
 
   ## Fields
 
     * `:name` — set name (unique within the table).
     * `:table` — owning table's name; `nil` for free-standing sets.
-    * `:key_type` — element-type atom. N1 accepts the basic atomic
-      types: `:ipv4_addr`, `:ipv6_addr`, `:ether_addr`,
-      `:inet_proto`, `:inet_service`, `:mark`, `:ifname`. N4 adds
-      concatenations (`{:concat, [type1, type2, ...]}`).
+    * `:key_type` — element-type atom. The basic atomic types are
+      accepted: `:ipv4_addr`, `:ipv6_addr`, `:ether_addr`,
+      `:inet_proto`, `:inet_service`, `:mark`, `:ifname`.
+      Concatenations (`{:concat, [type1, type2, ...]}`) are not yet
+      implemented.
     * `:flags` — list. Currently accepted: `:constant`,
       `:interval`, `:timeout`, `:dynamic`, `:auto_merge`,
-      `:anonymous`. Behaviour of the timeout / dynamic / interval
-      flags lands fully with N4; the value-type slot is here today.
+      `:anonymous`. The timeout / dynamic / interval flags are not
+      yet fully implemented; the value-type slot is here today.
     * `:elements` — list of element values matching `:key_type`.
-      Element-type validation is N1 (basic check) → N4 (strict).
+      Element-type validation is a basic check; strict validation
+      is not yet implemented.
     * `:timeout` — default element lifetime in ms; `nil` for no
       timeout (default).
     * `:gc_interval` — kernel's gc cadence in ms; `nil` to let the
@@ -201,9 +204,8 @@ end
 defmodule Linx.Netfilter.Set.Element do
   @moduledoc false
 
-  # Loose element-shape checking. The wire codec (N4) will do
-  # strict validation when it actually serialises; N1's job is just
-  # to catch obvious mismatches at construction time.
+  # Loose element-shape checking — just catches obvious mismatches
+  # at construction time. Strict validation is not yet implemented.
 
   def check(el, :ipv4_addr) do
     cond do

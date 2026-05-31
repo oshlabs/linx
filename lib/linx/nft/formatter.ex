@@ -55,8 +55,7 @@ defmodule Linx.NFT.Formatter do
 
     * **Static `~NFT` sigil body / `.nft` file** — parses,
       runs through `format/1`, returns the canonical
-      single-formatted source. Idempotent (N8f's
-      output-stability assertion already proves this).
+      single-formatted source. Idempotent.
     * **Interpolation-bearing `~NFT` sigil body** — left
       verbatim. AST-aware formatting that preserves `\#{…}`
       positions while reflowing the surrounding nft syntax is a

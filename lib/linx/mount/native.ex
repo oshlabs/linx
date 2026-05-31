@@ -3,7 +3,7 @@ defmodule Linx.Mount.Native do
   NIF binding for `Linx.Mount`. Loads `priv/linx_mount.so` (built by
   the `:linx_mount` Mix compiler) and exposes the small set of
   syscalls the public `Linx.Mount` module wraps: `mount(2)`,
-  `umount2(2)`, and (in M4) `pivot_root(2)`.
+  `umount2(2)`, and `pivot_root(2)`.
 
   Production callers should not use this module directly — go through
   `Linx.Mount`, which validates options, maps flag atoms to the

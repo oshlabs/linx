@@ -10,11 +10,6 @@ Read-only operations (`read/1`, `supported?/0`) work in a plain
 typically root (or capabilities in the right user namespace) to
 actually apply.
 
-> All three foundation milestones (K0 + K1 + K2) are shipped.
-> Detection, the constants table, the read side (`read/1`), and
-> the agent-side write verbs (`drop_bounding/2`,
-> `set_thread_sets/2`, `set_ambient/2`) are real.
-
 ## Detecting capability support
 
 ```elixir
@@ -65,8 +60,7 @@ iex> MapSet.size(drop)
 39
 ```
 
-That `drop` set is exactly what gets passed to `drop_bounding/2`
-in K2.
+That `drop` set is exactly what gets passed to `drop_bounding/2`.
 
 ## Reading a process's capability sets
 
@@ -144,7 +138,7 @@ proceeding:
 IO.inspect(state, label: "child's caps at checkpoint")
 # => #Linx.Capabilities.State<eff=0 prm=0 inh=0 bnd=41 amb=0>
 
-# (K2 will land here: drop_bounding, set_thread_sets, set_ambient)
+# (capability drops go here: drop_bounding, set_thread_sets, set_ambient)
 
 :ok = Linx.Process.proceed(c)
 ```

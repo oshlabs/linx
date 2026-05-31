@@ -5,10 +5,7 @@ defmodule Linx.Netfilter.Decoder do
 
   The shape mirrors `Linx.Netfilter.Encoder` — one decode function
   per entity. `from_msgs/3` groups a stream of decoded entities
-  into a `%Ruleset{}` (N2's later passes).
-
-  N2 first cut: tables only. Chains / rules / expressions land in
-  N2's later passes as their encoders land.
+  into a `%Ruleset{}`.
 
   ## Wire format quirks
 
@@ -51,7 +48,7 @@ defmodule Linx.Netfilter.Decoder do
       flags: Wire.table_flags_atoms(flags_int),
       use_count: use_count,
       handle: handle,
-      # N2's chain/set/object/flowtable decoders attach these by
+      # The chain/set/object/flowtable decoders attach these by
       # name later when the full ruleset is assembled.
       chains: %{},
       sets: %{},
@@ -860,8 +857,7 @@ defmodule Linx.Netfilter.Decoder do
   end
 
   # Userdata is opaque on the wire; the Table struct doesn't have a
-  # dedicated slot for it yet (N2 ships table userdata round-trip
-  # only when N5's :reconcile needs it). For now, silently swallow.
+  # dedicated slot for it yet. For now, silently swallow.
   defp maybe_attach_userdata(table, nil), do: table
   defp maybe_attach_userdata(table, _bin), do: table
 end

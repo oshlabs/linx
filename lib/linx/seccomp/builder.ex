@@ -7,15 +7,7 @@ defmodule Linx.Seccomp.Builder do
   validation paths (unknown syscalls, malformed actions, duplicate
   rules) apply.
 
-  ## Stub
-
-  S0 ships the call shapes only — `builder/0` returns an empty
-  builder; `allow/2` and `deny/3` accumulate rules; `build/1`
-  returns `{:error, :not_yet_implemented}`. The compiler lands in
-  S1. The accumulation is real so callers can wire the DSL into
-  fixtures and tests today.
-
-  ## Example (lands fully with S1)
+  ## Example
 
       Linx.Seccomp.builder()
       |> Linx.Seccomp.Builder.allow(:read)

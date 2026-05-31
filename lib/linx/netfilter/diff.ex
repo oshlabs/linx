@@ -24,8 +24,8 @@ defmodule Linx.Netfilter.Diff do
       stable positional position with no neighbour changes).
     * **Chains**: most attribute changes (type, hook, priority)
       can't be replaced — emit `:delete_chain` + `:create_chain`.
-      For N5 we conservatively delete+create on any difference.
-    * **Tables**: flags / use_count differences → no-op (the N5
+      We conservatively delete+create on any difference.
+    * **Tables**: flags / use_count differences → no-op (the
       diff treats tables as opaque containers; their lifecycle is
       managed via the `:owner` flag).
     * **Sets / maps**: declaration changes (key_type, data_type,

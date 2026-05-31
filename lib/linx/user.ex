@@ -41,7 +41,7 @@ defmodule Linx.User do
   ns) writes `gid_map`, the kernel requires
   `/proc/<pid>/setgroups` first contain `"deny"`. Skipping it
   returns EPERM. `deny_setgroups/1` is the primitive; the
-  `setup_maps/2` convenience (lands in U2) does this in the right
+  `setup_maps/2` convenience does this in the right
   order automatically.
 
   ## Composition with `Linx.Process`
@@ -72,13 +72,6 @@ defmodule Linx.User do
   `read_uid_map/1` / `read_gid_map/1` parse the map files defensively —
   a line that isn't three non-negative integers is skipped rather than
   crashing the read.
-
-  ## Status
-
-  All foundation milestones shipped (U0–U2): `supported?/0`,
-  `deny_setgroups/1`, `set_uid_map/2`, `set_gid_map/2`,
-  `read_uid_map/1`, `read_gid_map/1`, `setup_maps/2`, plus the
-  `Linx.User.Error` and `Linx.User.Map` shapes.
   """
 
   alias Linx.User.Error
@@ -149,7 +142,7 @@ defmodule Linx.User do
       :ok = Linx.User.set_uid_map(host_pid, [{0, my_uid, 1}])
 
       # A multi-range identity map (needs CAP_SETUID or
-      # newuidmap(1) — deferred U3 territory):
+      # newuidmap(1)):
       :ok = Linx.User.set_uid_map(host_pid,
         [{0, 0, 1}, {1, 100_000, 65_536}])
 
@@ -174,7 +167,7 @@ defmodule Linx.User do
 
   **Unprivileged callers must call `deny_setgroups/1` first** —
   the kernel returns `EPERM` otherwise. The
-  `Linx.User.setup_maps/2` convenience (lands in U2) does this
+  `Linx.User.setup_maps/2` convenience does this
   sequence automatically.
   """
   @spec set_gid_map(pid_target(), [mapping()]) ::

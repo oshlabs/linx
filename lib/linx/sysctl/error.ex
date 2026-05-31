@@ -3,7 +3,7 @@ defmodule Linx.Sysctl.Error do
   An error returned by a `Linx.Sysctl` operation.
 
   Built from a failed `File.read/1` / `File.write/2` against a
-  `/proc/sys/...` path, or — for the cross-namespace verbs (S3) —
+  `/proc/sys/...` path, or — for the cross-namespace verbs —
   from a failure during the setns dance the NIF performs on a
   throwaway pthread.
 
@@ -16,7 +16,7 @@ defmodule Linx.Sysctl.Error do
     * `:operation` — what we were trying to do, as an atom:
       * `:read`, `:write`, `:list` — the procfs I/O itself failed.
       * `:open_ns`, `:unshare`, `:setns`, `:chdir`, `:thread` —
-        namespace-acquisition failures from the S3 NIF (only seen
+        namespace-acquisition failures from the cross-namespace NIF (only seen
         when a cross-namespace `:in` option was used).
     * `:errno` — the POSIX errno as an atom (`:enoent`, `:eperm`,
       `:eacces`, `:einval`, …).

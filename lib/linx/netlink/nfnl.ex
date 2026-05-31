@@ -12,8 +12,8 @@ defmodule Linx.Netlink.Nfnl do
   |---|---|---|
   | 1  | CTNETLINK | `Linx.Netfilter.Conntrack` (future) |
   | 3  | QUEUE     | `Linx.Netfilter.Queue` (future) |
-  | 4  | ULOG      | `Linx.Netfilter.Log` (NFLOG; N7) |
-  | 10 | NFTABLES  | `Linx.Netfilter` core (N0–N7) |
+  | 4  | ULOG      | `Linx.Netfilter.Log` (NFLOG) |
+  | 10 | NFTABLES  | `Linx.Netfilter` core |
   | 12 | HOOK      | (deferred) |
 
   Open a socket with `open/1` and pass it to the appropriate higher-level
@@ -25,11 +25,7 @@ defmodule Linx.Netlink.Nfnl do
   in `Linx.Netlink.Nfnl.Codec`. The `batch/2` request engine below
   drives nf_tables mutating transactions on top of those primitives.
 
-  ## Status
-
-  Shipped: the socket (`open/1`), the batched-transaction engine
-  (`batch/2`), and the `Linx.Netlink.Nfnl.Codec` primitives. The
-  NFTABLES sub-subsystem (id 10) is driven by `Linx.Netfilter`;
+  The NFTABLES sub-subsystem (id 10) is driven by `Linx.Netfilter`;
   CTNETLINK / QUEUE / HOOK are future families.
   """
 
@@ -78,7 +74,7 @@ defmodule Linx.Netlink.Nfnl do
   The envelope messages do not themselves get ACKs from the kernel —
   BATCH_BEGIN merely opens the transaction, BATCH_END commits it.
   Per-inner-message validation errors are returned during the prep
-  phase; commit-time failures (e.g. BATCH_GENID mismatch in N5)
+  phase; commit-time failures (e.g. BATCH_GENID mismatch)
   surface here too, attributed to the inner message that triggered
   them.
 

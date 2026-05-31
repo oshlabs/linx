@@ -260,7 +260,7 @@ let you express intent before the agent is ready to act on it.
   cancel the workload cleanly.
 - **Checkpoint-only verification.** A test that wants to confirm
   the namespaces were created correctly without actually running
-  anything in them — e.g. the `Linx.Mount` M4 pivot_root test
+  anything in them — e.g. the `Linx.Mount` pivot_root test
   pivots the child's mount namespace, verifies via mountinfo, and
   aborts.
 - **User-cancellation flow.** A consumer of Linx that's spawning

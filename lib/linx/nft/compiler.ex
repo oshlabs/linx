@@ -10,7 +10,7 @@ defmodule Linx.NFT.Compiler do
   validator-setter raises and we propagate the failure as a
   `Linx.NFT.ParseError` with the AST node's `{file, line, column}`.
 
-  ## What N8c handles
+  ## Supported
 
   The slice of the AST that covers the canonical examples in
   `docs/netfilter/EXAMPLES.md`:
@@ -32,7 +32,7 @@ defmodule Linx.NFT.Compiler do
     * **Sets / maps / vmaps** — declarations with `type`, `flags`,
       `timeout`, `gc-interval`, `size`, `elements`.
 
-  ## What N8c defers (raises a clear ParseError)
+  ## Not yet supported (raises a clear ParseError)
 
     * `limit`, `meta mark set`, `ct ... set` — no setter `%Expr{}`
       yet on the Linx side. Pipeline DSL can construct them; the
@@ -42,7 +42,7 @@ defmodule Linx.NFT.Compiler do
       shapes vary per kind; defer to a follow-up.
     * Flowtables — same reason.
     * `include` and `define` — file-merging and binding semantics
-      arrive in N8d (`Linx.NFT.parse_file/1`).
+      are not yet implemented (use `Linx.NFT.parse_file/1`).
     * `\#{...}` interpolation — only meaningful from the
       `~NFT` sigil; the compiler is called from there with a
       separate path that emits runtime code.
@@ -125,7 +125,7 @@ defmodule Linx.NFT.Compiler do
     raise_at!(
       state,
       meta,
-      "compiler: `include` is not yet supported (use `parse_file/1` once N8d ships)"
+      "compiler: `include` is not yet supported (use `parse_file/1`)"
     )
   end
 

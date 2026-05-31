@@ -325,7 +325,7 @@ defmodule Linx.NFT.RuntimeCompiler do
 
   defp build_nat_target(nil), do: nil
 
-  # ---- LHS (always static for matches in N8e) ----
+  # ---- LHS (always static for matches) ----
 
   defp build_lhs({:payload, header, field, _meta}, state) do
     case payload_dispatch(header, field) do

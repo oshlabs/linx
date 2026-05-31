@@ -116,13 +116,6 @@ defmodule Linx.Sysctl do
   (`EACCES`/`EPERM`/`EIO`) — the intent is "everything visible", not
   "everything that exists". An errno Linx hasn't catalogued surfaces as
   `errno: :unknown` with the raw integer preserved in `:code`.
-
-  ## Status
-
-  S0–S3 shipped: `supported?/0`, host-side `read/1..2`,
-  `read_int/1..2`, `read_ints/1..2`, `write/2..3`, subtree walking
-  via `list/0..2`, cross-namespace via the `:in` option, plus the
-  `%Linx.Sysctl.Entry{}` and `%Linx.Sysctl.Error{}` value types.
   """
 
   alias Linx.Sysctl.Entry

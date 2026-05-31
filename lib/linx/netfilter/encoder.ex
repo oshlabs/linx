@@ -10,10 +10,6 @@ defmodule Linx.Netfilter.Encoder do
   for a `:replace`-mode push. `Linx.Netlink.Nfnl.batch/2` wraps the
   envelope and drives the transaction.
 
-  N2 covers tables and (Encoder.table/1 plus the wiring for
-  `Linx.Netfilter.create_table/3`). Chains, rules and expressions
-  arrive in N2's later passes.
-
   ## Wire format quirks
 
     * Every nftables `NLA_U32` / `NLA_U64` is **big-endian** on the
@@ -181,10 +177,8 @@ defmodule Linx.Netfilter.Encoder do
        order** — rule ordering matters at runtime, the kernel
        preserves the batch order via `NLM_F_APPEND`.
 
-  Sets / maps / objects / flowtables are not yet emitted (their
-  encoders land with N4 — set elements need their own message
-  type). The batch shape supports them by interleaving in step 3,
-  but for N2 they're skipped.
+  Objects and flowtables are not yet emitted. The batch shape
+  supports them by interleaving in step 3.
 
   This list is intended to drop straight into
   `Linx.Netlink.Nfnl.batch/2`; it does not include the
@@ -652,9 +646,7 @@ defmodule Linx.Netfilter.Encoder do
       — each list element wraps `NFTA_EXPR_NAME` (string) plus
       `NFTA_EXPR_DATA` (nested, per-expression attribute set).
 
-  Comment / tag round-trip via `NFTA_RULE_USERDATA` lands with
-  N5 (`:reconcile` mode needs it). For N2 we encode just enough
-  for the rule to function.
+  Comment / tag round-trip via `NFTA_RULE_USERDATA`.
   """
   @spec rule(Rule.t(), Table.family(), String.t(), String.t(), keyword()) :: Message.t()
   def rule(%Rule{} = rule, family, table_name, chain_name, opts \\ []) do
@@ -831,8 +823,8 @@ defmodule Linx.Netfilter.Encoder do
     # or just an integer.
     #
     # Solution: the diff emits :add_set_elements with the parent
-    # set's reference. We need to enrich the op shape. For N5
-    # first-cut, attach `(key_type, data_type)` via a helper that
+    # set's reference. We need to enrich the op shape: attach
+    # `(key_type, data_type)` via a helper that
     # peeks at the original set in the patch. As a workaround,
     # assume :inet_service for integer keys, :ipv4_addr for 4-tuples,
     # etc.

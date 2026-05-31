@@ -31,9 +31,9 @@ defmodule Linx.Netlink do
       {:ok, links} = Linx.Netlink.Rtnl.Link.list(sock)
       :ok = Linx.Netlink.Socket.close(sock)
 
-  ## Status
+  ## Protocol families
 
-  Two protocol families ship today: **rtnetlink** (`Linx.Netlink.Rtnl` —
+  Two protocol families are supported: **rtnetlink** (`Linx.Netlink.Rtnl` —
   links, addresses, routes, neighbours, rules) and **nfnetlink**
   (`Linx.Netlink.Nfnl` — the transport under `Linx.Netfilter`). The
   wire layers (`Socket`, `Message`, `Attr`, `Request`, `Codec`) are
