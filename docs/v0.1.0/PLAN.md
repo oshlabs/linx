@@ -546,11 +546,17 @@ findings) and annotated with outcomes. All fixups shipped on
     misread a digit-led first IPv6 hextet ending in `d` (e.g. `830d:…`)
     as the time literal "830 days" (`d` is the only time unit that's also
     a hex digit). Fixed + deterministic regression test + CHANGELOG entry.
+  - **Error-path coverage** added (`89bbd10`): caller-side validation
+    (tagged tuples) was already well covered, so this targets the
+    `%X.Error{}` struct paths. `error_model_test.exs` locks the Phase-1
+    `Tty.Error`/`Process.Error` mapping tables (bidirectional errno↔code,
+    unknown fallbacks) + `message/1` clauses + raisability;
+    `error_paths_test.exs` drives end-to-end ENOENT pipelines through the
+    pure-Elixir reads (Cgroup/Capabilities/User/Sysctl) — no privilege, so
+    they run in CI.
   Remaining:
   - C ASan/UBSan pass on the five NIFs (coupled to the CI privileged-job
     decision — needs the integration suite running).
-  - Error-path coverage (force `%X.Error{}` / tagged-tuple branches:
-    ESRCH/ENOENT/EPERM, malformed kernel responses).
   - Optional further properties: the `Netlink.Codec` message round-trips,
     seccomp filter `from_rules`/`to_rules`, the mountinfo parser.
 
