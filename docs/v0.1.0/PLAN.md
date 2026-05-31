@@ -543,9 +543,15 @@ C ASan/UBSan, error-path coverage).
     otp {26, latest}`, and **only the latest-Elixir cell runs
     `mix format --check-formatted`** (formatter output is version-sensitive
     — running the check on the 1.15 cell would fail spuriously against code
-    formatted on 1.19). Optional: a `.tool-versions` pinning dev/format to
-    the latest so contributors format identically. Kernel floor (6.6 LTS,
-    target 6.12) is also in the README Requirements note now.
+    formatted on 1.19). ✅ `.tool-versions` added (erlang 29.0, elixir
+    1.19.5-otp-28) pinning the dev/format toolchain to the latest so
+    contributors format identically. Kernel floor (6.6 LTS, target 6.12)
+    is also in the README Requirements note now.
+  - Note: `mix format --check-formatted` is genuinely green again as of
+    `2066ffc` — a quoted-atom miss in `mix.exs` (`{:"LICENSE", ...}` →
+    `{:LICENSE, ...}`) had slipped in with the README slim. When checking
+    formatting, read the command's exit code directly — don't pipe it
+    through `tail`, which masks the failure.
   - `mix.exs` `package:` metadata is absent — add it + `CHANGELOG.md`.
   - **`mix compile --warnings-as-errors` still fails** on pre-existing
     clause-grouping warnings in `lib/linx/netfilter/encoder.ex`,
