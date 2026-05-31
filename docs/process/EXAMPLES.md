@@ -49,7 +49,7 @@ iex> flush()
 
 Lifecycle events the owner receives over a session:
 
-- `{:linx_process, :ready, child_pid}` — child reached the checkpoint
+- `{:linx_process, :ready, host_pid}` — child reached the checkpoint
 - `{:linx_process, :running}` — child has `execve`'d
 - `{:linx_process, :exited, code}` — workload exited normally
 - `{:linx_process, :signaled, signum}` — workload was killed by a signal
@@ -75,9 +75,11 @@ iex> {:ok, child} = P.spawn(
 Available namespace atoms: `:net`, `:mount`, `:pid`, `:uts`, `:ipc`,
 `:user`, `:cgroup`, `:time`. All but `:user` require `CAP_SYS_ADMIN`.
 
-The pid the owner receives in `{:linx_process, :ready, child_pid}` is the
-child's pid *as the child sees it*: 1 inside a fresh `:pid` namespace,
-otherwise its host pid.
+The pid the owner receives in `{:linx_process, :ready, host_pid}` is the
+workload's pid in the *host's* PID namespace — the value you use to
+address it from the host (procfs, `setns`, mounts). The child's *own*
+view of its pid (1 inside a fresh `:pid` namespace) is available
+separately via `Linx.Process.info/1`'s `:child_pid`.
 
 ## Composing with `Linx.Netlink`
 
@@ -172,34 +174,26 @@ iex> P.wait(child)
 
 ## Getting the workload's host pid
 
-`Linx.Process` delivers two different pid views via lifecycle events.
-
-The `:ready` event carries the **child's own** view of its pid —
-which is `1` when `:pid` is in the namespaces list (the child is
-PID 1 inside its fresh PID namespace). When `:pid` is absent, the
-child's view equals the host pid, so the value is unambiguous.
-
-For the cross-namespace primitives in `Linx.Mount`
-(`in: {:pid, _}`) and `Linx.User` (`set_uid_map(host_pid, ...)`),
-you need the **host's** view — that's `host_pid/1`:
+The `:ready` event carries the workload's **host** pid — the value
+you need for the cross-namespace primitives in `Linx.Mount`
+(`in: {:pid, _}`) and `Linx.User` (`set_uid_map(host_pid, ...)`).
+This holds whether or not `:pid` is in the namespaces list:
 
 ```elixir
 iex> {:ok, c} = P.spawn(argv: [...], namespaces: [:user, :pid])
-iex> receive do {:linx_process, :ready, _child_view} -> :ok end
+iex> host_pid = receive do {:linx_process, :ready, p} -> p end
 
-iex> {:ok, host_pid} = P.host_pid(c)
 iex> :ok = Linx.User.setup_maps(host_pid, uid: [...], gid: [...])
 ```
 
-`host_pid/1` works any time after `:ready` (technically after the
-agent's `:spawned` event, which arrives before `:ready`). If you
-call it earlier you get `{:error, :not_ready}`, but in practice
-the `:ready` await in the example above is what every consumer
-does anyway.
+If you hold the session but didn't capture the `:ready` message,
+`host_pid/1` returns the same value. It works any time after the
+agent's `:spawned` event (which arrives before `:ready`); call it
+earlier and you get `{:error, :not_ready}`.
 
-Without `:pid` in the namespaces list, `host_pid/1` and the
-`:ready` event's value are identical — using `host_pid/1` works
-in both cases and makes the intent explicit at the call site.
+The workload's *own* view of its pid (`1` inside a fresh `:pid`
+namespace) is a separate value, surfaced via `Linx.Process.info/1`'s
+`:child_pid`.
 
 ## Aborting a parked session
 

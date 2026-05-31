@@ -51,7 +51,19 @@ defmodule Linx.Mount.Native do
   Native error shape: `{stage_atom, errno_atom_or_int}`.
   """
   @type stage ::
-          :mount | :umount | :pivot_root | :open_ns | :unshare | :setns | :chdir | :thread
+          :mount
+          | :umount
+          | :pivot_root
+          | :open_ns
+          | :unshare
+          | :setns
+          | :chdir
+          | :thread
+          | :create
+          | :open_pidns
+          | :setns_pid
+          | :pipe
+          | :fork
 
   @type error :: {:error, {stage(), atom() | pos_integer()}}
 
@@ -60,10 +72,29 @@ defmodule Linx.Mount.Native do
   `source`, `fstype`, and `data` may be empty binaries (translated to
   `NULL` for the kernel). `ns_path` is `""` for the caller's
   namespace, or a path to a namespace file for cross-namespace.
+
+  Two setup nuances, both for assembling a container rootfs:
+
+    * `pidns_path` — `""` normally, or a `/proc/<pid>/ns/pid` file. When
+      set (alongside a mount `ns_path`), the worker enters that PID
+      namespace and `fork`s a child to perform the mount, so a `proc`
+      filesystem binds to the container's PID namespace rather than the
+      caller's.
+    * `create_target` — `0` normally, or `1` to create an empty file at
+      `target` (inside the target mount ns) before mounting — a
+      placeholder for a device-node bind onto a fresh tmpfs.
   """
-  @spec mount(binary(), binary(), binary(), non_neg_integer(), binary(), binary()) ::
-          :ok | error()
-  def mount(_source, _target, _fstype, _flags, _data, _ns_path),
+  @spec mount(
+          binary(),
+          binary(),
+          binary(),
+          non_neg_integer(),
+          binary(),
+          binary(),
+          binary(),
+          0 | 1
+        ) :: :ok | error()
+  def mount(_source, _target, _fstype, _flags, _data, _ns_path, _pidns_path, _create_target),
     do: :erlang.nif_error(:nif_not_loaded)
 
   @doc """

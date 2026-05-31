@@ -23,10 +23,12 @@ defmodule Linx.Process do
   The owner (the caller of `spawn/1`, or `:owner` explicitly) receives
   these messages over the course of a session:
 
-    * `{:linx_process, :ready, child_pid}` — the child reached the
-      checkpoint. `child_pid` is the child's pid *as the child sees it*
-      (1 inside a fresh PID namespace; otherwise the host pid). Use
-      `host_pid/1` for the host's view.
+    * `{:linx_process, :ready, host_pid}` — the child reached the
+      checkpoint. `host_pid` is the workload's pid in the *host's* PID
+      namespace — the value you use to address it from the host
+      (`/proc/<host_pid>/...`, `setns`, mounts, uid maps, signals). The
+      child's own view of its pid (1 inside a fresh PID namespace) is
+      available via `info/1`'s `:child_pid` if you need it.
     * `{:linx_process, :running}` — the child has `execve`'d the
       workload.
     * `{:linx_process, :exited, code}` — the workload exited normally.
@@ -73,6 +75,8 @@ defmodule Linx.Process do
 
     * `:stdio` — `apply_stdio` failed (dup2 onto 0/1/2, AF_UNIX
       connect for `{:connect_unix, _}`, or the PTY slave's `TIOCSCTTY`).
+    * `:chdir` — `chdir(2)` to the `:cwd` option failed in the child
+      (e.g. the directory doesn't exist in the workload's root).
     * `:execve` — `execve(2)` returned (i.e. failed).
     * `:cap_drop_bounding`, `:cap_set_thread`, `:cap_set_ambient` —
       one of the capability syscalls failed in the child
@@ -229,6 +233,11 @@ defmodule Linx.Process do
       Defaults to `[]` (share all of the BEAM's namespaces).
     * `:env` — environment as a list of `"KEY=VALUE"` binaries. Defaults
       to inheriting the BEAM's environment.
+    * `:cwd` — the workload's working directory, `chdir`'d to in the
+      child just before `execve`. Defaults to inheriting the agent's cwd.
+      Set it when the workload runs in a pivoted rootfs, where the
+      inherited cwd may not exist in the new root (e.g. the image's
+      `WorkingDir`, or `"/"`).
     * `:owner` — pid to receive lifecycle events. Defaults to the caller.
     * `:linger` — when `true` (default), the session GenServer stays alive
       after the workload reaches a terminal state, so `wait/1` and `info/1`
@@ -291,10 +300,9 @@ defmodule Linx.Process do
   `proceed/1` → `:running` → terminal.
 
   `target_pid` is the *host* pid of the process whose namespaces you
-  want to join (the pid you saw in `{:linx_process, :ready, _}` when
-  `:pid` was *not* in that session's `:namespaces`, or the host pid
-  reported by `Linx.Process.info/1` for sessions that include
-  `:pid`).
+  want to join — the pid you saw in `{:linx_process, :ready, host_pid}`
+  (or, equivalently, `host_pid/1` / `Linx.Process.info/1`'s
+  `:host_pid`).
 
   `opts`:
 
@@ -412,23 +420,18 @@ defmodule Linx.Process do
   @doc """
   Returns the workload's pid **as the host sees it**.
 
-  `Linx.Process` delivers two different pid views via lifecycle
-  events:
+  This is the same value the owner receives in
+  `{:linx_process, :ready, host_pid}`; `host_pid/1` is the convenience
+  accessor for when you hold the session but didn't capture (or have
+  already consumed) the `:ready` message.
 
-    * `{:linx_process, :ready, child_pid}` — the *child's own* view
-      of its pid. When `:pid` is in the namespaces list, this is
-      `1` (the child is PID 1 inside its fresh PID namespace).
-      Without `:pid`, it equals the host pid.
-    * The host's view of the child's pid is reported by the agent
-      separately (via `:spawned`, before `:ready`) and stored in
-      the session's state. `host_pid/1` returns it.
-
-  Use `host_pid/1` when you need to address the workload from
-  the host — typically for procfs paths like
-  `/proc/<host_pid>/{ns,uid_map,gid_map,setgroups,mountinfo}`.
-  Every cross-namespace primitive in Linx (`Linx.Mount`'s
-  `:in: {:pid, _}`, `Linx.User.set_uid_map/2`, `Linx.User.setup_maps/2`)
-  wants the host pid.
+  Use the host pid whenever you address the workload from the host —
+  typically procfs paths like
+  `/proc/<host_pid>/{ns,uid_map,gid_map,setgroups,mountinfo}`. Every
+  cross-namespace primitive in Linx (`Linx.Mount`'s `:in: {:pid, _}`,
+  `Linx.User.set_uid_map/2`, `Linx.User.setup_maps/2`) wants the host
+  pid. The workload's *own* view of its pid (1 inside a fresh PID
+  namespace) is a separate value, available via `info/1`'s `:child_pid`.
 
   ## Returns
 
@@ -443,8 +446,7 @@ defmodule Linx.Process do
   ## Example
 
       {:ok, c} = Linx.Process.spawn(argv: [...], namespaces: [:user, :pid])
-      receive do {:linx_process, :ready, _child_view} -> :ok end
-      {:ok, host_pid} = Linx.Process.host_pid(c)
+      host_pid = receive do {:linx_process, :ready, p} -> p end
       :ok = Linx.User.setup_maps(host_pid, uid: [...], gid: [...])
   """
   @spec host_pid(t()) :: {:ok, pos_integer()} | {:error, :not_ready}
@@ -590,10 +592,12 @@ defmodule Linx.Process do
          {:ok, namespaces} <- fetch_namespaces(opts),
          {:ok, env} <- fetch_env(opts),
          {:ok, stdio} <- fetch_stdio(opts),
+         {:ok, cwd} <- fetch_cwd(opts),
          {:ok, nnp} <- fetch_no_new_privs(opts) do
       request = %{argv: argv, namespaces: namespaces}
       request = if env, do: Map.put(request, :env, env), else: request
       request = if stdio, do: Map.put(request, :stdio, stdio), else: request
+      request = if cwd, do: Map.put(request, :cwd, cwd), else: request
       request = if nnp, do: Map.put(request, :no_new_privs, true), else: request
       {:ok, request}
     end
@@ -607,13 +611,25 @@ defmodule Linx.Process do
          {:ok, namespaces} <- fetch_optional_namespaces(opts),
          {:ok, env} <- fetch_env(opts),
          {:ok, stdio} <- fetch_stdio(opts),
+         {:ok, cwd} <- fetch_cwd(opts),
          {:ok, nnp} <- fetch_no_new_privs(opts) do
       request = %{target: target_pid, argv: argv}
       request = if namespaces, do: Map.put(request, :namespaces, namespaces), else: request
       request = if env, do: Map.put(request, :env, env), else: request
       request = if stdio, do: Map.put(request, :stdio, stdio), else: request
+      request = if cwd, do: Map.put(request, :cwd, cwd), else: request
       request = if nnp, do: Map.put(request, :no_new_privs, true), else: request
       {:ok, request}
+    end
+  end
+
+  # The workload's working directory: chdir'd to in the child just before
+  # execve. Optional; absent means the child inherits the agent's cwd.
+  defp fetch_cwd(opts) do
+    case Keyword.fetch(opts, :cwd) do
+      :error -> {:ok, nil}
+      {:ok, cwd} when is_binary(cwd) -> {:ok, cwd}
+      {:ok, other} -> {:error, {:bad_cwd, other}}
     end
   end
 
@@ -1104,7 +1120,16 @@ defmodule Linx.Process do
   end
 
   defp handle_agent_frame({:status, :ready, child_pid}, state) do
-    send(state.owner, {:linx_process, :ready, child_pid})
+    # The :ready owner message carries the *host* pid -- the value callers
+    # actually need to address the workload (mounts, setns, uid maps,
+    # signals via /proc/<pid>/...). The child can only report its own
+    # in-namespace pid over the wire (getpid() inside its pid ns), so we
+    # send the host pid captured from the earlier :spawned frame instead.
+    # state.host_pid is always set here: the agent emits :spawned before
+    # :ready and the port delivers frames in order. The in-ns pid is kept
+    # in state.child_pid -- both as the lifecycle sentinel and surfaced via
+    # info/1 (:child_pid) for the rare caller who wants the workload's view.
+    send(state.owner, {:linx_process, :ready, state.host_pid})
     state = %{state | child_pid: child_pid}
 
     # A buffered abort wins over auto-proceed: an `abort/1` that landed before

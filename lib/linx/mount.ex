@@ -282,6 +282,11 @@ defmodule Linx.Mount do
       Mapped to the OR'd `MS_*` integer the kernel expects.
     * `:data` — a filesystem-specific options string (e.g.
       `"size=64M,mode=755"` for tmpfs). Defaults to `""`.
+    * `:create` — when `true`, create an empty file at `target`
+      (inside the target namespace) before mounting, if it doesn't
+      already exist. For device-node bind mounts onto a fresh `/dev`
+      tmpfs, where the placeholder must live on the tmpfs itself.
+      Defaults to `false`.
 
   ## Flag atoms
 
@@ -328,9 +333,20 @@ defmodule Linx.Mount do
   :ok = Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
   ```
 
-  Cross-namespace failures surface with stage-tagged operations
-  in `%Linx.Mount.Error{operation: :open_ns | :setns | :thread}` —
-  see `Linx.Mount.Error`'s @moduledoc.
+  ### `proc` and the PID namespace
+
+  A `proc` filesystem binds to the **PID namespace of the mounting
+  task**, not the mount namespace. When `fstype` is `"proc"` and `:in`
+  is `{:pid, n}`, this enters pid `n`'s PID namespace too (forking the
+  mount into it), so the mounted `/proc` reflects the container's
+  processes rather than the host's — no extra option needed. (For
+  `:self` or `{:path, _}`, the caller's PID namespace is used.)
+
+  Cross-namespace failures surface with stage-tagged operations in
+  `%Linx.Mount.Error{}` — `:open_ns` / `:setns` / `:thread`, plus
+  `:create` (the `:create` placeholder) and `:open_pidns` / `:setns_pid` /
+  `:pipe` / `:fork` (the `proc` pidns path). See `Linx.Mount.Error`'s
+  @moduledoc.
   """
   @spec mount(String.t(), String.t(), String.t(), keyword()) ::
           :ok | {:error, Error.t() | {:bad_flag, atom()} | {:bad_in, term()}}
@@ -340,7 +356,9 @@ defmodule Linx.Mount do
     with {:ok, flags} <- pack_flags(opts[:flags] || [], @mount_flags),
          {:ok, ns_path} <- resolve_in(opts[:in] || :self) do
       data = opts[:data] || ""
-      do_mount(source, target, fstype, flags, data, ns_path)
+      pidns_path = resolve_pidns(fstype, opts[:in] || :self)
+      create_target = if opts[:create], do: 1, else: 0
+      do_mount(source, target, fstype, flags, data, ns_path, pidns_path, create_target)
     end
   end
 
@@ -379,12 +397,23 @@ defmodule Linx.Mount do
     end
   end
 
-  defp do_mount(source, target, fstype, flags, data, ns_path) do
-    case Native.mount(source, target, fstype, flags, data, ns_path) do
+  defp do_mount(source, target, fstype, flags, data, ns_path, pidns_path, create_target) do
+    case Native.mount(source, target, fstype, flags, data, ns_path, pidns_path, create_target) do
       :ok -> :ok
       {:error, {stage, errno}} -> {:error, build_error(stage, errno, target, ns_path)}
     end
   end
+
+  # procfs binds to the mounting task's PID namespace. When mounting a
+  # `proc` filesystem into another process's namespaces (`in: {:pid, n}`),
+  # hand the NIF that pid's PID-namespace file too, so it forks the mount
+  # into the container's PID namespace -- otherwise `/proc` would reflect
+  # the host's processes. Only derivable from `{:pid, n}`; for `:self` /
+  # `{:path, _}` the mount uses the caller's PID namespace.
+  defp resolve_pidns("proc", {:pid, n}) when is_integer(n) and n > 0,
+    do: "/proc/#{n}/ns/pid"
+
+  defp resolve_pidns(_fstype, _in), do: ""
 
   defp do_umount(target, flags, ns_path) do
     case Native.umount(target, flags, ns_path) do
@@ -396,16 +425,16 @@ defmodule Linx.Mount do
   # Translates a NIF error into a %Linx.Mount.Error{}. The `path`
   # field follows the failed step's natural subject:
   #
-  #   - :mount / :umount / :pivot_root  -> target path
-  #   - :open_ns / :setns / :thread     -> ns_path (the namespace
-  #                                       acquisition that failed)
+  #   - :mount / :umount / :pivot_root / :create  -> target path
+  #   - :open_ns / :setns / :thread / pidns stages -> ns_path (the
+  #                                       namespace acquisition that failed)
   defp build_error(stage, errno, target, _ns_path)
-       when stage in [:mount, :umount, :pivot_root] do
+       when stage in [:mount, :umount, :pivot_root, :create] do
     do_build_error(stage, errno, target)
   end
 
   defp build_error(stage, errno, _target, ns_path)
-       when stage in [:open_ns, :unshare, :setns, :thread] do
+       when stage in [:open_ns, :unshare, :setns, :thread, :open_pidns, :setns_pid, :pipe, :fork] do
     do_build_error(stage, errno, ns_path)
   end
 
@@ -463,6 +492,10 @@ defmodule Linx.Mount do
         a kernel quirk).
     * `:data` — filesystem-specific options string (rare for
       bind mounts).
+    * `:create` — create an empty file at `target` before binding
+      if it's missing (see `mount/4`). For binding device nodes
+      (`/dev/null`, …) onto a freshly-mounted `/dev` tmpfs.
+    * `:in` — the target mount namespace (see `mount/4`).
 
   Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
   """
@@ -533,6 +566,7 @@ defmodule Linx.Mount do
     base
     |> Keyword.put_new(:data, opts[:data] || "")
     |> Keyword.put_new(:in, opts[:in] || :self)
+    |> Keyword.put_new(:create, opts[:create] || false)
   end
 
   @doc """

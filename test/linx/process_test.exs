@@ -24,6 +24,10 @@ defmodule Linx.ProcessTest do
     test "rejects a non-list :env" do
       assert {:error, {:bad_env, _}} = P.spawn(argv: ["/bin/true"], env: "PATH=/bin")
     end
+
+    test "rejects a non-binary :cwd" do
+      assert {:error, {:bad_cwd, 42}} = P.spawn(argv: ["/bin/true"], cwd: 42)
+    end
   end
 
   describe "spawn/1 → proceed/1 → exit (no namespaces, no root)" do
@@ -69,6 +73,22 @@ defmodule Linx.ProcessTest do
 
       assert_receive {:linx_process, :running}, 2_000
       assert_receive {:linx_process, :exited, 42}, 2_000
+    end
+
+    test ":cwd runs the workload in that directory (chdir before execve)" do
+      dir = Path.join(System.tmp_dir!(), "linx-cwd-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      # `touch marker` is relative, so the file lands in :cwd only if the
+      # child chdir'd there before execve.
+      {:ok, session} = P.spawn(argv: ["/bin/sh", "-c", "touch marker"], cwd: dir)
+
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :exited, 0}, 2_000
+
+      assert File.exists?(Path.join(dir, "marker"))
     end
   end
 
@@ -166,20 +186,22 @@ defmodule Linx.ProcessTest do
     end
 
     @tag :integration
-    test "with :pid namespace, host_pid differs from the :ready value" do
-      # The whole point of host_pid/1: when :pid is in the
-      # namespaces list, the :ready event's pid is 1 (child's view),
-      # but the host pid is something else entirely.
+    test "with :pid namespace, :ready carries the host pid; info exposes the in-ns pid" do
+      # :ready always reports the workload's *host* pid -- even when :pid is
+      # in the namespaces list. The child's own in-namespace view (PID 1 in
+      # a fresh pid ns) is surfaced separately, via info/1's :child_pid.
       {:ok, session} = P.spawn(argv: ["/bin/sleep", "10"], namespaces: [:pid])
       assert_receive {:linx_process, :ready, ready_pid}, 2_000
 
-      # Inside the fresh PID namespace, the child is PID 1.
-      assert ready_pid == 1
-
-      # The host sees it with a real pid.
+      # The :ready value is the host pid (== host_pid/1), not 1.
       assert {:ok, host_pid} = P.host_pid(session)
+      assert ready_pid == host_pid
       assert is_integer(host_pid) and host_pid > 1
-      assert host_pid != ready_pid
+
+      # The in-namespace view lives in info/1: the child is PID 1.
+      assert {:ok, info} = P.info(session)
+      assert info.child_pid == 1
+      assert info.host_pid == host_pid
 
       # And that host_pid actually points at a live process in
       # /proc -- sanity check.
@@ -299,12 +321,11 @@ defmodule Linx.ProcessTest do
     test "namespaces: [:net] gives the child a fresh, isolated netns" do
       {:ok, session} = P.spawn(argv: ["/bin/true"], namespaces: [:net])
 
-      assert_receive {:linx_process, :ready, child_pid}, 2_000
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
 
-      # Without :pid in the namespaces list, the pidns-internal pid the
-      # child reports is identical to its host pid -- so we can hand it
-      # straight to Linx.Netlink, which opens /proc/<pid>/ns/net.
-      {:ok, sock} = Linx.Netlink.Rtnl.open({:pid, child_pid})
+      # The :ready value is the workload's host pid -- hand it straight to
+      # Linx.Netlink, which opens /proc/<host_pid>/ns/net.
+      {:ok, sock} = Linx.Netlink.Rtnl.open({:pid, host_pid})
       assert {:ok, links} = Linx.Netlink.Rtnl.Link.list(sock)
 
       # A fresh network namespace has loopback only -- nothing else.

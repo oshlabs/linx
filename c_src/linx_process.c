@@ -175,6 +175,7 @@ enum stage {
 	STAGE_CAP_SET_AMBIENT = 5,   /* prctl(PR_CAP_AMBIENT_*) failed in the child */
 	STAGE_SECCOMP_NO_NEW_PRIVS = 6, /* prctl(PR_SET_NO_NEW_PRIVS) failed in the child */
 	STAGE_SECCOMP_INSTALL = 7,   /* seccomp(SECCOMP_SET_MODE_FILTER) failed in the child */
+	STAGE_CHDIR = 8,             /* chdir(:cwd) failed in the child before execve */
 };
 
 static const char *stage_name(enum stage s)
@@ -187,6 +188,7 @@ static const char *stage_name(enum stage s)
 	case STAGE_CAP_SET_AMBIENT:  return "cap_set_ambient";
 	case STAGE_SECCOMP_NO_NEW_PRIVS: return "seccomp_no_new_privs";
 	case STAGE_SECCOMP_INSTALL:  return "seccomp_install";
+	case STAGE_CHDIR:            return "chdir";
 	}
 	return "unknown";
 }
@@ -398,6 +400,7 @@ struct request {
 	struct stdio_dir stdio[3];
 	int pty;
 	int no_new_privs; /* set PR_SET_NO_NEW_PRIVS in child before checkpoint */
+	char *cwd;        /* chdir() target in the child before execve; NULL = inherit */
 };
 
 static void free_str_array(char **arr)
@@ -413,6 +416,7 @@ static void free_request(struct request *r)
 {
 	free_str_array(r->argv);
 	free_str_array(r->env);
+	free(r->cwd);
 	for (int i = 0; i < 3; i++)
 		free(r->stdio[i].path);
 }
@@ -691,6 +695,9 @@ static int decode_request(const uint8_t *buf, int len, struct request *req)
 		} else if (strcmp(key, "stdio") == 0) {
 			if (decode_stdio((const char *)buf, &idx, req) < 0)
 				return -1;
+		} else if (strcmp(key, "cwd") == 0) {
+			if (decode_string((const char *)buf, &idx, &req->cwd) < 0)
+				return -1;
 		} else if (strcmp(key, "no_new_privs") == 0) {
 			/* Boolean. ei_decode_boolean wants `int *`. */
 			int b;
@@ -806,6 +813,7 @@ struct child_args {
 	int p2c_w; /* parent's write end -- child closes on entry */
 	char **argv;
 	char **env;
+	const char *cwd; /* chdir() here before execve; NULL = inherit the agent's cwd */
 	struct stdio_dir stdio[3];
 	int pty_master;
 	int pty_slave;
@@ -1223,6 +1231,13 @@ static int child_fn(void *arg)
 	sigemptyset(&mask);
 	sigaddset(&mask, SIGCHLD);
 	sigprocmask(SIG_UNBLOCK, &mask, NULL);
+
+	/* Set the workload's working directory. Done last, just before
+	 * execve: after any rootfs pivot the agent's inherited cwd may no
+	 * longer exist, so :cwd (typically the image's WorkingDir, or "/")
+	 * gives the workload a valid cwd inside its own root. */
+	if (ca->cwd && chdir(ca->cwd) < 0)
+		child_fail(ca->c2p_w, errno, STAGE_CHDIR);
 
 	execve(ca->argv[0], ca->argv, ca->env);
 
@@ -1819,6 +1834,7 @@ int main(void)
 		.p2c_w = p2c[1],
 		.argv = req.argv,
 		.env = child_env,
+		.cwd = req.cwd,
 		.pty_master = -1,
 		.pty_slave = -1,
 		.no_new_privs = req.no_new_privs,

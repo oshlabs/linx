@@ -48,6 +48,7 @@
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/syscall.h> /* SYS_pivot_root (no glibc wrapper) */
+#include <sys/wait.h>    /* waitpid -- reap the pidns mount fork */
 #include <unistd.h>
 
 #define LINX_MOUNT_VERSION "linx_mount"
@@ -143,6 +144,8 @@ struct mount_job {
 	const char *fstype;     /* NULL if not specified */
 	unsigned long flags;
 	const char *data;       /* NULL if not specified */
+	const char *pidns_path; /* non-empty => fork into this pid ns to mount (procfs) */
+	int create_target;      /* create an empty file at target (in-ns) before mounting */
 };
 
 struct umount_job {
@@ -202,6 +205,106 @@ static int enter_target_ns(struct ns_job_result *r, const char *ns_path)
 	return ns;
 }
 
+/* Create an empty regular file at `target` if it doesn't already
+ * exist -- a placeholder for a device-node bind mount onto a fresh
+ * tmpfs (e.g. /dev/null). Runs on the worker thread, which has
+ * already entered the target mount namespace, so the file lands on
+ * the in-container tmpfs (a host-side creat would land on the dir
+ * underneath the tmpfs, invisible in the container). Returns 0 on
+ * success or if it already exists, otherwise an errno. */
+static int ensure_target_file(const char *target)
+{
+	if (access(target, F_OK) == 0)
+		return 0;
+
+	int fd = open(target, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+	if (fd < 0)
+		return errno;
+
+	close(fd);
+	return 0;
+}
+
+/* Mount from inside the target PID namespace. setns(CLONE_NEWPID)
+ * only arms the namespace for *future children*, and procfs binds to
+ * the mounting task's active pid namespace -- so to get a /proc that
+ * reflects the container's pids we must fork() and let the child do
+ * the mount. The worker thread has already entered the target mount
+ * namespace, so the fork child inherits it.
+ *
+ * ASYNC-SIGNAL-SAFE CONTRACT: fork() in the multithreaded BEAM
+ * duplicates only this thread; a lock held by any other thread stays
+ * locked forever in the child. The child therefore touches NOTHING
+ * but direct syscalls (mount, write, close, _exit) -- no malloc, no
+ * erl_nif, no pthread primitives -- and reports its errno over a pipe.
+ * Every buffer it reads (j->target etc.) was allocated before fork. */
+static void do_mount_in_pidns(struct mount_job *j)
+{
+	int pidns = open(j->pidns_path, O_RDONLY | O_CLOEXEC);
+	if (pidns < 0) {
+		j->r.err = errno;
+		j->r.stage = "open_pidns";
+		return;
+	}
+
+	if (setns(pidns, CLONE_NEWPID) < 0) {
+		j->r.err = errno;
+		j->r.stage = "setns_pid";
+		close(pidns);
+		return;
+	}
+
+	int pfd[2];
+	if (pipe(pfd) < 0) {
+		j->r.err = errno;
+		j->r.stage = "pipe";
+		close(pidns);
+		return;
+	}
+
+	pid_t pid = fork();
+	if (pid < 0) {
+		j->r.err = errno;
+		j->r.stage = "fork";
+		close(pfd[0]);
+		close(pfd[1]);
+		close(pidns);
+		return;
+	}
+
+	if (pid == 0) {
+		/* CHILD -- async-signal-safe only (see contract above). */
+		close(pfd[0]);
+		int e = 0;
+		if (mount(j->source, j->target, j->fstype, j->flags, j->data) < 0)
+			e = errno;
+		ssize_t w = write(pfd[1], &e, sizeof e);
+		(void)w;
+		_exit(0);
+	}
+
+	/* PARENT (the worker thread). */
+	close(pfd[1]);
+	int child_err = 0;
+	ssize_t n = read(pfd[0], &child_err, sizeof child_err);
+	close(pfd[0]);
+
+	int status;
+	while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+		;
+
+	if (n != (ssize_t)sizeof child_err) {
+		/* couldn't read the child's errno -- report a generic failure */
+		j->r.err = EINVAL;
+		j->r.stage = "mount";
+	} else if (child_err != 0) {
+		j->r.err = child_err;
+		j->r.stage = "mount";
+	}
+
+	close(pidns);
+}
+
 static void *mount_worker(void *arg)
 {
 	struct mount_job *j = arg;
@@ -210,7 +313,19 @@ static void *mount_worker(void *arg)
 	if (ns < 0)
 		return NULL;
 
-	if (mount(j->source, j->target, j->fstype, j->flags, j->data) < 0) {
+	if (j->create_target) {
+		int e = ensure_target_file(j->target);
+		if (e) {
+			j->r.err = e;
+			j->r.stage = "create";
+			close(ns);
+			return NULL;
+		}
+	}
+
+	if (j->pidns_path && j->pidns_path[0] != '\0') {
+		do_mount_in_pidns(j);
+	} else if (mount(j->source, j->target, j->fstype, j->flags, j->data) < 0) {
 		j->r.err = errno;
 		j->r.stage = "mount";
 	}
@@ -280,10 +395,20 @@ static void *pivot_root_worker(void *arg)
 
 /* --- mount/6 ------------------------------------------------------------ */
 
-/* Args: source, target, fstype, flags (uint64), data (binary), ns_path (binary).
+/* Args: source, target, fstype, flags (uint64), data (binary),
+ *       ns_path (binary), pidns_path (binary), create_target (int).
  *
  * Empty `ns_path`: mount in the caller's namespace (no thread).
  * Non-empty `ns_path`: spawn a worker that enters that namespace.
+ *
+ * Non-empty `pidns_path` (a /proc/<pid>/ns/pid file): the worker also
+ * enters that PID namespace and fork()s a child to perform the mount,
+ * so procfs binds to the container's pid namespace (see
+ * do_mount_in_pidns). Only meaningful alongside a non-empty ns_path.
+ *
+ * `create_target` != 0: create an empty file at `target` (inside the
+ * target mount ns) before mounting -- a placeholder for a device-node
+ * bind onto a fresh tmpfs (see ensure_target_file).
  *
  * `source` and `data` and `fstype` may be empty binaries; the NIF passes
  * NULL to mount(2) for any that are empty (kernel-idiomatic for
@@ -296,16 +421,21 @@ static ERL_NIF_TERM nif_mount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
 	if (!enif_get_uint64(env, argv[3], &flags))
 		return enif_make_badarg(env);
 
-	char *source  = binary_to_cstr(env, argv[0]);
-	char *target  = binary_to_cstr(env, argv[1]);
-	char *fstype  = binary_to_cstr(env, argv[2]);
-	char *data    = binary_to_cstr(env, argv[4]);
-	char *ns_path = binary_to_cstr(env, argv[5]);
+	int create_target;
+	if (!enif_get_int(env, argv[7], &create_target))
+		return enif_make_badarg(env);
 
-	if (!target || !fstype || !source || !data || !ns_path) {
+	char *source     = binary_to_cstr(env, argv[0]);
+	char *target     = binary_to_cstr(env, argv[1]);
+	char *fstype     = binary_to_cstr(env, argv[2]);
+	char *data       = binary_to_cstr(env, argv[4]);
+	char *ns_path    = binary_to_cstr(env, argv[5]);
+	char *pidns_path = binary_to_cstr(env, argv[6]);
+
+	if (!target || !fstype || !source || !data || !ns_path || !pidns_path) {
 		enif_free(source);  enif_free(target);
 		enif_free(fstype);  enif_free(data);
-		enif_free(ns_path);
+		enif_free(ns_path); enif_free(pidns_path);
 		return enif_make_badarg(env);
 	}
 
@@ -316,8 +446,12 @@ static ERL_NIF_TERM nif_mount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
 	ERL_NIF_TERM result;
 
 	if (ns_path[0] == '\0') {
-		/* BEAM namespace -- direct syscall, no thread. */
-		if (mount(src_arg, target, fstype_arg, (unsigned long)flags, data_arg) < 0)
+		/* BEAM namespace -- direct syscall, no thread. (pidns_path is
+		 * only meaningful with a target mount ns, so it's ignored here.) */
+		int cerr = create_target ? ensure_target_file(target) : 0;
+		if (cerr)
+			result = make_error(env, "create", cerr);
+		else if (mount(src_arg, target, fstype_arg, (unsigned long)flags, data_arg) < 0)
 			result = make_error(env, "mount", errno);
 		else
 			result = ok_atom(env);
@@ -331,6 +465,8 @@ static ERL_NIF_TERM nif_mount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
 			.fstype  = fstype_arg,
 			.flags   = (unsigned long)flags,
 			.data    = data_arg,
+			.pidns_path    = pidns_path,
+			.create_target = create_target,
 		};
 
 		ErlNifTid tid;
@@ -347,7 +483,7 @@ static ERL_NIF_TERM nif_mount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
 
 	enif_free(source);  enif_free(target);
 	enif_free(fstype);  enif_free(data);
-	enif_free(ns_path);
+	enif_free(ns_path); enif_free(pidns_path);
 
 	return result;
 }
@@ -464,7 +600,7 @@ static ERL_NIF_TERM nif_pivot_root(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
  * string. */
 static ErlNifFunc nif_funcs[] = {
 	{ "version",    0, version,        0                          },
-	{ "mount",      6, nif_mount,      ERL_NIF_DIRTY_JOB_IO_BOUND },
+	{ "mount",      8, nif_mount,      ERL_NIF_DIRTY_JOB_IO_BOUND },
 	{ "umount",     3, nif_umount,     ERL_NIF_DIRTY_JOB_IO_BOUND },
 	{ "pivot_root", 3, nif_pivot_root, ERL_NIF_DIRTY_JOB_IO_BOUND },
 };

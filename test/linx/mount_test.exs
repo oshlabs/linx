@@ -343,7 +343,17 @@ defmodule Linx.MountTest do
           namespaces: [:mount]
         )
 
+      # The :ready payload is the workload's *host* pid -- the value used to
+      # address it from the host (procfs, setns, mounts).
       assert_receive {:linx_process, :ready, host_pid}, 2_000
+
+      # Sever mount propagation first. The child's mount ns is a COPY of
+      # the host's, but its mounts stay in the host's peer group (systemd
+      # mounts / shared) -- so without this, mounting proc here would
+      # propagate back onto the host's real /proc and break it. Making /
+      # rec-private isolates the child, exactly as the container bring-up
+      # sequence does before any rootfs setup.
+      assert :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
 
       # Snapshot the mount_ids of any /proc entries in the child
       # before we mount.
@@ -376,6 +386,88 @@ defmodule Linx.MountTest do
       assert_receive {:linx_process, :exited, _}, 10_000
     end
 
+    test "mounting proc with in: {:pid, n} reflects the container's PID namespace" do
+      # A proc mounted from the host into the child's mount ns must still
+      # report the *container's* pids, not the host's -- which requires the
+      # mount to happen inside the child's PID namespace too (Linx forks the
+      # mount into it because fstype is "proc" and :in is {:pid, n}).
+      socket =
+        Path.join(System.tmp_dir!(), "linx-procns-#{System.unique_integer([:positive])}.sock")
+
+      on_exit(fn -> File.rm(socket) end)
+
+      {:ok, listener} =
+        :gen_tcp.listen(0, [{:ifaddr, {:local, socket}}, :binary, {:active, false}])
+
+      {:ok, c} =
+        Linx.Process.spawn(
+          argv: ["/bin/sh", "-c", "cut -d' ' -f1 /proc/self/stat"],
+          namespaces: [:pid, :mount],
+          stdio: [stdout: {:connect_unix, socket}]
+        )
+
+      # The :ready payload is the workload's *host* pid -- what we use to
+      # address the container's namespaces from the host. (The workload's
+      # own in-namespace pid, 1 here, is what /proc/self/stat reports below.)
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+
+      # Sever mount propagation first: the container's mount ns is a shared
+      # peer of the host's (cloned while / was shared), so without this the
+      # proc we mount below -- forked into the *container's* PID ns -- would
+      # propagate onto the host's real /proc and report the container's tiny
+      # pids there, breaking the host.
+      assert :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
+
+      # Overlay a fresh proc, forked into the container's PID ns, on /proc.
+      assert :ok =
+               Mount.mount("proc", "/proc", "proc",
+                 flags: [:nosuid, :nodev, :noexec],
+                 in: {:pid, host_pid}
+               )
+
+      :ok = Linx.Process.proceed(c)
+
+      {:ok, sock} = :gen_tcp.accept(listener, 5_000)
+      {:ok, data} = :gen_tcp.recv(sock, 0, 5_000)
+      :gen_tcp.close(sock)
+      :gen_tcp.close(listener)
+
+      reported = data |> String.trim() |> String.to_integer()
+      # Container pids are tiny (1, 2, …); the host's pid namespace would
+      # report a large pid for the very same process.
+      assert reported > 0 and reported < 100
+    end
+
+    test "bind/3 with create: true creates a missing target on a tmpfs in the child's ns" do
+      {:ok, c} = Linx.Process.spawn(argv: ["/bin/sleep", "5"], namespaces: [:mount])
+      assert_receive {:linx_process, :ready, host_pid}, 2_000
+
+      # Sever propagation: the container's mount ns is a shared peer of the
+      # host's, so without this the tmpfs/bind below would leak onto the
+      # host's /mnt.
+      assert :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
+
+      # Fresh tmpfs in the child's mount ns, then bind /dev/null onto a
+      # placeholder *on that tmpfs*. The placeholder can only be created
+      # from inside the child's mount ns (a host creat would land under the
+      # tmpfs, invisible there) -- which is exactly what create: true does.
+      assert :ok = Mount.mount("tmpfs", "/mnt", "tmpfs", in: {:pid, host_pid})
+
+      # Without :create the bind target is missing -> ENOENT.
+      assert {:error, %Error{operation: :mount, errno: :enoent}} =
+               Mount.bind("/dev/null", "/mnt/null", in: {:pid, host_pid})
+
+      # With :create the NIF makes the placeholder in-ns first, then binds.
+      assert :ok = Mount.bind("/dev/null", "/mnt/null", create: true, in: {:pid, host_pid})
+
+      {:ok, mounts} = Mount.list({:pid, host_pid})
+      assert Enum.any?(mounts, &(&1.mount_point == "/mnt/null"))
+
+      :ok = Linx.Process.proceed(c)
+      assert_receive {:linx_process, :running}, 2_000
+      assert_receive {:linx_process, :exited, _}, 10_000
+    end
+
     test "mounting into a running container post-proceed (lifecycle-agnostic)" do
       # Demonstrates that :in works against any live process whose
       # namespace files exist -- not just at the checkpoint. Spawn,
@@ -391,32 +483,37 @@ defmodule Linx.MountTest do
       :ok = Linx.Process.proceed(c)
       assert_receive {:linx_process, :running}, 2_000
 
-      # Now the workload is running. Bind /tmp into it at /mnt-hot.
-      # Create the target directory in the container's view by
-      # binding from the host's /tmp first; we need the host's
-      # /mnt-hot to be writable through the bind. Simpler: mount a
-      # fresh tmpfs at a path that already exists in the
-      # container's namespace.
+      # Sever propagation in the running container's mount ns first, so the
+      # tmpfs we mount below stays inside it and can't leak onto the host's
+      # /mnt (the container's ns is a shared peer of the host's).
+      assert :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
+
+      # Snapshot the host's /mnt mounts so we can prove, by mount_id, that
+      # nothing we do in the container leaks out.
+      {:ok, host_before} = Mount.list()
+      host_mnt_ids_before = host_before |> Enum.map(& &1.mount_id) |> MapSet.new()
+
+      # Now the workload is running. Mount a fresh tmpfs at a path that
+      # already exists in the container's namespace.
       assert :ok = Mount.mount("none", "/mnt", "tmpfs", in: {:pid, host_pid})
 
       {:ok, ct_mounts} = Mount.list({:pid, host_pid})
 
-      assert Enum.any?(ct_mounts, fn e ->
-               e.mount_point == "/mnt" and e.fstype == "tmpfs"
-             end)
+      ct_mnt = Enum.find(ct_mounts, &(&1.mount_point == "/mnt" and &1.fstype == "tmpfs"))
+      assert ct_mnt
 
-      # The host's view -- mounting inside the container does NOT
-      # affect the host's mount table.
-      {:ok, host_mounts} = Mount.list()
-      host_mnt = Enum.find(host_mounts, &(&1.mount_point == "/mnt"))
-      # If /mnt happens to exist in the host's mount table, it
-      # should be a different mount (different mount_id) than what
-      # we just created in the container.
-      if host_mnt do
-        refute Enum.any?(ct_mounts, fn e ->
-                 e.mount_point == "/mnt" and e.mount_id == host_mnt.mount_id
-               end)
-      end
+      # The host's view -- with propagation severed, the container's mount
+      # is genuinely invisible on the host: no /mnt mount_id appears that
+      # wasn't already there before.
+      {:ok, host_after} = Mount.list()
+
+      new_host_mnt =
+        Enum.filter(host_after, fn e ->
+          e.mount_point == "/mnt" and not MapSet.member?(host_mnt_ids_before, e.mount_id)
+        end)
+
+      assert new_host_mnt == [],
+             "container mount leaked onto the host: #{inspect(new_host_mnt)}"
 
       Linx.Process.signal(c, 9)
       assert_receive {:linx_process, :signaled, 9}, 2_000
@@ -438,6 +535,9 @@ defmodule Linx.MountTest do
 
       ns_path = "/proc/#{host_pid}/ns/mnt"
 
+      # Sever propagation so the tmpfs stays inside the container's ns.
+      assert :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:path, ns_path})
+
       assert :ok =
                Mount.mount("none", "/mnt", "tmpfs", in: {:path, ns_path})
 
@@ -458,6 +558,10 @@ defmodule Linx.MountTest do
       assert_receive {:linx_process, :ready, host_pid}, 2_000
       :ok = Linx.Process.proceed(c)
       assert_receive {:linx_process, :running}, 2_000
+
+      # Sever propagation so the tmpfs we mount (and umount) stays inside
+      # the container's ns and can't leak onto the host's /mnt.
+      assert :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
 
       # Snapshot /mnt entries before, so we can identify our
       # newly-added one by mount_id (the host may already have

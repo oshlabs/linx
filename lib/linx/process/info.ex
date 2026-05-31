@@ -14,9 +14,10 @@ defmodule Linx.Process.Info do
     * `:stage` — the current lifecycle stage. See "Stages" below.
     * `:host_pid` — the host's view of the workload's pid, once
       known. `nil` before the `:spawned` status arrives.
-    * `:child_pid` — the workload's view of its own pid (= 1 in
+    * `:child_pid` — the workload's *own* view of its pid (= 1 in
       a fresh PID namespace; otherwise the host pid). `nil` before
-      the `:ready` status arrives.
+      the `:ready` status arrives. This is the in-namespace value; the
+      `:ready` owner message and `:host_pid` carry the host's view.
     * `:pty?` — `true` iff the session was spawned with `stdio: :pty`.
     * `:result` — the terminal result, once one has arrived. `nil`
       before that. Same shape as `Linx.Process.wait/1` returns
