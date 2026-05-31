@@ -271,6 +271,39 @@ iex> Rule.delete(sock, from: "10.0.0.0/24", table: 100)
 :ok
 ```
 
+## Reconciliation: diffing observed vs desired
+
+`Linx.Netlink.Rtnl.Diff` computes the minimal create / update / delete ops
+that converge observed kernel state onto a desired state — the diff half of
+declarative reconciliation (applying them, and observing, come together in
+the reconciler). The diff currency is the decoded structs themselves, so
+desired and observed are the same type.
+
+Routes own by `rtm_protocol` (two-way): tag desired routes with a protocol,
+and the diff considers only observed routes carrying it — connected routes
+and other writers are invisible to it. A changed gateway is an `:update`
+(applied in place with `Route.replace/5`), not a delete+create.
+
+```elixir
+desired = [build_route("10.50.0.0", 24, "10.0.0.1", protocol: :static)]
+{:ok, observed} = Route.list(sock)
+
+Diff.routes(desired, observed, :static)
+# => [{:create, %Route{...}}, {:update, %Route{...}}, {:delete, %Route{...}}]
+```
+
+Everything else (addresses, links, rules, neighbours) has no kernel ownership
+field, so deletion is gated three-way by a `last_applied` key set — the keys
+this reconciler installed before. Foreign state that merely appeared is left
+alone; only keys you previously applied and no longer want are deleted.
+
+```elixir
+owned = MapSet.new(Enum.map(previously_applied, &Diff.address_key/1))
+Diff.addresses(desired_addrs, observed_addrs, owned)
+```
+
+See the `Linx.Netlink.Rtnl.Diff` moduledoc for the full key/ownership table.
+
 ## IP addresses, subnets, and MAC addresses
 
 IP addresses, subnets and MAC addresses are first-class values — `Linx.IP`,
