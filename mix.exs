@@ -163,6 +163,7 @@ defmodule Linx.MixProject do
         ],
         Process: [
           Linx.Process,
+          Linx.Process.Error,
           Linx.Process.Info
         ],
         Tty: [

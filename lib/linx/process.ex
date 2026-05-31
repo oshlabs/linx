@@ -407,8 +407,9 @@ defmodule Linx.Process do
     * `{:ok, {:signaled, signum}}` — workload was killed by `signum`.
     * `{:ok, :aborted}` — `abort/1` was called from the checkpoint;
       the workload never ran.
-    * `{:error, %{errno: errno, stage: stage}}` — a pre-exec failure;
-      the workload never ran.
+    * `{:error, %Linx.Process.Error{}}` — a pre-exec failure; the
+      workload never ran. (The same failure also reaches the owner as
+      the positional event `{:linx_process, :error, errno, stage}`.)
     * `{:error, :timeout}` — `timeout` elapsed before any terminal
       event arrived. The session is still alive; call `wait/1` again.
     * `{:error, :no_process}` — the session GenServer is gone (e.g.
@@ -1009,7 +1010,8 @@ defmodule Linx.Process do
       ) do
     send(state.owner, {:linx_process, :error, code, :agent_died})
 
-    {:noreply, finalise(%{state | port: nil}, {:error, %{errno: code, stage: :agent_died}})}
+    {:noreply,
+     finalise(%{state | port: nil}, {:error, Linx.Process.Error.from_agent(code, :agent_died)})}
   end
 
   def handle_info({port, {:exit_status, _code}}, %{port: port} = state) do
@@ -1086,7 +1088,7 @@ defmodule Linx.Process do
 
   defp handle_agent_frame({:error, errno, stage}, state) do
     send(state.owner, {:linx_process, :error, errno, stage})
-    {:noreply, finalise(state, {:error, %{errno: errno, stage: stage}})}
+    {:noreply, finalise(state, {:error, Linx.Process.Error.from_agent(errno, stage)})}
   end
 
   defp handle_agent_frame({:pty_out, bytes}, state) do

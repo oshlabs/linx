@@ -634,7 +634,7 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :error, 2, :execve}, 2_000
 
       assert {:ok, %Info{stage: :errored} = info} = P.info(session)
-      assert info.result == {:error, %{errno: 2, stage: :execve}}
+      assert info.result == {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}}
     end
 
     test "pty? is true when stdio: :pty" do
@@ -728,7 +728,7 @@ defmodule Linx.ProcessTest do
         host_pid: 12345,
         child_pid: nil,
         pty?: false,
-        result: {:error, %{errno: 2, stage: :execve}}
+        result: {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}}
       }
 
       assert inspect(info) ==
@@ -830,7 +830,7 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :error, 4, :agent_died}, 2_000
 
       # wait/1 also sees the synthesised terminal.
-      assert {:error, %{errno: 4, stage: :agent_died}} =
+      assert {:error, %Linx.Process.Error{stage: :agent_died, code: 4}} =
                P.wait(session, 500)
 
       # The real workload is still actually running because we faked
@@ -875,7 +875,7 @@ defmodule Linx.ProcessTest do
 
       assert_receive {:linx_process, :error, _exit_code, :agent_died}, 2_000
 
-      assert {:error, %{stage: :agent_died}} = P.wait(session, 500)
+      assert {:error, %Linx.Process.Error{stage: :agent_died}} = P.wait(session, 500)
     end
 
     test "malformed request: agent emits :malformed_request on its own" do
