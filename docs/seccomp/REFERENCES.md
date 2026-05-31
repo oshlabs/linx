@@ -52,7 +52,7 @@ sections in the source when interpretation is non-obvious.
 ## Syscall number sources
 
 These are the canonical references for the `Linx.Seccomp.Syscalls`
-hand-curated table. See `docs/seccomp/PLAN.md` "Extending the
+hand-curated table. See `Linx.Seccomp` "Extending the
 syscall table" for the procedure.
 
 - **x86_64:** `arch/x86/entry/syscalls/syscall_64.tbl` in the
@@ -98,9 +98,9 @@ The web-readable upstream:
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — the checkpoint protocol that S2
+- `Linx.Process` — the checkpoint protocol that S2
   hooks into. S2 adds one new agent command to that protocol.
-- `docs/capabilities/PLAN.md` — the K2 commit pattern S2
+- `Linx.Capabilities` — the K2 commit pattern S2
   mirrors exactly (per-thread syscalls applied by the child
   agent at the checkpoint).
 - `lib/linx/capabilities.ex` — pattern for the public verb +

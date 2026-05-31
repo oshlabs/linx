@@ -41,8 +41,7 @@ defmodule Linx.Seccomp.Compiler do
   # table and at most a handful of distinct actions, real filters
   # land far under this; the compiler errors with
   # `Linx.Seccomp.Error{operation: :build, errno: :e2big}` if a
-  # filter would overflow. Trampoline-based splitting is deferred
-  # (see `docs/seccomp/PLAN.md` "Deferred").
+  # filter would overflow. Trampoline-based splitting is deferred.
 
   import Bitwise
 

@@ -49,108 +49,44 @@ defmodule Linx.MixProject do
         "README.md",
         "AGENTS.md",
         "docs/netlink/EXAMPLES.md",
-        "docs/netlink/PLAN.md",
-        "docs/netlink/COVERAGE.md",
         "docs/netlink/REFERENCES.md",
         "docs/process/EXAMPLES.md",
-        "docs/process/PLAN.md",
-        "docs/process/COVERAGE.md",
         "docs/process/REFERENCES.md",
         "docs/tty/EXAMPLES.md",
-        "docs/tty/PLAN.md",
-        "docs/tty/COVERAGE.md",
         "docs/tty/REFERENCES.md",
         "docs/cgroup/EXAMPLES.md",
-        "docs/cgroup/PLAN.md",
-        "docs/cgroup/COVERAGE.md",
         "docs/cgroup/REFERENCES.md",
         "docs/mount/EXAMPLES.md",
-        "docs/mount/PLAN.md",
-        "docs/mount/COVERAGE.md",
         "docs/mount/REFERENCES.md",
         "docs/user/EXAMPLES.md",
-        "docs/user/PLAN.md",
-        "docs/user/COVERAGE.md",
         "docs/user/REFERENCES.md",
         "docs/capabilities/EXAMPLES.md",
-        "docs/capabilities/PLAN.md",
-        "docs/capabilities/COVERAGE.md",
         "docs/capabilities/REFERENCES.md",
         "docs/seccomp/EXAMPLES.md",
-        "docs/seccomp/PLAN.md",
-        "docs/seccomp/COVERAGE.md",
         "docs/seccomp/REFERENCES.md",
         "docs/sysctl/EXAMPLES.md",
-        "docs/sysctl/PLAN.md",
-        "docs/sysctl/COVERAGE.md",
         "docs/sysctl/REFERENCES.md",
         "docs/netfilter/EXAMPLES.md",
-        "docs/netfilter/PLAN.md",
-        "docs/netfilter/COVERAGE.md",
-        "docs/netfilter/TODO.md",
+        "docs/netfilter/DESIGN.md",
         "docs/netfilter/REFERENCES.md"
       ],
       source_ref: "v#{@version}",
+      # Per-subsystem pages: EXAMPLES.md (recipes) + REFERENCES.md
+      # (citations). The retired PLAN.md/COVERAGE.md design docs moved
+      # into the moduledocs; Netfilter keeps a forward-looking DESIGN.md.
       groups_for_extras: [
-        "Netlink — guides": ["docs/netlink/EXAMPLES.md"],
-        "Netlink — design": [
-          "docs/netlink/PLAN.md",
-          "docs/netlink/COVERAGE.md",
-          "docs/netlink/REFERENCES.md"
-        ],
-        "Process — guides": ["docs/process/EXAMPLES.md"],
-        "Process — design": [
-          "docs/process/PLAN.md",
-          "docs/process/COVERAGE.md",
-          "docs/process/REFERENCES.md"
-        ],
-        "Tty — guides": ["docs/tty/EXAMPLES.md"],
-        "Tty — design": [
-          "docs/tty/PLAN.md",
-          "docs/tty/COVERAGE.md",
-          "docs/tty/REFERENCES.md"
-        ],
-        "Cgroup — guides": ["docs/cgroup/EXAMPLES.md"],
-        "Cgroup — design": [
-          "docs/cgroup/PLAN.md",
-          "docs/cgroup/COVERAGE.md",
-          "docs/cgroup/REFERENCES.md"
-        ],
-        "Mount — guides": ["docs/mount/EXAMPLES.md"],
-        "Mount — design": [
-          "docs/mount/PLAN.md",
-          "docs/mount/COVERAGE.md",
-          "docs/mount/REFERENCES.md"
-        ],
-        "User — guides": ["docs/user/EXAMPLES.md"],
-        "User — design": [
-          "docs/user/PLAN.md",
-          "docs/user/COVERAGE.md",
-          "docs/user/REFERENCES.md"
-        ],
-        "Capabilities — guides": ["docs/capabilities/EXAMPLES.md"],
-        "Capabilities — design": [
-          "docs/capabilities/PLAN.md",
-          "docs/capabilities/COVERAGE.md",
-          "docs/capabilities/REFERENCES.md"
-        ],
-        "Seccomp — guides": ["docs/seccomp/EXAMPLES.md"],
-        "Seccomp — design": [
-          "docs/seccomp/PLAN.md",
-          "docs/seccomp/COVERAGE.md",
-          "docs/seccomp/REFERENCES.md"
-        ],
-        "Sysctl — guides": ["docs/sysctl/EXAMPLES.md"],
-        "Sysctl — design": [
-          "docs/sysctl/PLAN.md",
-          "docs/sysctl/COVERAGE.md",
-          "docs/sysctl/REFERENCES.md"
-        ],
-        "Netfilter — guides": ["docs/netfilter/EXAMPLES.md"],
-        "Netfilter — design": [
-          "docs/netfilter/PLAN.md",
-          "docs/netfilter/COVERAGE.md",
-          "docs/netfilter/TODO.md",
+        Netlink: ["docs/netlink/EXAMPLES.md", "docs/netlink/REFERENCES.md"],
+        Process: ["docs/process/EXAMPLES.md", "docs/process/REFERENCES.md"],
+        Tty: ["docs/tty/EXAMPLES.md", "docs/tty/REFERENCES.md"],
+        Cgroup: ["docs/cgroup/EXAMPLES.md", "docs/cgroup/REFERENCES.md"],
+        Mount: ["docs/mount/EXAMPLES.md", "docs/mount/REFERENCES.md"],
+        User: ["docs/user/EXAMPLES.md", "docs/user/REFERENCES.md"],
+        Capabilities: ["docs/capabilities/EXAMPLES.md", "docs/capabilities/REFERENCES.md"],
+        Seccomp: ["docs/seccomp/EXAMPLES.md", "docs/seccomp/REFERENCES.md"],
+        Sysctl: ["docs/sysctl/EXAMPLES.md", "docs/sysctl/REFERENCES.md"],
+        Netfilter: [
+          "docs/netfilter/EXAMPLES.md",
+          "docs/netfilter/DESIGN.md",
           "docs/netfilter/REFERENCES.md"
         ],
         "Repo-wide": ["AGENTS.md"]

@@ -14,8 +14,7 @@ root.
 
 > **Status: live.** S0–S2 are shipped — detection, syscall table,
 > filter construction, BPF compiler, and kernel-side install at the
-> `Linx.Process` checkpoint. See `PLAN.md` for the design notes and
-> `COVERAGE.md` for the feature matrix. Per-arg matching (`allow_if/3`)
+> `Linx.Process` checkpoint. Per-arg matching (`allow_if/3`)
 > is the deferred S1.5 surface.
 
 ## Detecting seccomp support
@@ -61,7 +60,7 @@ iex> MapSet.size(Linx.Seccomp.Syscalls.all(:x86_64))
 
 `Linx.Seccomp.Syscalls` is `@moduledoc false` and the inverse is
 intended for use by `Linx.Seccomp` itself, but it's accessible for
-introspection. See `docs/seccomp/PLAN.md` "Extending the syscall
+introspection. See `Linx.Seccomp` "Extending the syscall
 table" for how to add an entry the table doesn't ship yet.
 
 ## Building filters — `allow_list/2` and `deny_list/2`

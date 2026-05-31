@@ -130,8 +130,7 @@ defmodule Linx.Tty do
   `attach(:controlling, _)`, the `Linx.Tty.format_error/1` helper,
   and the `attach(:group_leader, _)` mode that pumps via the
   Erlang I/O protocol — works over SSH, `:remsh`, and locally as
-  a universal alternative to `:controlling`. See
-  `docs/tty/PLAN.md` for the roadmap.
+  a universal alternative to `:controlling`.
   """
 
   alias Linx.Tty.Native
@@ -475,7 +474,7 @@ defmodule Linx.Tty do
       # the workload's raw terminal bytes through to the caller's
       # terminal emulator. Without this, backspace from the workload's
       # PTY echo (`\b \b`) renders as `^( ^(`, vim's TUI sequences get
-      # mangled, etc. See T6.1.1 in `docs/tty/PLAN.md`.
+      # mangled, etc.
       #
       # Returns an opaque "saved" value (or `nil` if the driver
       # doesn't look like ssh_cli / user_drv with a `:prim_tty` state)

@@ -74,7 +74,7 @@ would be "`create` materialises in the kernel; `add` inserts into a
 value" — which actually argues for keeping `Ruleset.add_*`. Decide
 alongside any other 0.2 API renames so it lands as one breaking change.
 
-## 5. Feature breadth (was `docs/netfilter/TODO.md`)
+## 5. Feature breadth (formerly the separate TODO list)
 
 Tier-1 constructs deferred past 0.1.0 (also tracked in the 0.1.0 release
 plan's Deferred section): `limit rate`, `meta FIELD set` / `ct … set`,

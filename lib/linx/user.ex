@@ -72,9 +72,7 @@ defmodule Linx.User do
   All foundation milestones shipped (U0–U2): `supported?/0`,
   `deny_setgroups/1`, `set_uid_map/2`, `set_gid_map/2`,
   `read_uid_map/1`, `read_gid_map/1`, `setup_maps/2`, plus the
-  `Linx.User.Error` and `Linx.User.Map` shapes. See
-  `docs/user/PLAN.md` for what was built and `COVERAGE.md` for
-  what's deferred.
+  `Linx.User.Error` and `Linx.User.Map` shapes.
   """
 
   alias Linx.User.Error

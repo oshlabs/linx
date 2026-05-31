@@ -13,8 +13,6 @@ unprivileged callers.
 > ✅ **All foundation milestones shipped (U0–U2).** Scaffolding,
 > the write side, the read side, the `setup_maps/2` convenience,
 > and the `%Linx.User.Error{}` + `%Linx.User.Map{}` value types.
-> See `PLAN.md` for what was built and `COVERAGE.md` for what's
-> deferred.
 
 ## Detecting user-namespace support
 

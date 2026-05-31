@@ -9,8 +9,7 @@ that *changes* the cgroup hierarchy — `create/1`, `add_process/2`,
 
 > ✅ **All foundation milestones shipped (C0–C4).** Lifecycle, raw
 > I/O, errors, freeze/thaw, typed limits, stats, and controller
-> delegation are all in. See `PLAN.md` for what was built and
-> `COVERAGE.md` for what's deferred.
+> delegation are all in.
 
 ## Detecting cgroup v2
 

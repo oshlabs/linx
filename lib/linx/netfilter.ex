@@ -123,8 +123,7 @@ defmodule Linx.Netfilter do
   `nftables.conf` codec arrives in N8; `mix format` plugin in N9.
   **v1.5 release** at N9.
 
-  See `docs/netfilter/PLAN.md` for the full roadmap and
-  `docs/netfilter/COVERAGE.md` for what's in / out per milestone.
+  See `docs/netfilter/DESIGN.md` for design work deferred past 0.1.0.
 
   ## References
 

@@ -51,9 +51,8 @@ defmodule Linx.NFT do
   ## Scope
 
   The grammar slice currently supported matches the
-  `Linx.NFT.Compiler` capabilities (see that module's `@moduledoc`
-  and `docs/netfilter/COVERAGE.md` for the up-to-date table). The
-  N8 milestone targets the ~85% subset; the long tail
+  `Linx.NFT.Compiler` capabilities (see that module's `@moduledoc`).
+  The N8 milestone targets the ~85% subset; the long tail
   (`synproxy`, `secmark`, `osf`, `fib`, `jhash`, advanced ct
   fields, `dup`/`fwd`, ipsec contexts) lands as later
   per-construct additions.

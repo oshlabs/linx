@@ -13,9 +13,7 @@ actually apply.
 > All three foundation milestones (K0 + K1 + K2) are shipped.
 > Detection, the constants table, the read side (`read/1`), and
 > the agent-side write verbs (`drop_bounding/2`,
-> `set_thread_sets/2`, `set_ambient/2`) are real. See `PLAN.md`
-> for the design notes and `COVERAGE.md` for the ship/defer
-> split.
+> `set_thread_sets/2`, `set_ambient/2`) are real.
 
 ## Detecting capability support
 

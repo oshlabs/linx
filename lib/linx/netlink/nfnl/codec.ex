@@ -77,8 +77,7 @@ defmodule Linx.Netlink.Nfnl.Codec do
   # nf_tables (subsys 10) operation low-bytes. From
   # `include/uapi/linux/netfilter/nf_tables.h` (`enum nf_tables_msg_types`).
   # Only `GETGEN` (request) is used by N0; `NEWGEN` (reply / broadcast)
-  # decoding lands in N6 with the monitor socket. Full opcode table is in
-  # `docs/netfilter/PLAN.md`.
+  # decoding lands in N6 with the monitor socket.
   #
   # The enum values are zero-indexed and dense:
   #   NEWTABLE=0, GETTABLE=1, DELTABLE=2,

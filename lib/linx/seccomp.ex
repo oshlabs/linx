@@ -27,8 +27,7 @@ defmodule Linx.Seccomp do
       facility at all) and `arch/0` (which architecture we're
       building filters for).
 
-    * **Filter construction.** Two layers (per
-      `docs/seccomp/PLAN.md` D7):
+    * **Filter construction.** Two layers:
 
       - **Sugar:** `allow_list/2` ("only these syscalls"),
         `deny_list/2` ("not these"), and the fluent
@@ -85,9 +84,7 @@ defmodule Linx.Seccomp do
   `Linx.Process` session (with the matching `no_new_privs:` opt on
   `Linx.Process.spawn/1` / `enter/2`). Per-argument matching
   (`allow_if/3`) is the deferred S1.5 surface; multi-arch routing
-  and `SECCOMP_USER_NOTIF` are deferred to future work. See
-  `docs/seccomp/PLAN.md` for the design notes and `COVERAGE.md`
-  for the feature matrix.
+  and `SECCOMP_USER_NOTIF` are deferred to future work.
   """
 
   alias Linx.Seccomp.Builder
@@ -191,7 +188,7 @@ defmodule Linx.Seccomp do
   Options:
 
     * `:default` — the action for non-listed syscalls. Defaults to
-      `:kill_process` per `docs/seccomp/PLAN.md` D1: allow-lists are
+      `:kill_process` — allow-lists are
       contracts ("I have enumerated what's safe"); a syscall outside
       is a bug or attack and should fail loudly.
 
@@ -226,7 +223,7 @@ defmodule Linx.Seccomp do
   Options:
 
     * `:default` — the action for non-listed syscalls. Defaults to
-      `:allow` per `docs/seccomp/PLAN.md` D1: deny-lists are
+      `:allow` — deny-lists are
       graceful-degradation shapes (Docker's default profile).
 
     * `:deny_action` — the action for listed syscalls. Defaults to
@@ -269,8 +266,8 @@ defmodule Linx.Seccomp do
   this list shape"; Linx's job starts here.
 
   The filter targets the current host architecture (see `arch/0`).
-  Filters built for one arch don't install on another; per
-  `docs/seccomp/PLAN.md` D5 multi-arch filters are deferred.
+  Filters built for one arch don't install on another; multi-arch
+  filters are deferred.
 
   ## Returns
 
@@ -369,8 +366,7 @@ defmodule Linx.Seccomp do
   caller didn't pass `no_new_privs: true` to `Linx.Process.spawn/1`
   or because the workload isn't privileged enough to install
   without NNP), the agent sets it automatically before the
-  `seccomp(2)` call — the "be helpful" path per
-  `docs/seccomp/PLAN.md` D2. Callers who want the principled
+  `seccomp(2)` call — the "be helpful" path. Callers who want the principled
   posture should still pass the spawn opt; the auto-set is just a
   fallback so an unprivileged caller who forgot doesn't get a
   confusing `EPERM`.
@@ -411,8 +407,8 @@ defmodule Linx.Seccomp do
   end
 
   # ── Validation helpers ────────────────────────────────────────
-  # Used by from_rules/1 + the sugar verbs. Tagged-tuple errors per
-  # `docs/seccomp/PLAN.md`'s S1 contract.
+  # Used by from_rules/1 + the sugar verbs. Tagged-tuple errors for
+  # caller-side validation (unknown syscall, bad action, duplicate rule).
 
   defp validate_arch(:unsupported), do: {:error, {:unsupported_arch, :unsupported}}
   defp validate_arch(arch) when is_atom(arch), do: :ok

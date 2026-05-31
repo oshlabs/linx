@@ -60,8 +60,7 @@ The agent talks ETF to the BEAM over fd 3/4:
 - [tini](https://github.com/krallin/tini),
   [dumb-init](https://github.com/Yelp/dumb-init),
   [catatonit](https://github.com/openSUSE/catatonit) — established
-  upstream `mini_init` binaries. See `PLAN.md`'s Deferred section for
-  how they relate.
+  upstream `mini_init` binaries.
 - [runc's `libcontainer`](https://github.com/opencontainers/runc) — the
   reference container-runtime implementation in Go; `nsenter`,
   `setns_init`, and the checkpoint relay design parallel `linx_process`.

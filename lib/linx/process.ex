@@ -121,8 +121,7 @@ defmodule Linx.Process do
   `pty_write/2` / `pty_set_winsize/3`), `abort/1`, `host_pid/1`. The
   K2 cap commands (`drop_bounding/2` / `set_thread_sets/2` /
   `set_ambient/2`) live in `Linx.Capabilities` but hook into this
-  module's checkpoint window. `info/1` is still a stub. See
-  `docs/process/PLAN.md` for the roadmap.
+  module's checkpoint window.
   """
 
   use GenServer

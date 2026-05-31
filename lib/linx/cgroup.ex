@@ -59,9 +59,7 @@ defmodule Linx.Cgroup do
   `create/1`, `destroy/1`, `add_process/2`, `read/2`, `write/3`,
   `freeze/1`, `thaw/1`, `set_memory_max/2`, `set_pids_max/2`,
   `set_cpu_max/2`, `stats/1`, `enable_controllers/2`, plus the
-  `Linx.Cgroup.Error` and `Linx.Cgroup.Stats` shapes. See
-  `docs/cgroup/PLAN.md` for what was built and `COVERAGE.md` for
-  what's deferred.
+  `Linx.Cgroup.Error` and `Linx.Cgroup.Stats` shapes.
   """
 
   alias Linx.Cgroup.{Error, Stats}

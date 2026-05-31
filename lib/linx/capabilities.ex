@@ -77,9 +77,7 @@ defmodule Linx.Capabilities do
   `%Linx.Capabilities.Error{}`, the read verb `read/1`, and the
   three checkpoint-window write verbs `drop_bounding/2`,
   `set_thread_sets/2`, `set_ambient/2`. See
-  `docs/capabilities/PLAN.md` for the design notes,
-  `COVERAGE.md` for the ship/defer split, and `EXAMPLES.md`
-  for end-to-end recipes.
+  `docs/capabilities/EXAMPLES.md` for end-to-end recipes.
   """
 
   require Logger

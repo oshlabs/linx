@@ -42,6 +42,13 @@ defmodule Linx.Sysctl do
   has been deprecated since 2.6.24; we don't expose it. procfs is
   the only API.
 
+  ## Primitives, not a config applier
+
+  `Linx.Sysctl` reads, writes, and lists knobs; it is deliberately
+  not a `sysctl.conf` parser or applier. Parsing `/etc/sysctl.d/*.conf`,
+  apply ordering, and reload policy belong to a consumer built on
+  these primitives, not to Linx.
+
   ## Per-namespace vs global
 
   The kernel routes each read or write through the *calling task's*
@@ -109,7 +116,6 @@ defmodule Linx.Sysctl do
   `read_int/1..2`, `read_ints/1..2`, `write/2..3`, subtree walking
   via `list/0..2`, cross-namespace via the `:in` option, plus the
   `%Linx.Sysctl.Entry{}` and `%Linx.Sysctl.Error{}` value types.
-  See `docs/sysctl/PLAN.md` for the roadmap.
   """
 
   alias Linx.Sysctl.Entry

@@ -11,8 +11,7 @@ namespace (root in the simple case). Start with `./sudorun.sh iex
 
 > ✅ **All foundation milestones shipped (M0–M4).** Read side,
 > mutating verbs, cross-namespace `:in`, `pivot_root/3`, errors,
-> the `Entry` and `Error` value types. See `PLAN.md` for what
-> was built and `COVERAGE.md` for what's deferred.
+> the `Entry` and `Error` value types.
 
 ## Reading the mount table
 

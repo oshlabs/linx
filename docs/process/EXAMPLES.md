@@ -428,10 +428,7 @@ iex> P.pty_set_winsize(c, %{rows: 42, cols: 132, xpixel: 0, ypixel: 0})
 :ok
 ```
 
-This is the primitive the [`Linx.Tty`](../tty/) subsystem composes
+This is the primitive the `Linx.Tty` subsystem composes
 with — `Linx.Tty.attach/2` calls `pty_set_winsize/2` automatically at
 entry, seeding the workload with the caller's terminal size.
 
-## Not yet implemented
-
-`info/1` is still a stub. See `PLAN.md` for the roadmap.

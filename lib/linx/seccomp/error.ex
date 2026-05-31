@@ -12,8 +12,7 @@ defmodule Linx.Seccomp.Error do
       `{:error, {:unsupported_arch, _}}`); the struct is the home for
       build failures that don't fit those categories (notably
       `:errno` `:e2big` for filters that overflow the 255-instruction
-      jump limit — see `docs/seccomp/PLAN.md` "Extending the syscall
-      table" and the deferred trampoline support).
+      jump limit; trampoline-based splitting is deferred).
 
     * Kernel-side install failures from `Linx.Seccomp.install/2`
       that come back through `Linx.Process` as

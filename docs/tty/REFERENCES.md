@@ -111,7 +111,7 @@ line-discipline lives in `:group`. References:
 
 ## Why `/dev/tty` and not fd 0
 
-The reasoning lives in `docs/tty/PLAN.md` under "Guiding principles."
+The reasoning lives in `Linx.Tty` under "Guiding principles."
 The short version: BEAM's stdio is mediated by an Erlang group leader;
 going through fd 0 would race the group leader and depend on its
 buffering behaviour. `/dev/tty` is the *controlling terminal*
@@ -122,5 +122,4 @@ The trade-off shows up when `/dev/tty` is **not** the user's terminal —
 SSH, `:remsh`, embedded device consoles where the BEAM is wired to
 a serial port the user can't reach. T6's `attach(:group_leader, _)`
 is the deliberate "fall back to the group leader anyway" mode for
-those environments, with the corresponding loss of raw-mode fidelity
-(see PLAN.md § T6).
+those environments, with the corresponding loss of raw-mode fidelity.

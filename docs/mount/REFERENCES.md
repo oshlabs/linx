@@ -39,7 +39,7 @@ sections in the source when interpretation is non-obvious.
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — `Linx.Process` namespace machinery; the
+- `Linx.Process` — `Linx.Process` namespace machinery; the
   `:mount` namespace and where it comes from.
 - `lib/linx/netlink/socket/native.ex` — the netlink-in-netns NIF
   whose throwaway-thread setns pattern `Linx.Mount.Native` reuses.

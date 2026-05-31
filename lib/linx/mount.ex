@@ -13,6 +13,15 @@ defmodule Linx.Mount do
   cloned-child case — bind-mounting host paths, propagating mount
   changes between namespaces, debugging mount tables.
 
+  ## The classic mount API
+
+  Linx wraps the classic syscalls — `mount(2)`, `umount2(2)`,
+  `pivot_root(2)` — not the newer `fsopen`/`fsmount`/`move_mount`
+  family (Linux ≥ 5.2). The classic calls are universally documented,
+  map one-to-one onto the tools operators already know, and are
+  single-shot calls on the calling thread (no fork), so a NIF wraps
+  them safely. The fd-based API is deferred to a future revision.
+
   ## Cross-namespace via `:in`
 
   Every mutating verb takes an `:in` option naming the mount
@@ -48,8 +57,7 @@ defmodule Linx.Mount do
   the mountinfo parser, `mount/4`, `umount/2`, `bind/3`,
   `remount/2`, `move/2`, the cross-namespace `:in` option,
   `pivot_root/3`, plus `%Linx.Mount.Entry{}` and
-  `%Linx.Mount.Error{}`. See `docs/mount/PLAN.md` for what was
-  built and `COVERAGE.md` for what's deferred.
+  `%Linx.Mount.Error{}`.
   """
 
   import Bitwise, only: [|||: 2]

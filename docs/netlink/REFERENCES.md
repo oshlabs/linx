@@ -30,7 +30,7 @@ struct appears):
 ## Kernel YAML netlink specs
 
 The kernel ships machine-readable descriptions of netlink protocols.
-Referenced in `PLAN.md` and `COVERAGE.md`; the target of the future
+The target of the future
 YAML-driven codegen path for genl families.
 
 - [Netlink protocol specifications](https://docs.kernel.org/userspace-api/netlink/specs.html) — the format.

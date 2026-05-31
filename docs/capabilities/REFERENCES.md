@@ -52,7 +52,7 @@ non-obvious.
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — the checkpoint protocol that the
+- `Linx.Process` — the checkpoint protocol that the
   write side hooks into. K2 adds three new commands to that
   protocol.
 - `lib/linx/user/error.ex` — pattern for

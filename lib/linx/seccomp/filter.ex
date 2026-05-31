@@ -8,7 +8,7 @@ defmodule Linx.Seccomp.Filter do
 
     * `:arch` — the target architecture atom (`:x86_64`, `:aarch64`).
       A filter is single-arch: installing it on a different arch is
-      a programmer error. Per `docs/seccomp/PLAN.md` D5.
+      a programmer error.
 
     * `:bpf` — the raw cBPF program as a binary, ready to be packed
       into a `struct sock_fprog` and handed to

@@ -1014,7 +1014,7 @@ The `~NFT` sigil isn't a string-templating shortcut — it's a compile-time fron
 
 **Direct netlink, no externals.** No `nft` binary dependency, no `libnftables` FFI, no subprocess. Linx encodes nf_tables wire format directly via the same codec DSL `Linx.Netlink.Rtnl` uses. Kernel floor is 6.6 LTS; design target is 6.12 LTS.
 
-More in [`docs/netfilter/EXAMPLES.md`](docs/netfilter/EXAMPLES.md) — and `docs/netfilter/TODO.md` is the short list of remaining per-construct extensions (limit / meta-setter / named objects / flowtables / etc.) on the way to feature-parity with `nft`.
+More in [`docs/netfilter/EXAMPLES.md`](docs/netfilter/EXAMPLES.md) — and [`docs/netfilter/DESIGN.md`](docs/netfilter/DESIGN.md) covers the remaining per-construct extensions (limit / meta-setter / named objects / flowtables / etc.) on the way to feature-parity with `nft`.
 
 ### Value types
 
@@ -1055,7 +1055,7 @@ Each subsystem owns its docs under `docs/<subsystem>/` — `EXAMPLES.md` (iex-st
 - **Within `Linx.Capabilities`** — file capabilities (`security.capability` xattrs on binaries; the `setcap(8)` / `getcap(8)` surface), `SECBIT_*` securebits, per-thread cap reads via `/proc/<pid>/task/<tid>/status`.
 - **Within `Linx.Seccomp`** — per-argument matching (`allow_if(:openat, &(&1.flags == :rdonly))` — the S1.5 surface), multi-arch routing for cross-arch workloads, `SECCOMP_USER_NOTIF` for userspace decision handlers, and richer filter introspection.
 - **Within `Linx.Sysctl`** — a `sysctl.conf` / `/etc/sysctl.d/*.conf` parser+applier (consumer-side, not in Linx itself); a `with_sysctl/2` transactional helper that snapshots and restores on exit; streaming `list/0..1` for callers that want to walk `/proc/sys/` without materialising the ~1500-entry list.
-- **Within `Linx.Netfilter`** — the long tail toward full `nft` parity: `limit rate N/period`, meta/ct setters (`meta mark set`, `ct mark set`), named objects (`counter`/`quota`/`limit` blocks at table level), flowtables, concatenated set/map keys (the kube-proxy NAT pattern), NPTv6 (`snat ip6 prefix to`), and `include` / `define` substitution. Each is a small per-construct addition; the full Tier 1–5 backlog lives in [`docs/netfilter/TODO.md`](docs/netfilter/TODO.md).
+- **Within `Linx.Netfilter`** — the long tail toward full `nft` parity: `limit rate N/period`, meta/ct setters (`meta mark set`, `ct mark set`), named objects (`counter`/`quota`/`limit` blocks at table level), flowtables, concatenated set/map keys (the kube-proxy NAT pattern), NPTv6 (`snat ip6 prefix to`), and `include` / `define` substitution. Each is a small per-construct addition; the full backlog lives in [`docs/netfilter/DESIGN.md`](docs/netfilter/DESIGN.md).
 - **First hex release** — pulling the existing ten subsystems together; HexDocs hosting; a CHANGELOG settling onto semantic versioning.
 
 Roadmap details live in `docs/<subsystem>/PLAN.md`.

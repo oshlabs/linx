@@ -11,8 +11,7 @@ need it on current kernels — `nf_tables_getgen` is gated on
 itself is unprivileged.
 
 > 🚧 **Skeleton.** Primitives are still in flight; sections fill
-> in as milestones ship. See `PLAN.md` for the roadmap and
-> `COVERAGE.md` for what's in / out per milestone.
+> in as milestones ship.
 
 ## Detecting nfnetlink support
 

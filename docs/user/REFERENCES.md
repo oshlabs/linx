@@ -34,7 +34,7 @@ sections in the source when interpretation is non-obvious.
 
 ## In-repo cross-references
 
-- `docs/process/PLAN.md` — `Linx.Process` namespace machinery; the
+- `Linx.Process` — `Linx.Process` namespace machinery; the
   `:user` namespace and how it's selected at `spawn/1`.
 - `lib/linx/mount/error.ex` — pattern for `Linx.User.Error`'s shape
   and `Exception` impl. (`Linx.Cgroup.Error` is equivalent.)

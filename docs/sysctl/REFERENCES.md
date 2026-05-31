@@ -63,12 +63,12 @@ sections in the source when interpretation is non-obvious.
 
 ## In-repo cross-references
 
-- `docs/mount/PLAN.md` — the `:in :: :self | {:pid, n} | {:path, p}`
+- `Linx.Mount` — the `:in :: :self | {:pid, n} | {:path, p}`
   option shape and the setns-on-a-throwaway-pthread pattern.
   `Linx.Sysctl`'s S3 NIF is structurally identical.
 - `lib/linx/mount.ex` and `c_src/linx_mount.c` — the precedent the
   S3 implementation will mirror end-to-end.
-- `docs/user/PLAN.md` — the pure-Elixir-procfs precedent for S0–S2
+- `Linx.User` — the pure-Elixir-procfs precedent for S0–S2
   (no NIF, no Port).
 - `lib/linx/cgroup.ex` — another pure-procfs subsystem, useful as
   a reference for `%Linx.Cgroup.Error{}`-style structured errors
