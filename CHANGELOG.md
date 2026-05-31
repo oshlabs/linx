@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `Linx.NFT` tokenizer: a digit-led first IPv6 hextet ending in `d`
+  followed by `:` (e.g. `830d:…`) was misread as the time literal
+  "830 days" — `d` is the only time unit that is also a hex digit. Such
+  hextets now scan as IPv6 addresses. Found by a round-trip property test.
+
 ## [0.1.0] - 2026-05-31
 
 First release. Ten Linux-kernel-interface subsystems, exposed as idiomatic

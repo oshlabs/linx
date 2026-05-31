@@ -770,10 +770,18 @@ defmodule Linx.NFT.Tokenizer do
     case rest do
       <<unit, after_unit::binary>>
       when unit in [?s, ?m, ?h, ?d, ?w] ->
-        if ident_char?(peek_byte(after_unit)) do
-          continue_address_scan(decimal, rest, state)
-        else
-          emit_time_literal(decimal, unit, after_unit, state)
+        cond do
+          ident_char?(peek_byte(after_unit)) ->
+            continue_address_scan(decimal, rest, state)
+
+          # `830d:ba45:…` — `d` is also a hex digit (the only time unit
+          # that is), so a digit-led first hextet ending in `d` followed
+          # by an IPv6 separator is an address, not "830 days".
+          looks_like_address_start?(after_unit) ->
+            continue_address_scan(decimal, rest, state)
+
+          true ->
+            emit_time_literal(decimal, unit, after_unit, state)
         end
 
       _ ->
