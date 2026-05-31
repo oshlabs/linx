@@ -419,11 +419,21 @@ diff. Events are hints; resync is truth.
   concrete need — PoC-observed contention, or a deliberate shared-socket pool —
   rather than being sequenced ahead of reconcile work.
 
+- **Phase-7 gate — resolved by the PoC.** The `tank/` PoC (Phase 9) built the
+  container+network composite on the *public* API and converged end to end, with
+  **no gaps** — and it did so by consuming the single-shot `Rtnl.Reconcile` +
+  `Linx.Process` directly under OTP supervision. It did **not** need a
+  per-subsystem `Linx.Reconcile` loop; the composite's lifecycle is supervision +
+  checkpoint-time single-shot reconcile. Verdict: ship `Linx.Reconcile` (Phase 7)
+  **thin and justified by the simple host-config consumer** (timer + Monitor
+  wakeup + resync over one subsystem's single-shot reconcile) — not as a composite
+  engine. The composite stays in the consumer, as designed.
+
 ### Still open
 
-- The final Phase-7 go/no-go, decided by the PoC (Phase 9) + the litmus test: does
-  a thin per-subsystem loop implement cleanly and serve the simple consumer, or
-  does the composite subsume it so Linx stops at single-shot reconcile + Monitor?
+- Nothing blocking. Phase 7 is greenlit (thin, per the verdict above); Phases 5
+  (Monitor) and 8 (cgroup limits) are remaining mechanism work; Phase 9's `tank/`
+  is a living PoC to grow as needed.
 
 ## Appendix — minimal reconcile skeleton (illustrative)
 
