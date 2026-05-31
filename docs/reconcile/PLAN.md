@@ -353,9 +353,10 @@ proceeds in parallel.
    `terminate` so a restart never leaks the old child. This is how "auto-restart
    a crashed container with the same arguments" is achieved — via OTP, not a
    reconcile loop (Bucket B/C).
-7. **opt-in `Linx.Reconcile` loop** — the *predisposition* is to ship it (§9, Q1),
-   with the final go/no-go gated on Phase 9's PoC and the `Reconcile.Source`
-   litmus test (§7). Thin, single-subsystem, level-triggered, `ENOBUFS`-resyncing,
+7. **opt-in `Linx.Reconcile` loop** — shipped as `Linx.Reconcile` (the loop) +
+   `Linx.Reconcile.Source` (the narrow plug-in contract of §7), with
+   `Linx.Sysctl.Reconcile.Source` and `Linx.Netlink.Rtnl.Reconcile.Source`
+   adapters. Thin, single-subsystem, level-triggered, `ENOBUFS`-resyncing,
    configurable cadence — and **really opt-in**, which is a hard test, not a
    vibe:
    - zero footprint if absent — no `Application` boot side effect, no
@@ -431,9 +432,10 @@ diff. Events are hints; resync is truth.
 
 ### Still open
 
-- Nothing blocking. Phase 7 is greenlit (thin, per the verdict above); Phases 5
-  (Monitor) and 8 (cgroup limits) are remaining mechanism work; Phase 9's `tank/`
-  is a living PoC to grow as needed.
+- Nothing blocking. Phase 7 (the thin opt-in loop) is implemented per the verdict
+  above; Phase 8 (cgroup limits reconcile, optional) is the remaining mechanism
+  work; Phase 9's `tank/` is a living PoC to grow as needed; Phase 10 (hardening)
+  remains.
 
 ## Appendix — minimal reconcile skeleton (illustrative)
 

@@ -541,3 +541,28 @@ container's namespace stack exactly like `read/3` and `write/3`:
   Reconcile.reconcile(%{"net.ipv4.ip_forward" => 1, "kernel.hostname" => "ct0"},
     %{}, in: {:pid, container_pid})
 ```
+
+### A long-lived loop (opt-in)
+
+`Reconcile.reconcile/3` is single-shot — you call it, it converges once,
+you thread `last_applied` yourself. For a *continuously* converged knob,
+add the opt-in `Linx.Reconcile` loop to your own supervision tree via the
+sysctl `Source` adapter. The `scope` is the `:in` target:
+
+```elixir
+children = [
+  {Linx.Reconcile,
+   source: Linx.Sysctl.Reconcile.Source,
+   scope: :self,
+   desired: %{"net.ipv4.ip_forward" => 1},
+   name: :host_sysctls}
+]
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+It re-converges on a timer (default 5 s; set `interval:`), so a knob
+flipped by hand is corrected on the next pass. sysctl has no kernel
+multicast, so the loop is timer-only here — exactly right for state that
+never changes behind your back. The loop is genuinely optional: it is the
+recommended easy path for an app with no supervision tree to roll its own,
+but the single-shot verbs work fully standalone without it.

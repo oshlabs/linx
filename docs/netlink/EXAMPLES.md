@@ -358,6 +358,37 @@ deltas**: a level-triggered consumer re-`list`s and re-diffs on *any* event (or
 in an event are identical to what a re-read returns. Pair it with `reconcile/4`
 to wake the loop faster than its timer; correctness still rests on the resync.
 
+### A long-lived loop (opt-in)
+
+`reconcile/4` and the Monitor are mechanism; wiring them into a continuous
+control loop is policy you can write yourself (a ~15-line timer that re-`list`s,
+re-diffs, and reconciles, woken early by the Monitor). When you'd rather not,
+the opt-in `Linx.Reconcile` loop does it, driven through the rtnl `Source`
+adapter. The `scope` is the namespace — the loop opens a short-lived socket per
+pass, so it owns no socket lifecycle:
+
+```elixir
+children = [
+  {Linx.Reconcile,
+   source: Linx.Netlink.Rtnl.Reconcile.Source,
+   scope: {:pid, container_pid},
+   desired: %{
+     addresses: [{"eth0", "10.0.0.2", 24}],
+     routes: [{:default, "10.0.0.1"}]
+   },
+   interval: :timer.seconds(30)}
+]
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+By default it subscribes to the Monitor for low-latency wakeups and re-syncs
+every `interval` as the safety net — delete an address by hand and it is
+restored, either on the Monitor wakeup or the next timer pass. It links to the
+Monitor: if the multicast socket dies the loop restarts and resynchronizes from
+scratch, which is correct (resync is truth). It drives **one** namespace; the
+cross-subsystem composite (a container's process + network + cgroup together)
+stays in the consumer, where it belongs.
+
 ## IP addresses, subnets, and MAC addresses
 
 IP addresses, subnets and MAC addresses are first-class values — `Linx.IP`,
