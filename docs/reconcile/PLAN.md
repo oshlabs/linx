@@ -311,7 +311,7 @@ Each reconcilable subsystem implements this by delegating to its own
 `pull`/`diff`/`push`. That gives two layers: the rich per-subsystem surface a
 consumer uses directly when it wants control, and the narrow uniform contract the
 generic loop drives. This contract is also the **litmus test** for whether the
-opt-in loop is worth shipping (§8, Phase 6): if subsystems implement the three
+opt-in loop is worth shipping (§8, Phase 7): if subsystems implement the three
 callbacks cleanly, the loop is trivially worth it; if atomicity/ownership force
 contortions, we stop at single-shot reconcile + Monitor primitives and let
 consumers wrap them directly.
@@ -321,33 +321,55 @@ consumers wrap them directly.
 Dependency order — the reconciler's correctness depends on the things hardened
 first. The error taxonomy and property-tested codecs this builds on already
 landed (a reconcile loop's correctness *is* its error handling, and a codec bug
-corrupts state on every pass).
+corrupts state on every pass). The sequencing below reflects the decisions in §9:
+**sysctl leads** as the proving ground, while the independent rtnl actuation work
+proceeds in parallel.
 
-1. **rtnl parity.** Settable `protocol`/`table`/`metric` (`RTA_PRIORITY` is not
-   in the Route codec today), `NLM_F_REPLACE` for in-place updates (defined but
-   never used), idempotent ops (every `add` is `CREATE|EXCL` today, so it errors
-   if the object exists). Unambiguous mechanism; not blocked on any decision.
-2. **per-resource `diff` + `RTPROT` ownership tagging.** Set arithmetic over the
-   decoded structs (§6 keys), with the two-way/three-way asymmetry.
-3. **the rtnl `Monitor`.** `RTNLGRP_*` group subscription (constants do not exist
+1. **rtnl actuation parity.** Settable `protocol`/`table`/`metric` (`RTA_PRIORITY`
+   is not in the Route codec today), `NLM_F_REPLACE` for in-place updates (defined
+   but never used), idempotent ops (every `add` is `CREATE|EXCL` today, so it
+   errors if the object exists). Pure actuation — no reconcile logic — so it is
+   independent groundwork that can run in parallel with everything below and is
+   not blocked on any decision.
+2. **sysctl reconcile — the proving ground.** The first full reconcile loop, built
+   on the trivial flat `%{key => value}` case: `pull`/`diff`/`push(mode:
+   :reconcile)`, three-way `last_applied` ownership, the **fail-fast** report
+   (§9), and the `Reconcile.Source` contract (§7). This is where the generic
+   discipline is nailed down and property-tested before the harder rtnl resources.
+3. **rtnl per-resource `diff` + `RTPROT` ownership tagging.** Carry the validated
+   discipline to the decoded structs (§6 keys), with the two-way/three-way
+   asymmetry.
+4. **the rtnl `Monitor`.** `RTNLGRP_*` group subscription (constants do not exist
    yet; `Socket.add_membership/2` does), `ENOBUFS → :resync_needed`. The same
    codec decodes `RTM_NEW*`/`RTM_DEL*` into the same structs, so an event is just
    a wake-up.
-4. **single-shot `reconcile/3` per subsystem.** The direct analogue of
-   `Netfilter.push(mode: :reconcile)`, caller-driven, no long-lived state. Core
-   mechanism, in Linx.
-5. **sysctl reconcile.** The simplest reconciler; can come early as the proving
-   ground for the generic discipline before, or alongside, Phase 1.
+5. **rtnl single-shot `reconcile`.** The per-namespace ordered pass across resource
+   types, reusing the Phase 2 pattern; the rtnl analogue of
+   `Netfilter.push(mode: :reconcile)`, caller-driven, no long-lived state.
 6. **`Linx.Process` supervision ergonomics.** `child_spec/1` carrying the spawn
    opts, restart-friendly exit semantics, and reliable OS-process reaping in
    `terminate` so a restart never leaks the old child. This is how "auto-restart
    a crashed container with the same arguments" is achieved — via OTP, not a
    reconcile loop (Bucket B/C).
-7. **opt-in `Linx.Reconcile` loop** — gated on Phase 9's PoC and the
-   `Reconcile.Source` litmus test (§7). Thin, single-subsystem, level-triggered,
-   `ENOBUFS`-resyncing, configurable cadence, strictly separable (a `child_spec`
-   you choose to add — zero footprint if unused). Especially valuable to the
-   simple host-config consumer that has no supervision tree of its own.
+7. **opt-in `Linx.Reconcile` loop** — the *predisposition* is to ship it (§9, Q1),
+   with the final go/no-go gated on Phase 9's PoC and the `Reconcile.Source`
+   litmus test (§7). Thin, single-subsystem, level-triggered, `ENOBUFS`-resyncing,
+   configurable cadence — and **really opt-in**, which is a hard test, not a
+   vibe:
+   - zero footprint if absent — no `Application` boot side effect, no
+     auto-supervised process; the primitives work fully standalone;
+   - an explicit `child_spec` the consumer adds to *their own* tree; Linx ships no
+     supervisor that bundles it in;
+   - no hidden global state or singleton — it holds the desired state it is given;
+   - single-subsystem by construction — it never reaches for the composite;
+   - the separability test — implementable entirely on the public single-shot
+     `reconcile` + Monitor API, such that deleting it would cost a consumer only a
+     ~15-line timer loop, nothing load-bearing.
+
+   Being genuinely separable is also what keeps it from drifting into the runtime
+   Linx refuses to be. Especially valuable to the simple host-config consumer that
+   has no supervision tree of its own — for which it may be the *recommended* easy
+   path, while still never automatic.
 8. **cgroup limits reconcile** (optional, later) — reconcile the knobs; cgroup
    existence/membership stays in the composite.
 9. **the proof-of-concept consumer.** A nested mix app at `tank/` with `mix.exs`
@@ -367,17 +389,38 @@ That is level-triggered resync, a *correctness* mechanism. The Monitor is a
 *latency* improvement layered on top, feeding the same structs into the same
 diff. Events are hints; resync is truth.
 
-## 9. Open questions
+## 9. Decisions & open questions
 
-- Whether the opt-in `Linx.Reconcile` loop (Phase 7) earns its keep, or whether
-  the composite consumer subsumes it and Linx stops at single-shot reconcile +
-  Monitor. The PoC and the `Reconcile.Source` litmus test (§7) decide this.
-- The exact shape of rtnl's partial-apply *report* type (§7 divergence 3).
-- Whether sysctl reconcile leads Phase 1 (as the discipline proving ground) or
-  trails it.
-- The `Connection` GenServer for concurrent in-flight rtnl requests (today
-  `Request.talk` is one-in-flight) — load-bearing for a busy reconciler;
-  sequence it against Phase 2/3.
+### Decided
+
+- **Q3 — sysctl leads.** The first full reconcile loop is built on sysctl as the
+  proving ground for the generic discipline (Phase 2); the rtnl *actuation* fixes
+  (Phase 1) are independent and run in parallel.
+- **Q2 — fail-fast partial-apply.** rtnl has no transaction, so a reconcile pass
+  is an ordered sequence that can partially apply. It stops at the first failing
+  op and returns a report (what applied / the failing op + error / what is
+  pending), rather than best-effort or rollback — the level-triggered next tick is
+  the safety net, which makes rollback wasted work and best-effort mostly
+  redundant. The same shape covers sysctl's independent per-key writes. *Still to
+  settle:* the exact report struct fields (semantics are fixed; field names are
+  not).
+- **Q1 — offer the opt-in loop (predisposition).** Linx will build toward shipping
+  a thin opt-in `Linx.Reconcile` loop (Phase 7), subject to the five "really
+  opt-in" constraints listed there and the `Reconcile.Source` litmus test (§7).
+  The *final* go/no-go is confirmed by the PoC; the predisposition is yes.
+- **Q4 — defer the `Connection` GenServer, demand-driven.** Concurrent in-flight
+  rtnl requests are *not* a reconcile prerequisite: one reconciler per namespace
+  owns its socket and does an ordered pass, and the Monitor uses a separate
+  (multicast) socket, so nothing contends. The `Connection` GenServer waits for a
+  concrete need — PoC-observed contention, or a deliberate shared-socket pool —
+  rather than being sequenced ahead of reconcile work.
+
+### Still open
+
+- The final Phase-7 go/no-go, decided by the PoC (Phase 9) + the litmus test: does
+  a thin per-subsystem loop implement cleanly and serve the simple consumer, or
+  does the composite subsume it so Linx stops at single-shot reconcile + Monitor?
+- The exact field shape of rtnl's partial-apply report (Q2 semantics are fixed).
 
 ## Appendix — minimal reconcile skeleton (illustrative)
 
