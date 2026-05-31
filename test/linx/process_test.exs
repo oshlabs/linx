@@ -13,7 +13,7 @@ defmodule Linx.ProcessTest do
     end
 
     test "rejects an :argv with non-binary elements" do
-      assert {:error, :bad_argv} = P.spawn(argv: ["/bin/true", :nope])
+      assert {:error, {:bad_argv, _}} = P.spawn(argv: ["/bin/true", :nope])
     end
 
     test "rejects an unknown namespace atom" do
@@ -22,7 +22,7 @@ defmodule Linx.ProcessTest do
     end
 
     test "rejects a non-list :env" do
-      assert {:error, :bad_env} = P.spawn(argv: ["/bin/true"], env: "PATH=/bin")
+      assert {:error, {:bad_env, _}} = P.spawn(argv: ["/bin/true"], env: "PATH=/bin")
     end
   end
 
@@ -333,11 +333,11 @@ defmodule Linx.ProcessTest do
     end
 
     test "rejects an unknown :stdio atom" do
-      assert {:error, :bad_stdio} = P.spawn(argv: ["/bin/true"], stdio: :tty)
+      assert {:error, {:bad_stdio, _}} = P.spawn(argv: ["/bin/true"], stdio: :tty)
     end
 
     test "rejects an invalid per-fd directive" do
-      assert {:error, :bad_stdio} =
+      assert {:error, {:bad_stdio, _}} =
                P.spawn(argv: ["/bin/true"], stdio: [stdin: :something_weird])
     end
 

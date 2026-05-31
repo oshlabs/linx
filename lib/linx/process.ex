@@ -570,7 +570,7 @@ defmodule Linx.Process do
       :error -> {:ok, false}
       {:ok, true} -> {:ok, true}
       {:ok, false} -> {:ok, false}
-      {:ok, _other} -> {:error, :bad_no_new_privs}
+      {:ok, other} -> {:error, {:bad_no_new_privs, other}}
     end
   end
 
@@ -579,7 +579,7 @@ defmodule Linx.Process do
       [head | _] = argv when is_binary(head) ->
         if Enum.all?(argv, &is_binary/1),
           do: {:ok, argv},
-          else: {:error, :bad_argv}
+          else: {:error, {:bad_argv, argv}}
 
       _ ->
         {:error, :argv_required}
@@ -593,8 +593,8 @@ defmodule Linx.Process do
           do: {:ok, list},
           else: {:error, {:bad_namespaces, list -- @valid_namespaces}}
 
-      _ ->
-        {:error, :bad_namespaces}
+      other ->
+        {:error, {:bad_namespaces, {:not_a_list, other}}}
     end
   end
 
@@ -611,8 +611,8 @@ defmodule Linx.Process do
           do: {:ok, list},
           else: {:error, {:bad_namespaces, list -- @valid_namespaces}}
 
-      _ ->
-        {:error, :bad_namespaces}
+      other ->
+        {:error, {:bad_namespaces, {:not_a_list, other}}}
     end
   end
 
@@ -624,10 +624,10 @@ defmodule Linx.Process do
       {:ok, list} when is_list(list) ->
         if Enum.all?(list, &is_binary/1),
           do: {:ok, list},
-          else: {:error, :bad_env}
+          else: {:error, {:bad_env, {:not_all_binaries, list}}}
 
-      _ ->
-        {:error, :bad_env}
+      other ->
+        {:error, {:bad_env, {:not_a_list, other}}}
     end
   end
 
@@ -640,7 +640,7 @@ defmodule Linx.Process do
       :error -> {:ok, nil}
       {:ok, atom} when atom in @valid_stdio_atoms -> {:ok, atom}
       {:ok, list} when is_list(list) -> validate_per_fd_stdio(list)
-      _ -> {:error, :bad_stdio}
+      other -> {:error, {:bad_stdio, other}}
     end
   end
 
@@ -652,8 +652,8 @@ defmodule Linx.Process do
           {:error, _} = err -> {:halt, err}
         end
 
-      _other, _ ->
-        {:halt, {:error, :bad_stdio}}
+      other, _ ->
+        {:halt, {:error, {:bad_stdio, {:bad_fd_entry, other}}}}
     end)
     |> case do
       {:ok, pairs} -> {:ok, Enum.reverse(pairs)}
@@ -666,7 +666,7 @@ defmodule Linx.Process do
   defp validate_per_fd_directive({:connect_unix, path}) when is_binary(path),
     do: :ok
 
-  defp validate_per_fd_directive(_), do: {:error, :bad_stdio}
+  defp validate_per_fd_directive(other), do: {:error, {:bad_stdio, {:bad_directive, other}}}
 
   # --- GenServer ------------------------------------------------------------
 
