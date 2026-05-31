@@ -85,7 +85,7 @@ defmodule Linx.Netlink.Error do
     %__MODULE__{errno: Map.get(@posix, code, :unknown), code: code, message: message}
   end
 
-  @impl true
+  @impl Exception
   def message(%__MODULE__{errno: errno, code: code, message: nil}) do
     "netlink #{format_errno(errno, code)}"
   end
