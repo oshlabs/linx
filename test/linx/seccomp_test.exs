@@ -572,7 +572,7 @@ defmodule Linx.SeccompTest do
     end
 
     test "rejects a non-tuple argument" do
-      assert {:error, {:bad_rules_arg, :nope}} = Seccomp.from_rules(:nope)
+      assert {:error, {:bad_rules, :nope}} = Seccomp.from_rules(:nope)
     end
 
     test "short-circuits on the first error" do
@@ -676,7 +676,7 @@ defmodule Linx.SeccompTest do
     end
 
     test "spawn rejects a non-boolean :no_new_privs" do
-      assert {:error, :bad_no_new_privs} =
+      assert {:error, {:bad_no_new_privs, :yes}} =
                P.spawn(argv: ["/bin/true"], no_new_privs: :yes)
     end
   end

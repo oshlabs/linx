@@ -328,7 +328,7 @@ defmodule Linx.Seccomp do
   end
 
   def from_rules(other) do
-    {:error, {:bad_rules_arg, other}}
+    {:error, {:bad_rules, other}}
   end
 
   @doc """
