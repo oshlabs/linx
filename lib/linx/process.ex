@@ -167,6 +167,54 @@ defmodule Linx.Process do
   def __error_stages__, do: @error_stages
 
   @doc """
+  Builds a supervisor child specification that runs `spawn/1` under
+  supervision — the way to auto-restart a workload "with the same arguments".
+
+  `opts` are `spawn/1`'s options, plus child-spec controls:
+
+    * `:id` — child id; defaults to `Linx.Process`.
+    * `:restart` — `:permanent` (default), `:transient`, or `:temporary`.
+    * `:shutdown` — shutdown timeout in ms; defaults to `5000`.
+
+  The spec forces `linger: false` (unless you set it), so the session stops
+  when its workload reaches a terminal state and the supervisor can apply its
+  restart strategy. Exit-reason mapping (what `:transient` keys off):
+
+    * exit 0 → `:normal` — no `:transient` restart.
+    * exit N≠0 → `{:exited, N}` — abnormal, restarted.
+    * killed by signal → `{:signaled, signum}` — abnormal, restarted.
+    * `abort/1` at the checkpoint → `{:shutdown, :aborted}` — no `:transient`
+      restart.
+    * setup/agent error → `{:error, %Linx.Process.Error{}}` — abnormal.
+
+  Pass `:owner` to direct lifecycle events at a consumer (it defaults to the
+  starting process, i.e. the supervisor, which just drops them). For a workload
+  that needs no checkpoint configuration, also pass `auto_proceed: true` so it
+  runs without an external `proceed/1` — the supervisor holds the session pid,
+  not the owner, so nothing else can advance it.
+
+      children = [
+        {Linx.Process,
+         argv: ["/usr/bin/myd"], owner: MyApp.Events, auto_proceed: true, restart: :transient}
+      ]
+      Supervisor.start_link(children, strategy: :one_for_one)
+  """
+  @spec child_spec(keyword) :: Supervisor.child_spec()
+  def child_spec(opts) when is_list(opts) do
+    {id, opts} = Keyword.pop(opts, :id, __MODULE__)
+    {restart, opts} = Keyword.pop(opts, :restart, :permanent)
+    {shutdown, opts} = Keyword.pop(opts, :shutdown, 5_000)
+
+    %{
+      id: id,
+      start: {__MODULE__, :spawn, [Keyword.put_new(opts, :linger, false)]},
+      restart: restart,
+      shutdown: shutdown,
+      type: :worker
+    }
+  end
+
+  @doc """
   Spawns a child process via `clone(2)`, optionally into fresh namespaces.
 
   Returns `{:ok, pid}` — the pid of the GenServer that owns the child and
@@ -182,6 +230,18 @@ defmodule Linx.Process do
     * `:env` — environment as a list of `"KEY=VALUE"` binaries. Defaults
       to inheriting the BEAM's environment.
     * `:owner` — pid to receive lifecycle events. Defaults to the caller.
+    * `:linger` — when `true` (default), the session GenServer stays alive
+      after the workload reaches a terminal state, so `wait/1` and `info/1`
+      keep working. When `false`, it stops with an outcome-derived exit
+      reason (see `child_spec/1`) — the mode for supervised use. `child_spec/1`
+      sets this to `false`.
+    * `:auto_proceed` — when `true`, the session advances past the `:ready`
+      checkpoint by itself (no external `proceed/1`). Defaults to `false`,
+      preserving the checkpoint window for per-instance configuration
+      (capabilities, seccomp, sysctls into the new namespaces). Set it `true`
+      for supervised workloads that need no such configuration — otherwise a
+      supervised child blocks at `:ready` forever, since the supervisor holds
+      the session pid, not the owner.
     * `:stdio` — workload fd 0/1/2 plumbing. See "Stdio plumbing" below.
 
   ## Stdio plumbing
@@ -215,10 +275,8 @@ defmodule Linx.Process do
   """
   @spec spawn(keyword) :: {:ok, t()} | {:error, term}
   def spawn(opts) do
-    owner = Keyword.get(opts, :owner, self())
-
     with {:ok, request} <- build_spawn_request(opts) do
-      GenServer.start_link(__MODULE__, {{:spawn, request}, owner})
+      GenServer.start_link(__MODULE__, {{:spawn, request}, owner(opts), session_opts(opts)})
     end
   end
 
@@ -253,11 +311,18 @@ defmodule Linx.Process do
   @spec enter(pos_integer, keyword) :: {:ok, t()} | {:error, term}
   def enter(target_pid, opts)
       when is_integer(target_pid) and target_pid > 0 and is_list(opts) do
-    owner = Keyword.get(opts, :owner, self())
-
     with {:ok, request} <- build_enter_request(target_pid, opts) do
-      GenServer.start_link(__MODULE__, {{:enter, request}, owner})
+      GenServer.start_link(__MODULE__, {{:enter, request}, owner(opts), session_opts(opts)})
     end
+  end
+
+  defp owner(opts), do: Keyword.get(opts, :owner, self())
+
+  defp session_opts(opts) do
+    %{
+      linger: Keyword.get(opts, :linger, true),
+      auto_proceed: Keyword.get(opts, :auto_proceed, false)
+    }
   end
 
   @doc """
@@ -661,7 +726,8 @@ defmodule Linx.Process do
   # --- GenServer ------------------------------------------------------------
 
   @impl true
-  def init({command, owner}) when is_tuple(command) and tuple_size(command) == 2 do
+  def init({command, owner, session})
+      when is_tuple(command) and tuple_size(command) == 2 and is_map(session) do
     binary = Path.join(:code.priv_dir(:linx), "linx_process")
 
     if not File.exists?(binary) do
@@ -688,6 +754,8 @@ defmodule Linx.Process do
         pending_abort?: false,
         waiters: [],
         result: nil,
+        linger: session.linger,
+        auto_proceed: session.auto_proceed,
         pty?: pty?(command)
       }
 
@@ -998,9 +1066,7 @@ defmodule Linx.Process do
         %{port: port, result: nil} = state
       ) do
     send(state.owner, {:linx_process, :error, code, :agent_died})
-
-    {:noreply,
-     finalise(%{state | port: nil}, {:error, Linx.Process.Error.from_agent(code, :agent_died)})}
+    terminal(%{state | port: nil}, {:error, Linx.Process.Error.from_agent(code, :agent_died)})
   end
 
   def handle_info({port, {:exit_status, _code}}, %{port: port} = state) do
@@ -1041,14 +1107,23 @@ defmodule Linx.Process do
     send(state.owner, {:linx_process, :ready, child_pid})
     state = %{state | child_pid: child_pid}
 
-    # Fire a buffered abort: an `abort/1` that landed before the
-    # checkpoint is forwarded the moment the agent is parked there.
+    # A buffered abort wins over auto-proceed: an `abort/1` that landed before
+    # the checkpoint is forwarded the moment the agent parks there. Otherwise,
+    # `auto_proceed: true` advances past the checkpoint with no external
+    # proceed/1 — the mode for supervised "just run it" workloads that need no
+    # per-instance checkpoint configuration.
     state =
-      if state.pending_abort? do
-        Port.command(state.port, :erlang.term_to_binary(:abort))
-        %{state | pending_abort?: false}
-      else
-        state
+      cond do
+        state.pending_abort? ->
+          Port.command(state.port, :erlang.term_to_binary(:abort))
+          %{state | pending_abort?: false}
+
+        state.auto_proceed ->
+          Port.command(state.port, :erlang.term_to_binary(:proceed))
+          state
+
+        true ->
+          state
       end
 
     {:noreply, state}
@@ -1062,22 +1137,22 @@ defmodule Linx.Process do
 
   defp handle_agent_frame({:status, :exited, code}, state) do
     send(state.owner, {:linx_process, :exited, code})
-    {:noreply, finalise(state, {:exited, code})}
+    terminal(state, {:exited, code})
   end
 
   defp handle_agent_frame({:status, :signaled, signum}, state) do
     send(state.owner, {:linx_process, :signaled, signum})
-    {:noreply, finalise(state, {:signaled, signum})}
+    terminal(state, {:signaled, signum})
   end
 
   defp handle_agent_frame({:status, :aborted, _child_pid}, state) do
     send(state.owner, {:linx_process, :aborted})
-    {:noreply, finalise(state, :aborted)}
+    terminal(state, :aborted)
   end
 
   defp handle_agent_frame({:error, errno, stage}, state) do
     send(state.owner, {:linx_process, :error, errno, stage})
-    {:noreply, finalise(state, {:error, Linx.Process.Error.from_agent(errno, stage)})}
+    terminal(state, {:error, Linx.Process.Error.from_agent(errno, stage)})
   end
 
   defp handle_agent_frame({:pty_out, bytes}, state) do
@@ -1096,8 +1171,35 @@ defmodule Linx.Process do
   @impl true
   def terminate(_reason, state) do
     Enum.each(state.waiters, &GenServer.reply(&1, {:error, :no_process}))
+    reap(state)
     :ok
   end
+
+  # Reap the workload if it is still live, so a supervised shutdown/restart
+  # never leaks the OS process. The agent does NOT kill its child merely
+  # because the BEAM channel closed (it lets an orphan finish), so we ask it
+  # to: a running workload gets SIGKILL, one parked at the checkpoint gets
+  # :abort. The command bytes reach the agent's pipe before the port closes,
+  # so the agent kills + waitpids the child before it ever sees EOF.
+  #
+  # This is the graceful path (GenServer.stop / supervisor shutdown, where
+  # terminate runs). A brutal `Process.exit(pid, :kill)` skips terminate, and
+  # the agent then lets the orphan finish — so use a graceful shutdown (the
+  # default for supervised children) when reaping must be guaranteed.
+  defp reap(%{result: result}) when result != nil, do: :ok
+  defp reap(%{port: nil}), do: :ok
+
+  defp reap(%{port: port, running?: true}) do
+    if Port.info(port), do: Port.command(port, :erlang.term_to_binary({:signal, 9}))
+    :ok
+  end
+
+  defp reap(%{port: port, child_pid: child_pid}) when child_pid != nil do
+    if Port.info(port), do: Port.command(port, :erlang.term_to_binary(:abort))
+    :ok
+  end
+
+  defp reap(_state), do: :ok
 
   # Drain pending_signals to the agent in the order they were queued.
   defp flush_pending_signals(%{port: port, pending_signals: signals}) do
@@ -1112,4 +1214,28 @@ defmodule Linx.Process do
     Enum.each(state.waiters, &GenServer.reply(&1, answer))
     %{state | result: result, waiters: []}
   end
+
+  # The GenServer's response to a terminal workload event. When lingering
+  # (the default) the session stays alive so `wait/1`/`info/1` keep working;
+  # otherwise it stops with a reason derived from the outcome, so a supervisor
+  # can apply its restart strategy (`:transient` restarts only on the abnormal
+  # reasons below; clean and aborted stops do not).
+  defp terminal(state, result) do
+    finalised = finalise(state, result)
+
+    if state.linger do
+      {:noreply, finalised}
+    else
+      {:stop, exit_reason(result), finalised}
+    end
+  end
+
+  # Outcome -> GenServer exit reason. Clean (`:normal`) and intentional-abort
+  # (`{:shutdown, _}`) reasons are quiet and do not trigger a `:transient`
+  # restart; the rest are abnormal (restart under `:transient`/`:permanent`).
+  defp exit_reason({:exited, 0}), do: :normal
+  defp exit_reason({:exited, code}), do: {:exited, code}
+  defp exit_reason({:signaled, signum}), do: {:signaled, signum}
+  defp exit_reason(:aborted), do: {:shutdown, :aborted}
+  defp exit_reason({:error, %Linx.Process.Error{} = err}), do: {:error, err}
 end

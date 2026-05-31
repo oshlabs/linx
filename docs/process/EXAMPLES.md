@@ -432,3 +432,46 @@ This is the primitive the `Linx.Tty` subsystem composes
 with — `Linx.Tty.attach/2` calls `pty_set_winsize/2` automatically at
 entry, seeding the workload with the caller's terminal size.
 
+
+## Supervising a workload
+
+`Linx.Process.child_spec/1` makes a session a supervised child, so the OS
+workload is auto-restarted "with the same arguments" by OTP — no reconcile
+loop needed (process lifecycle is supervision, not desired-state convergence).
+
+```elixir
+children = [
+  {Linx.Process,
+   argv: ["/usr/bin/myd", "--serve"],
+   owner: MyApp.Events,
+   auto_proceed: true,
+   restart: :transient}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)
+```
+
+Two ergonomics make this work:
+
+  * **`linger: false`** (set by `child_spec/1`) — the session stops when its
+    workload reaches a terminal state, with an exit reason derived from the
+    outcome, so the supervisor can apply its restart strategy:
+
+    | Outcome | Exit reason | `:transient` restarts? |
+    |---|---|---|
+    | exit 0 | `:normal` | no |
+    | exit N≠0 | `{:exited, N}` | yes |
+    | killed by signal | `{:signaled, signum}` | yes |
+    | `abort/1` at checkpoint | `{:shutdown, :aborted}` | no |
+    | setup/agent error | `{:error, %Error{}}` | yes |
+
+  * **`auto_proceed: true`** — advances past the `:ready` checkpoint without an
+    external `proceed/1`. A supervised child must set this (the supervisor
+    holds the session pid, not the owner, so nothing else can advance it).
+    Omit it only when a per-instance checkpoint configuration step is wired up
+    elsewhere.
+
+On a graceful shutdown (supervisor stop, or `GenServer.stop/1`) the session's
+`terminate/2` reaps the workload — SIGKILL + `waitpid` via the agent — so a
+restart never leaks the old OS process. (A brutal `Process.exit(pid, :kill)`
+skips `terminate/2`; use the graceful path when reaping must be guaranteed.)
