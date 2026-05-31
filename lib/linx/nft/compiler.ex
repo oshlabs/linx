@@ -115,12 +115,18 @@ defmodule Linx.NFT.Compiler do
   # ===========================================================
 
   defp compile_top({:table, family, name, body, meta}, rs, state) do
-    rs = wrap_add!(rs, fn rs -> Ruleset.add_table!(rs, family, name) end, meta, state, "add_table")
+    rs =
+      wrap_add!(rs, fn rs -> Ruleset.add_table!(rs, family, name) end, meta, state, "add_table")
+
     Enum.reduce(body, rs, &compile_table_item(&1, family, name, &2, state))
   end
 
   defp compile_top({:include, _path, meta}, _rs, state) do
-    raise_at!(state, meta, "compiler: `include` is not yet supported (use `parse_file/1` once N8d ships)")
+    raise_at!(
+      state,
+      meta,
+      "compiler: `include` is not yet supported (use `parse_file/1` once N8d ships)"
+    )
   end
 
   defp compile_top({:define, _name, _value, _meta}, rs, _state) do
@@ -165,27 +171,52 @@ defmodule Linx.NFT.Compiler do
 
   defp compile_table_item({:set, name, opts, meta}, family, table_name, rs, state) do
     set = build_set(name, opts, state, meta)
-    wrap_add!(rs, fn rs -> Ruleset.add_set!(rs, {family, table_name}, set) end, meta, state, "add_set")
+
+    wrap_add!(
+      rs,
+      fn rs -> Ruleset.add_set!(rs, {family, table_name}, set) end,
+      meta,
+      state,
+      "add_set"
+    )
   end
 
   defp compile_table_item({:map, name, opts, meta}, family, table_name, rs, state) do
     map = build_map(name, opts, state, meta, :map)
-    wrap_add!(rs, fn rs -> Ruleset.add_map!(rs, {family, table_name}, map) end, meta, state, "add_map")
+
+    wrap_add!(
+      rs,
+      fn rs -> Ruleset.add_map!(rs, {family, table_name}, map) end,
+      meta,
+      state,
+      "add_map"
+    )
   end
 
   defp compile_table_item({:vmap, name, opts, meta}, family, table_name, rs, state) do
     map = build_map(name, opts, state, meta, :vmap)
-    wrap_add!(rs, fn rs -> Ruleset.add_map!(rs, {family, table_name}, map) end, meta, state, "add_vmap")
+
+    wrap_add!(
+      rs,
+      fn rs -> Ruleset.add_map!(rs, {family, table_name}, map) end,
+      meta,
+      state,
+      "add_vmap"
+    )
   end
 
   defp compile_table_item({:object, kind, _name, _opts, meta}, _family, _table_name, _rs, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: named `#{kind}` objects are not yet supported by the ~NFT compiler (the pipeline DSL can build them)"
     )
   end
 
   defp compile_table_item({:flowtable, _name, _opts, meta}, _family, _table_name, _rs, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: flowtables are not yet supported by the ~NFT compiler (the pipeline DSL can build them)"
     )
   end
@@ -217,7 +248,11 @@ defmodule Linx.NFT.Compiler do
         Wire.priority_int(family, name_atom)
       rescue
         FunctionClauseError ->
-          raise_at!(state, meta, "compiler: unknown priority alias `#{name}` for family `#{family}`")
+          raise_at!(
+            state,
+            meta,
+            "compiler: unknown priority alias `#{name}` for family `#{family}`"
+          )
       end
 
     base + offset
@@ -311,13 +346,17 @@ defmodule Linx.NFT.Compiler do
   end
 
   defp compile_stmt({:limit, _rate, _opts, meta}, _family, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: `limit` statement requires a `%Expr.limit{}` constructor that's not yet implemented"
     )
   end
 
   defp compile_stmt({:meta_set, _field, _value, meta}, _family, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: assigning `meta`/`ct` fields (`set` action) requires a setter `%Expr{}` that's not yet implemented"
     )
   end
@@ -327,7 +366,11 @@ defmodule Linx.NFT.Compiler do
   end
 
   defp compile_stmt(other, _family, state) do
-    raise_at!(state, stmt_meta(other), "compiler: unsupported rule statement: #{inspect(elem(other, 0))}")
+    raise_at!(
+      state,
+      stmt_meta(other),
+      "compiler: unsupported rule statement: #{inspect(elem(other, 0))}"
+    )
   end
 
   defp stmt_meta(tuple), do: elem(tuple, tuple_size(tuple) - 1)
@@ -338,8 +381,15 @@ defmodule Linx.NFT.Compiler do
 
   defp compile_lhs({:payload, header, field, _meta}, state) do
     case payload_dispatch(header, field) do
-      {:ok, alias_atom, kind} -> {Expr.payload(alias_atom), kind}
-      :unknown -> raise_at!(state, %{line: 0, column: 0}, "compiler: unknown payload field `#{header} #{field}`")
+      {:ok, alias_atom, kind} ->
+        {Expr.payload(alias_atom), kind}
+
+      :unknown ->
+        raise_at!(
+          state,
+          %{line: 0, column: 0},
+          "compiler: unknown payload field `#{header} #{field}`"
+        )
     end
   end
 
@@ -495,12 +545,21 @@ defmodule Linx.NFT.Compiler do
       case elem do
         {:identifier, name, _} ->
           case safe_ct_state_bits(String.to_atom(name)) do
-            nil -> raise_at!(state, value_meta(elem) || fallback_meta, "compiler: unknown ct state `#{name}`")
-            n -> bor(acc, n)
+            nil ->
+              raise_at!(
+                state,
+                value_meta(elem) || fallback_meta,
+                "compiler: unknown ct state `#{name}`"
+              )
+
+            n ->
+              bor(acc, n)
           end
 
         other ->
-          raise_at!(state, value_meta(other) || fallback_meta,
+          raise_at!(
+            state,
+            value_meta(other) || fallback_meta,
             "compiler: ct state element must be a state name, got #{inspect(other)}"
           )
       end
@@ -527,8 +586,15 @@ defmodule Linx.NFT.Compiler do
 
   defp compile_rhs({:identifier, name, meta}, op, {:int, width}, state) do
     case parse_int_keyword(name) do
-      {:ok, n} -> Expr.cmp(op, encode_int(n, width))
-      :error -> raise_at!(state, meta, "compiler: don't know how to interpret identifier `#{name}` as integer")
+      {:ok, n} ->
+        Expr.cmp(op, encode_int(n, width))
+
+      :error ->
+        raise_at!(
+          state,
+          meta,
+          "compiler: don't know how to interpret identifier `#{name}` as integer"
+        )
     end
   end
 
@@ -538,7 +604,9 @@ defmodule Linx.NFT.Compiler do
   end
 
   defp compile_rhs(node, _op, kind, state) do
-    raise_at!(state, value_meta(node),
+    raise_at!(
+      state,
+      value_meta(node),
       "compiler: cannot use value #{inspect(node)} with field kind #{inspect(kind)}"
     )
   end
@@ -572,7 +640,9 @@ defmodule Linx.NFT.Compiler do
         n
 
       :error ->
-        raise_at!(state, value_meta(node) || meta,
+        raise_at!(
+          state,
+          value_meta(node) || meta,
           "compiler: unknown name `#{name}` in #{key_type} set"
         )
     end
@@ -584,12 +654,18 @@ defmodule Linx.NFT.Compiler do
     do: {:range, literal_int!(lo), literal_int!(hi)}
 
   defp literal_for_set!(node, _kind, state) do
-    raise_at!(state, value_meta(node), "compiler: unsupported set element shape: #{inspect(node)}")
+    raise_at!(
+      state,
+      value_meta(node),
+      "compiler: unsupported set element shape: #{inspect(node)}"
+    )
   end
 
   defp literal_int!({:integer, n, _}), do: n
   defp literal_int!({:time, n, _}), do: n
-  defp literal_int!(node), do: raise_at!(%{file: "?", original_source: ""}, value_meta(node), "expected integer literal")
+
+  defp literal_int!(node),
+    do: raise_at!(%{file: "?", original_source: ""}, value_meta(node), "expected integer literal")
 
   defp range_or_cidr?({:range, _, _, _}), do: true
   defp range_or_cidr?({:address, :cidr_v4, _, _}), do: true
@@ -605,7 +681,11 @@ defmodule Linx.NFT.Compiler do
           raise_at!(state, meta, "compiler: set `#{name}` missing required `type` declaration")
 
         {:concat, _} ->
-          raise_at!(state, meta, "compiler: concatenated set types are not yet supported by the ~NFT compiler")
+          raise_at!(
+            state,
+            meta,
+            "compiler: concatenated set types are not yet supported by the ~NFT compiler"
+          )
 
         atom when is_atom(atom) ->
           atom
@@ -639,14 +719,26 @@ defmodule Linx.NFT.Compiler do
           {k, d}
 
         {:map_type, _k, _d} ->
-          raise_at!(state, meta, "compiler: concatenated map keys are not yet supported by the ~NFT compiler")
+          raise_at!(
+            state,
+            meta,
+            "compiler: concatenated map keys are not yet supported by the ~NFT compiler"
+          )
 
         other ->
-          raise_at!(state, meta, "compiler: `#{kind}` requires `type KEY : DATA`; got #{inspect(other)}")
+          raise_at!(
+            state,
+            meta,
+            "compiler: `#{kind}` requires `type KEY : DATA`; got #{inspect(other)}"
+          )
       end
 
     if kind == :vmap and data_type != :verdict do
-      raise_at!(state, meta, "compiler: vmap data type must be `verdict`, got #{inspect(data_type)}")
+      raise_at!(
+        state,
+        meta,
+        "compiler: vmap data type must be `verdict`, got #{inspect(data_type)}"
+      )
     end
 
     elements =
@@ -675,7 +767,11 @@ defmodule Linx.NFT.Compiler do
   end
 
   defp build_map_element(other, state) do
-    raise_at!(state, value_meta(other), "compiler: map element must be `KEY : VALUE`, got #{inspect(other)}")
+    raise_at!(
+      state,
+      value_meta(other),
+      "compiler: map element must be `KEY : VALUE`, got #{inspect(other)}"
+    )
   end
 
   defp literal_simple({:integer, n, _}), do: n
@@ -691,7 +787,9 @@ defmodule Linx.NFT.Compiler do
 
   defp literal_string!({:string, s, _}, _state), do: s
   defp literal_string!({:identifier, s, _}, _state), do: s
-  defp literal_string!(node, state), do: raise_at!(state, value_meta(node), "compiler: expected string value")
+
+  defp literal_string!(node, state),
+    do: raise_at!(state, value_meta(node), "compiler: expected string value")
 
   # ===========================================================
   # Verdicts
@@ -740,7 +838,11 @@ defmodule Linx.NFT.Compiler do
   defp nat_target_port(nil, _state, _meta), do: nil
 
   defp nat_target_port(other, state, meta) do
-    raise_at!(state, meta, "compiler: redirect target must be a port integer, got: #{inspect(other)}")
+    raise_at!(
+      state,
+      meta,
+      "compiler: redirect target must be a port integer, got: #{inspect(other)}"
+    )
   end
 
   # ===========================================================
@@ -909,5 +1011,4 @@ defmodule Linx.NFT.Compiler do
     |> String.split(["\r\n", "\n", "\r"])
     |> Enum.at(line - 1)
   end
-
 end

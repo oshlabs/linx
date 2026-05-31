@@ -155,8 +155,11 @@ defmodule Linx.Netfilter.Verdict do
   """
   @spec valid?(t()) :: boolean()
   def valid?(%__MODULE__{kind: k, target: nil}) when k in @simple_kinds, do: true
-  def valid?(%__MODULE__{kind: k, target: t}) when k in [:jump, :goto] and is_binary(t) and t != "",
-    do: true
+
+  def valid?(%__MODULE__{kind: k, target: t})
+      when k in [:jump, :goto] and is_binary(t) and t != "",
+      do: true
+
   def valid?(%__MODULE__{kind: :queue, target: n}) when is_integer(n) and n >= 0, do: true
   def valid?(_), do: false
 

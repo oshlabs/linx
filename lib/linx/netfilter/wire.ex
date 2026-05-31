@@ -480,6 +480,7 @@ defmodule Linx.Netfilter.Wire do
   """
   @spec priority_int(atom(), integer() | atom() | {atom(), integer()}) :: integer()
   def priority_int(_family, n) when is_integer(n), do: n
+
   def priority_int(family, {name, offset}) when is_atom(name) and is_integer(offset),
     do: priority_int(family, name) + offset
 
@@ -534,6 +535,7 @@ defmodule Linx.Netfilter.Wire do
   @spec table_flags_atoms(non_neg_integer()) :: [atom()]
   def table_flags_atoms(flags) when is_integer(flags) do
     import Bitwise
+
     []
     |> append_if((flags &&& 0x1) != 0, :dormant)
     |> append_if((flags &&& 0x2) != 0, :owner)
@@ -556,6 +558,7 @@ defmodule Linx.Netfilter.Wire do
   @spec chain_flags_atoms(non_neg_integer()) :: [atom()]
   def chain_flags_atoms(flags) when is_integer(flags) do
     import Bitwise
+
     []
     |> append_if((flags &&& 0x2) != 0, :hw_offload)
     |> append_if((flags &&& 0x4) != 0, :binding)

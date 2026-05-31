@@ -432,7 +432,8 @@ defmodule Linx.Netfilter.Expr do
   """
   @type addr_input ::
           {0..255, 0..255, 0..255, 0..255}
-          | {0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF}
+          | {0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF, 0..0xFFFF,
+             0..0xFFFF}
           | <<_::32>>
           | <<_::128>>
           | String.t()
@@ -462,8 +463,9 @@ defmodule Linx.Netfilter.Expr do
     %__MODULE__{name: :immediate, data: %{dreg: dreg, value: bin}}
   end
 
-  defp normalize_addr({a, b, c, d}) when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255,
-    do: {<<a, b, c, d>>, :ip}
+  defp normalize_addr({a, b, c, d})
+       when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255,
+       do: {<<a, b, c, d>>, :ip}
 
   defp normalize_addr({a, b, c, d, e, f, g, h})
        when a in 0..0xFFFF and b in 0..0xFFFF and c in 0..0xFFFF and d in 0..0xFFFF and

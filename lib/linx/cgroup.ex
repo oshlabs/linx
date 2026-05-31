@@ -257,8 +257,8 @@ defmodule Linx.Cgroup do
     do: write_at(cg, "cpu.max", "max", :write)
 
   def set_cpu_max(cg, {quota, period})
-      when is_binary(cg) and is_integer(quota) and quota > 0
-      and is_integer(period) and period > 0,
+      when is_binary(cg) and is_integer(quota) and quota > 0 and
+             is_integer(period) and period > 0,
       do: write_at(cg, "cpu.max", "#{quota} #{period}", :write)
 
   @doc """

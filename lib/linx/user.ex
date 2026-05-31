@@ -207,8 +207,8 @@ defmodule Linx.User do
 
   defp validate_entry({inside, outside, length})
        when is_integer(inside) and inside >= 0 and
-            is_integer(outside) and outside >= 0 and
-            is_integer(length) and length > 0 do
+              is_integer(outside) and outside >= 0 and
+              is_integer(length) and length > 0 do
     {:ok, "#{inside} #{outside} #{length}\n"}
   end
 
@@ -320,8 +320,7 @@ defmodule Linx.User do
   """
   @spec setup_maps(pid_target(), keyword()) ::
           :ok
-          | {:error,
-             Error.t() | {:bad_map, term()} | {:bad_setgroups, term()}}
+          | {:error, Error.t() | {:bad_map, term()} | {:bad_setgroups, term()}}
   def setup_maps(pid, opts) when is_integer(pid) and pid > 0 and is_list(opts) do
     with {:ok, uid} <- fetch_required(opts, :uid),
          {:ok, gid} <- fetch_required(opts, :gid),

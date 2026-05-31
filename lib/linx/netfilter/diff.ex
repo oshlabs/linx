@@ -179,6 +179,7 @@ defmodule Linx.Netfilter.Diff do
       |> MapSet.difference(from_names)
       |> Enum.flat_map(fn name ->
         chain = Map.fetch!(to_map, name)
+
         rule_creates =
           Enum.map(chain.rules, fn rule ->
             {:create_rule, family, table_name, name, rule, :append}

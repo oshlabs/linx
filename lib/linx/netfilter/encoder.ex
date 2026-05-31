@@ -251,6 +251,7 @@ defmodule Linx.Netfilter.Encoder do
       Enum.reduce(exprs, {[], sets_acc, counter}, fn
         %Expr{name: :__anon_set, data: data}, {acc, sa, n} ->
           name = "__set#{n}"
+
           {:ok, anon_set} =
             Linx.Netfilter.Set.new(name,
               key_type: data.key_type,
@@ -562,7 +563,9 @@ defmodule Linx.Netfilter.Encoder do
      m.size, :map}
   end
 
-  defp maybe_append_atom(flags, true, atom), do: if(atom in flags, do: flags, else: flags ++ [atom])
+  defp maybe_append_atom(flags, true, atom),
+    do: if(atom in flags, do: flags, else: flags ++ [atom])
+
   defp maybe_append_atom(flags, false, _atom), do: flags
 
   # Process-local atomic counter for set IDs. The kernel only cares
@@ -929,8 +932,7 @@ defmodule Linx.Netfilter.Encoder do
   defp encode_expr_data(:immediate, %{value: bin, dreg: dreg}) when is_binary(bin) do
     [
       {nfta_immediate_dreg(), Wire.u32_be(dreg)},
-      {nfta_immediate_data(),
-       Attr.encode([{nfta_data_value(), bin}])}
+      {nfta_immediate_data(), Attr.encode([{nfta_data_value(), bin}])}
     ]
   end
 

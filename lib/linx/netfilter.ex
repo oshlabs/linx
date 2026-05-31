@@ -215,8 +215,7 @@ defmodule Linx.Netfilter do
 
       case Nfnl.batch(sock, [msg]) do
         :ok ->
-          {:ok,
-           %Ruleset{tables: %{{family, name} => table}}}
+          {:ok, %Ruleset{tables: %{{family, name} => table}}}
 
         {:error, {_batch_seq, %NetlinkError{} = err}} ->
           {:error,
@@ -474,7 +473,9 @@ defmodule Linx.Netfilter do
     sets
     |> Enum.reduce_while({:ok, []}, fn {family, entity}, {:ok, acc} ->
       case dump_set_elements_one(sock, family, entity_table(entity), entity.name) do
-        {:ok, elements} -> {:cont, {:ok, [{family, entity_table(entity), entity.name, elements} | acc]}}
+        {:ok, elements} ->
+          {:cont, {:ok, [{family, entity_table(entity), entity.name, elements} | acc]}}
+
         {:error, %Linx.Netfilter.Error{errno: :enoent}} ->
           # Set vanished between the GETSET dump and this call. Skip.
           {:cont, {:ok, acc}}

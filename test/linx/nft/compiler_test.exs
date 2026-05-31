@@ -302,7 +302,12 @@ defmodule Linx.NFT.CompilerTest do
 
       # Two bits OR'd together.
       bits = :binary.decode_unsigned(mask)
-      assert bits == Bitwise.bor(Linx.Netfilter.Wire.ct_state_bits(:established), Linx.Netfilter.Wire.ct_state_bits(:related))
+
+      assert bits ==
+               Bitwise.bor(
+                 Linx.Netfilter.Wire.ct_state_bits(:established),
+                 Linx.Netfilter.Wire.ct_state_bits(:related)
+               )
     end
 
     test "ct state comma-no-braces established,related accept" do
@@ -323,7 +328,12 @@ defmodule Linx.NFT.CompilerTest do
              ] = rule.expressions
 
       bits = :binary.decode_unsigned(mask)
-      assert bits == Bitwise.bor(Linx.Netfilter.Wire.ct_state_bits(:established), Linx.Netfilter.Wire.ct_state_bits(:related))
+
+      assert bits ==
+               Bitwise.bor(
+                 Linx.Netfilter.Wire.ct_state_bits(:established),
+                 Linx.Netfilter.Wire.ct_state_bits(:related)
+               )
     end
 
     test "ct state != invalid drop (inverted op → bitwise + cmp_eq_0)" do

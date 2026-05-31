@@ -24,6 +24,7 @@ defmodule Linx.UserTest do
 
     test "from_posix/3 builds a struct with code looked up from the POSIX table" do
       err = Error.from_posix(:eperm, "/proc/1234/uid_map", :set_uid_map)
+
       assert %Error{
                path: "/proc/1234/uid_map",
                operation: :set_uid_map,

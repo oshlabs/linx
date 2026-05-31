@@ -107,7 +107,9 @@ defmodule Linx.NFT.RuntimeCompiler do
   end
 
   defp build_top({:include, _path, meta}, _rs_var, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: `include` is not yet supported (use `Linx.NFT.parse_file/1` instead)"
     )
   end
@@ -143,25 +145,33 @@ defmodule Linx.NFT.RuntimeCompiler do
   end
 
   defp build_table_item({:set, _name, _opts, meta}, _family, _table_name, _rs_var, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: set declarations inside `~NFT` sigils with interpolation are not yet supported"
     )
   end
 
   defp build_table_item({:map, _name, _opts, meta}, _family, _table_name, _rs_var, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: map declarations inside `~NFT` sigils with interpolation are not yet supported"
     )
   end
 
   defp build_table_item({:vmap, _name, _opts, meta}, _family, _table_name, _rs_var, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: vmap declarations inside `~NFT` sigils with interpolation are not yet supported"
     )
   end
 
   defp build_table_item({:object, kind, _name, _opts, meta}, _f, _t, _rs, state) do
-    raise_at!(state, meta,
+    raise_at!(
+      state,
+      meta,
       "compiler: named `#{kind}` objects are not yet supported by the ~NFT compiler"
     )
   end
@@ -197,7 +207,11 @@ defmodule Linx.NFT.RuntimeCompiler do
         Wire.priority_int(family, atom)
       rescue
         FunctionClauseError ->
-          raise_at!(state, meta, "compiler: unknown priority alias `#{name}` for family `#{family}`")
+          raise_at!(
+            state,
+            meta,
+            "compiler: unknown priority alias `#{name}` for family `#{family}`"
+          )
       end
 
     base + offset
@@ -273,13 +287,26 @@ defmodule Linx.NFT.RuntimeCompiler do
     target_quoted = build_nat_target(target)
 
     case kind do
-      :dnat -> [quote(do: Linx.Netfilter.Expr.dnat_to(unquote(target_quoted), nil, flags: unquote(flags)))]
-      :snat -> [quote(do: Linx.Netfilter.Expr.snat_to(unquote(target_quoted), nil, flags: unquote(flags)))]
+      :dnat ->
+        [
+          quote(
+            do: Linx.Netfilter.Expr.dnat_to(unquote(target_quoted), nil, flags: unquote(flags))
+          )
+        ]
+
+      :snat ->
+        [
+          quote(
+            do: Linx.Netfilter.Expr.snat_to(unquote(target_quoted), nil, flags: unquote(flags))
+          )
+        ]
     end
   end
 
   defp build_stmt(other, state) do
-    raise_at!(state, value_meta(other) || %{line: 0, column: 0},
+    raise_at!(
+      state,
+      value_meta(other) || %{line: 0, column: 0},
       "compiler: rule statement #{inspect(elem(other, 0))} is not yet supported with interpolation"
     )
   end
@@ -306,7 +333,9 @@ defmodule Linx.NFT.RuntimeCompiler do
         {quote(do: Linx.Netfilter.Expr.payload(unquote(alias_atom))), kind}
 
       :unknown ->
-        raise_at!(state, %{line: 0, column: 0},
+        raise_at!(
+          state,
+          %{line: 0, column: 0},
           "compiler: unknown payload field `#{header} #{field}`"
         )
     end
@@ -393,7 +422,9 @@ defmodule Linx.NFT.RuntimeCompiler do
   end
 
   defp build_rhs(node, _op, kind, state) do
-    raise_at!(state, value_meta(node) || %{line: 0, column: 0},
+    raise_at!(
+      state,
+      value_meta(node) || %{line: 0, column: 0},
       "compiler: cannot use value #{inspect(node)} with field kind #{inspect(kind)} in the runtime-emit path"
     )
   end

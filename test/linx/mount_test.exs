@@ -358,7 +358,10 @@ defmodule Linx.MountTest do
       # before. The original inherited /proc is still listed too
       # (Linux retains shadowed mounts in mountinfo).
       {:ok, after_mounts} = Mount.list({:pid, host_pid})
-      ids_after = after_mounts |> Enum.filter(&(&1.mount_point == "/proc")) |> Enum.map(& &1.mount_id)
+
+      ids_after =
+        after_mounts |> Enum.filter(&(&1.mount_point == "/proc")) |> Enum.map(& &1.mount_id)
+
       new_ids = ids_after -- ids_before
       assert length(new_ids) >= 1
 
@@ -397,6 +400,7 @@ defmodule Linx.MountTest do
       assert :ok = Mount.mount("none", "/mnt", "tmpfs", in: {:pid, host_pid})
 
       {:ok, ct_mounts} = Mount.list({:pid, host_pid})
+
       assert Enum.any?(ct_mounts, fn e ->
                e.mount_point == "/mnt" and e.fstype == "tmpfs"
              end)
@@ -459,12 +463,17 @@ defmodule Linx.MountTest do
       # newly-added one by mount_id (the host may already have
       # /mnt mounted; some distros do).
       {:ok, before} = Mount.list({:pid, host_pid})
-      mnt_ids_before = before |> Enum.filter(&(&1.mount_point == "/mnt")) |> Enum.map(& &1.mount_id)
+
+      mnt_ids_before =
+        before |> Enum.filter(&(&1.mount_point == "/mnt")) |> Enum.map(& &1.mount_id)
 
       assert :ok = Mount.mount("none", "/mnt", "tmpfs", in: {:pid, host_pid})
 
       {:ok, with_mnt} = Mount.list({:pid, host_pid})
-      mnt_ids_during = with_mnt |> Enum.filter(&(&1.mount_point == "/mnt")) |> Enum.map(& &1.mount_id)
+
+      mnt_ids_during =
+        with_mnt |> Enum.filter(&(&1.mount_point == "/mnt")) |> Enum.map(& &1.mount_id)
+
       [our_id] = mnt_ids_during -- mnt_ids_before
       # Sanity: our mount is the tmpfs we just made.
       our = Enum.find(with_mnt, &(&1.mount_id == our_id))
@@ -589,7 +598,11 @@ defmodule Linx.MountTest do
       # group of one, and move/2 works as documented.
       base = "/tmp/linx-mount-test-move-#{System.unique_integer([:positive])}"
       File.mkdir_p!(base)
-      on_exit(fn -> _ = Mount.umount(base, flags: [:detach]); _ = File.rmdir(base) end)
+
+      on_exit(fn ->
+        _ = Mount.umount(base, flags: [:detach])
+        _ = File.rmdir(base)
+      end)
 
       assert :ok = Mount.mount("none", base, "tmpfs")
       # Change propagation to private. Propagation flags are *not*

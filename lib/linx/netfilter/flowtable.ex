@@ -75,7 +75,9 @@ defmodule Linx.Netfilter.Flowtable do
   @spec new!(String.t(), keyword()) :: t()
   def new!(name, opts \\ []) do
     case new(name, opts) do
-      {:ok, ft} -> ft
+      {:ok, ft} ->
+        ft
+
       {:error, {:bad_flowtable, reason}} ->
         raise ArgumentError, "invalid flowtable: #{inspect(reason)}"
     end

@@ -160,7 +160,14 @@ defmodule Linx.NFT.Formatter do
     "set #{name} {\n#{indent(body, 2)}\n}"
   end
 
-  defp format_map(%NMap{name: name, key_type: kt, data_type: dt, flags: flags, elements: elems, timeout: to}) do
+  defp format_map(%NMap{
+         name: name,
+         key_type: kt,
+         data_type: dt,
+         flags: flags,
+         elements: elems,
+         timeout: to
+       }) do
     keyword = if dt == :verdict, do: "vmap", else: "map"
 
     body =
@@ -197,8 +204,11 @@ defmodule Linx.NFT.Formatter do
   defp render_set_element(v, _kt) when is_binary(v), do: v
   defp render_set_element(other, _kt), do: inspect(other)
 
-  defp format_map_element({key, %Verdict{} = v}), do: "#{format_set_value(key)} : #{format_verdict(v)}"
-  defp format_map_element({key, value}), do: "#{format_set_value(key)} : #{format_set_value(value)}"
+  defp format_map_element({key, %Verdict{} = v}),
+    do: "#{format_set_value(key)} : #{format_verdict(v)}"
+
+  defp format_map_element({key, value}),
+    do: "#{format_set_value(key)} : #{format_set_value(value)}"
 
   defp format_seconds(secs) when is_integer(secs) do
     cond do
@@ -422,7 +432,9 @@ defmodule Linx.NFT.Formatter do
 
   # ---- masq / nat / redirect ----
   defp do_format_exprs([%Expr{name: :masq, data: %{flags: flags}} | rest], acc) do
-    do_format_exprs(rest, [["masquerade" | flag_strings(flags)] |> Enum.join(" ") |> String.trim() | acc])
+    do_format_exprs(rest, [
+      ["masquerade" | flag_strings(flags)] |> Enum.join(" ") |> String.trim() | acc
+    ])
   end
 
   # NAT shape: immediate(addr) [immediate(port)] nat
@@ -455,7 +467,9 @@ defmodule Linx.NFT.Formatter do
   end
 
   defp do_format_exprs([%Expr{name: :redir, data: %{flags: flags}} | rest], acc) do
-    do_format_exprs(rest, [["redirect" | flag_strings(flags)] |> Enum.join(" ") |> String.trim() | acc])
+    do_format_exprs(rest, [
+      ["redirect" | flag_strings(flags)] |> Enum.join(" ") |> String.trim() | acc
+    ])
   end
 
   # ---- catchall: emit an in-line comment so the output remains
@@ -474,7 +488,10 @@ defmodule Linx.NFT.Formatter do
       end
 
     port_text = if port, do: ":#{port}", else: ""
-    "#{type} to #{addr_text}#{port_text}" |> String.trim_trailing(" to ") |> String.trim_trailing(" to")
+
+    "#{type} to #{addr_text}#{port_text}"
+    |> String.trim_trailing(" to ")
+    |> String.trim_trailing(" to")
   end
 
   defp format_verdict(%Verdict{kind: :accept}), do: "accept"
@@ -507,8 +524,12 @@ defmodule Linx.NFT.Formatter do
   defp payload_field(:network, 24, 16), do: "ip6 daddr"
   defp payload_field(base, o, l), do: "@#{base},#{o},#{l}"
 
-  defp render_payload_value(v, :transport, _o, 2), do: Integer.to_string(:binary.decode_unsigned(v))
-  defp render_payload_value(v, :transport, _o, 1), do: Integer.to_string(:binary.decode_unsigned(v))
+  defp render_payload_value(v, :transport, _o, 2),
+    do: Integer.to_string(:binary.decode_unsigned(v))
+
+  defp render_payload_value(v, :transport, _o, 1),
+    do: Integer.to_string(:binary.decode_unsigned(v))
+
   defp render_payload_value(v, :network, _o, 4) when byte_size(v) == 4, do: render_ipv4(v)
   defp render_payload_value(v, :network, _o, 16) when byte_size(v) == 16, do: render_ipv6(v)
   defp render_payload_value(v, :network, 9, 1), do: render_ip_protocol(v)
@@ -526,7 +547,10 @@ defmodule Linx.NFT.Formatter do
 
   defp render_meta_value(:iifname, v) when is_binary(v), do: ~s/"#{trim_ifname(v)}"/
   defp render_meta_value(:oifname, v) when is_binary(v), do: ~s/"#{trim_ifname(v)}"/
-  defp render_meta_value(_, v) when is_binary(v) and byte_size(v) <= 8, do: Integer.to_string(:binary.decode_unsigned(v))
+
+  defp render_meta_value(_, v) when is_binary(v) and byte_size(v) <= 8,
+    do: Integer.to_string(:binary.decode_unsigned(v))
+
   defp render_meta_value(_, v) when is_binary(v), do: inspect(v)
 
   defp trim_ifname(v) do

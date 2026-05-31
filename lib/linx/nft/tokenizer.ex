@@ -243,8 +243,11 @@ defmodule Linx.NFT.Tokenizer do
         advance_line(state, rest)
 
       # ----------- Horizontal whitespace -----------
-      <<" ", rest::binary>> -> advance_col(state, rest, 1)
-      <<"\t", rest::binary>> -> advance_col(state, rest, 1)
+      <<" ", rest::binary>> ->
+        advance_col(state, rest, 1)
+
+      <<"\t", rest::binary>> ->
+        advance_col(state, rest, 1)
 
       # ----------- Explicit statement separator -----------
       <<";", rest::binary>> ->
@@ -271,47 +274,107 @@ defmodule Linx.NFT.Tokenizer do
         state |> push_stack(:string) |> start_string() |> advance_col(rest, 1)
 
       # ----------- Multi-char operators -----------
-      <<"<<", rest::binary>> -> emit_punct(state, :lshift, rest, 2)
-      <<">>", rest::binary>> -> emit_punct(state, :rshift, rest, 2)
-      <<"<=", rest::binary>> -> emit_punct(state, :lte, rest, 2)
-      <<">=", rest::binary>> -> emit_punct(state, :gte, rest, 2)
-      <<"==", rest::binary>> -> emit_punct(state, :eq, rest, 2)
-      <<"!=", rest::binary>> -> emit_punct(state, :neq, rest, 2)
-      <<"&&", rest::binary>> -> emit_punct(state, :and_and, rest, 2)
-      <<"||", rest::binary>> -> emit_punct(state, :or_or, rest, 2)
+      <<"<<", rest::binary>> ->
+        emit_punct(state, :lshift, rest, 2)
+
+      <<">>", rest::binary>> ->
+        emit_punct(state, :rshift, rest, 2)
+
+      <<"<=", rest::binary>> ->
+        emit_punct(state, :lte, rest, 2)
+
+      <<">=", rest::binary>> ->
+        emit_punct(state, :gte, rest, 2)
+
+      <<"==", rest::binary>> ->
+        emit_punct(state, :eq, rest, 2)
+
+      <<"!=", rest::binary>> ->
+        emit_punct(state, :neq, rest, 2)
+
+      <<"&&", rest::binary>> ->
+        emit_punct(state, :and_and, rest, 2)
+
+      <<"||", rest::binary>> ->
+        emit_punct(state, :or_or, rest, 2)
 
       # ----------- Single-char punctuation -----------
-      <<"{", rest::binary>> -> emit_punct(state, :lbrace, rest, 1)
-      <<"}", rest::binary>> -> emit_punct(state, :rbrace, rest, 1)
-      <<"(", rest::binary>> -> emit_punct(state, :lparen, rest, 1)
-      <<")", rest::binary>> -> emit_punct(state, :rparen, rest, 1)
-      <<"[", rest::binary>> -> emit_punct(state, :lbracket, rest, 1)
-      <<"]", rest::binary>> -> emit_punct(state, :rbracket, rest, 1)
-      <<",", rest::binary>> -> emit_punct(state, :comma, rest, 1)
-      <<"=", rest::binary>> -> emit_punct(state, :assign, rest, 1)
-      <<"!", rest::binary>> -> emit_punct(state, :bang, rest, 1)
-      <<"<", rest::binary>> -> emit_punct(state, :lt, rest, 1)
-      <<">", rest::binary>> -> emit_punct(state, :gt, rest, 1)
-      <<"&", rest::binary>> -> emit_punct(state, :amp, rest, 1)
-      <<"|", rest::binary>> -> emit_punct(state, :pipe, rest, 1)
-      <<"^", rest::binary>> -> emit_punct(state, :caret, rest, 1)
-      <<"*", rest::binary>> -> emit_punct(state, :star, rest, 1)
-      <<"-", rest::binary>> -> emit_punct(state, :dash, rest, 1)
-      <<"/", rest::binary>> -> emit_punct(state, :slash, rest, 1)
-      <<"@", rest::binary>> -> emit_punct(state, :at, rest, 1)
-      <<"$", rest::binary>> -> emit_punct(state, :dollar, rest, 1)
+      <<"{", rest::binary>> ->
+        emit_punct(state, :lbrace, rest, 1)
+
+      <<"}", rest::binary>> ->
+        emit_punct(state, :rbrace, rest, 1)
+
+      <<"(", rest::binary>> ->
+        emit_punct(state, :lparen, rest, 1)
+
+      <<")", rest::binary>> ->
+        emit_punct(state, :rparen, rest, 1)
+
+      <<"[", rest::binary>> ->
+        emit_punct(state, :lbracket, rest, 1)
+
+      <<"]", rest::binary>> ->
+        emit_punct(state, :rbracket, rest, 1)
+
+      <<",", rest::binary>> ->
+        emit_punct(state, :comma, rest, 1)
+
+      <<"=", rest::binary>> ->
+        emit_punct(state, :assign, rest, 1)
+
+      <<"!", rest::binary>> ->
+        emit_punct(state, :bang, rest, 1)
+
+      <<"<", rest::binary>> ->
+        emit_punct(state, :lt, rest, 1)
+
+      <<">", rest::binary>> ->
+        emit_punct(state, :gt, rest, 1)
+
+      <<"&", rest::binary>> ->
+        emit_punct(state, :amp, rest, 1)
+
+      <<"|", rest::binary>> ->
+        emit_punct(state, :pipe, rest, 1)
+
+      <<"^", rest::binary>> ->
+        emit_punct(state, :caret, rest, 1)
+
+      <<"*", rest::binary>> ->
+        emit_punct(state, :star, rest, 1)
+
+      <<"-", rest::binary>> ->
+        emit_punct(state, :dash, rest, 1)
+
+      <<"/", rest::binary>> ->
+        emit_punct(state, :slash, rest, 1)
+
+      <<"@", rest::binary>> ->
+        emit_punct(state, :at, rest, 1)
+
+      <<"$", rest::binary>> ->
+        emit_punct(state, :dollar, rest, 1)
 
       # A `.` that's followed by whitespace, identifier, or EOF —
       # type concatenation as in `type ipv4_addr . inet_service`.
       # The `.` inside numeric/address literals is consumed earlier
       # by `read_numeric_or_address` / `read_identifier`.
-      <<".", rest::binary>> -> emit_punct(state, :dot, rest, 1)
+      <<".", rest::binary>> ->
+        emit_punct(state, :dot, rest, 1)
 
       # ----------- Numeric literals -----------
-      <<"0x", _::binary>> -> read_hex_integer(state)
-      <<"0X", _::binary>> -> read_hex_integer(state)
-      <<"0b", _::binary>> -> read_bin_integer(state)
-      <<"0B", _::binary>> -> read_bin_integer(state)
+      <<"0x", _::binary>> ->
+        read_hex_integer(state)
+
+      <<"0X", _::binary>> ->
+        read_hex_integer(state)
+
+      <<"0b", _::binary>> ->
+        read_bin_integer(state)
+
+      <<"0B", _::binary>> ->
+        read_bin_integer(state)
 
       # A literal starting with `::` is an IPv6 address (e.g. `::1`,
       # `::/0`, the loopback shorthand `::`). Disambiguates from the
@@ -881,15 +944,21 @@ defmodule Linx.NFT.Tokenizer do
 
   defp ipv4_cidr?(s) do
     case String.split(s, "/") do
-      [addr, prefix] -> ipv4?(addr) and pure_decimal?(prefix) and String.to_integer(prefix) in 0..32
-      _ -> false
+      [addr, prefix] ->
+        ipv4?(addr) and pure_decimal?(prefix) and String.to_integer(prefix) in 0..32
+
+      _ ->
+        false
     end
   end
 
   defp ipv6_cidr?(s) do
     case String.split(s, "/") do
-      [addr, prefix] -> ipv6?(addr) and pure_decimal?(prefix) and String.to_integer(prefix) in 0..128
-      _ -> false
+      [addr, prefix] ->
+        ipv6?(addr) and pure_decimal?(prefix) and String.to_integer(prefix) in 0..128
+
+      _ ->
+        false
     end
   end
 
@@ -1021,6 +1090,10 @@ defmodule Linx.NFT.Tokenizer do
 
   defp raise_unterminated!(state, :elixir_expr) do
     ctx = expr_start_ctx(state)
-    ParseError.raise_syntax_error!(ctx, ~s/unterminated Elixir interpolation '\#{...}': expected matching '}'/)
+
+    ParseError.raise_syntax_error!(
+      ctx,
+      ~s/unterminated Elixir interpolation '\#{...}': expected matching '}'/
+    )
   end
 end

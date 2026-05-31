@@ -197,14 +197,16 @@ defmodule Linx.Netfilter.DiffTest do
       from =
         Ruleset.new()
         |> Ruleset.add_table!(:inet, "fw")
-        |> Ruleset.add_set!("fw",
+        |> Ruleset.add_set!(
+          "fw",
           Set.new!("blk", key_type: :inet_service, elements: [22, 80, 443])
         )
 
       to =
         Ruleset.new()
         |> Ruleset.add_table!(:inet, "fw")
-        |> Ruleset.add_set!("fw",
+        |> Ruleset.add_set!(
+          "fw",
           Set.new!("blk", key_type: :inet_service, elements: [22, 8080])
         )
 
@@ -225,7 +227,8 @@ defmodule Linx.Netfilter.DiffTest do
       rs =
         Ruleset.new()
         |> Ruleset.add_table!(:inet, "fw")
-        |> Ruleset.add_set!("fw",
+        |> Ruleset.add_set!(
+          "fw",
           Set.new!("blk", key_type: :inet_service, elements: [22, 80])
         )
 
@@ -302,8 +305,12 @@ defmodule Linx.Netfilter.DiffTest do
 
       delete_rule_idx = Enum.find_value(positions, fn {kind, i} -> kind == :delete_rule && i end)
       create_rule_idx = Enum.find_value(positions, fn {kind, i} -> kind == :create_rule && i end)
-      delete_table_idx = Enum.find_value(positions, fn {kind, i} -> kind == :delete_table && i end)
-      create_table_idx = Enum.find_value(positions, fn {kind, i} -> kind == :create_table && i end)
+
+      delete_table_idx =
+        Enum.find_value(positions, fn {kind, i} -> kind == :delete_table && i end)
+
+      create_table_idx =
+        Enum.find_value(positions, fn {kind, i} -> kind == :create_table && i end)
 
       assert delete_rule_idx < create_rule_idx
       assert delete_table_idx < create_table_idx

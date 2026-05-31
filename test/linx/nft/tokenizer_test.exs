@@ -349,7 +349,8 @@ defmodule Linx.NFT.TokenizerTest do
     test "carries file and snippet from the offending line" do
       src = "table inet x {\nchain ? input {\n}\n}\n"
 
-      assert {:error, %ParseError{file: "rules.nft", line: 2, column: 7, snippet: snip, message: msg}} =
+      assert {:error,
+              %ParseError{file: "rules.nft", line: 2, column: 7, snippet: snip, message: msg}} =
                Tokenizer.tokenize(src, file: "rules.nft")
 
       assert snip == "chain ? input {"

@@ -65,8 +65,7 @@ defmodule Linx.Netfilter.ChainTest do
 
   describe "new/2 — regular chain" do
     test "builds a regular chain with name only" do
-      assert {:ok,
-              %Chain{name: "input_extras", type: nil, hook: nil, priority: nil, policy: nil}} =
+      assert {:ok, %Chain{name: "input_extras", type: nil, hook: nil, priority: nil, policy: nil}} =
                Chain.new("input_extras")
     end
 
@@ -131,6 +130,7 @@ defmodule Linx.Netfilter.ChainTest do
 
     test ":route only valid on :output hook" do
       {:ok, c} = Chain.new("c", type: :route, hook: :input, priority: 0)
+
       assert {:error, {:bad_chain, {:route_invalid_on_hook, :input}}} =
                Chain.validate_for_family(c, :ip)
 
@@ -149,6 +149,7 @@ defmodule Linx.Netfilter.ChainTest do
 
     test ":arp family allows only :input and :output hooks" do
       {:ok, c_fwd} = Chain.new("c", type: :filter, hook: :forward, priority: 0)
+
       assert {:error, {:bad_chain, {:hook_not_valid_for_family, _}}} =
                Chain.validate_for_family(c_fwd, :arp)
 
@@ -161,12 +162,14 @@ defmodule Linx.Netfilter.ChainTest do
       assert :ok = Chain.validate_for_family(c, :netdev)
 
       {:ok, c_input} = Chain.new("c", type: :filter, hook: :input, priority: 0)
+
       assert {:error, {:bad_chain, {:hook_not_valid_for_family, _}}} =
                Chain.validate_for_family(c_input, :netdev)
     end
 
     test "regular chains validate trivially for any family" do
       {:ok, c} = Chain.new("input_extras")
+
       for f <- [:ip, :ip6, :inet, :arp, :bridge, :netdev] do
         assert :ok = Chain.validate_for_family(c, f)
       end
@@ -174,6 +177,7 @@ defmodule Linx.Netfilter.ChainTest do
 
     test "unknown family is :unknown_family" do
       {:ok, c} = Chain.new("c", type: :filter, hook: :input, priority: 0)
+
       assert {:error, {:bad_chain, {:unknown_family, :weird}}} =
                Chain.validate_for_family(c, :weird)
     end

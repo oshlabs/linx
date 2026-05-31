@@ -62,7 +62,7 @@ defmodule Linx.Capabilities.Constants do
     cap_checkpoint_restore: 40
   }
 
-  @bits_to_atoms (for {atom, bit} <- @atoms_to_bits, into: %{}, do: {bit, atom})
+  @bits_to_atoms for {atom, bit} <- @atoms_to_bits, into: %{}, do: {bit, atom}
 
   @all_atoms MapSet.new(Map.keys(@atoms_to_bits))
 

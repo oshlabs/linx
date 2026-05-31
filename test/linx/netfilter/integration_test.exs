@@ -81,6 +81,7 @@ defmodule Linx.Netfilter.IntegrationTest do
       {:ok, sock} = Nfnl.open()
 
       name = unique_name("ct_persist")
+
       assert {:ok, %Ruleset{tables: tables}} =
                Netfilter.create_table(sock, name, persist: true)
 
@@ -238,6 +239,7 @@ defmodule Linx.Netfilter.IntegrationTest do
       table_name = unique_name("rule_tcp22")
 
       {:ok, table} = Table.new(:inet, table_name, flags: [:owner])
+
       {:ok, chain} =
         Chain.new("input",
           type: :filter,
@@ -281,6 +283,7 @@ defmodule Linx.Netfilter.IntegrationTest do
 
       table_name = unique_name("rule_counter")
       {:ok, table} = Table.new(:inet, table_name, flags: [:owner])
+
       {:ok, chain} =
         Chain.new("input",
           type: :filter,
@@ -311,6 +314,7 @@ defmodule Linx.Netfilter.IntegrationTest do
 
       table_name = unique_name("rule_ct")
       {:ok, table} = Table.new(:inet, table_name, flags: [:owner])
+
       {:ok, chain} =
         Chain.new("input",
           type: :filter,
@@ -350,6 +354,7 @@ defmodule Linx.Netfilter.IntegrationTest do
 
       table_name = unique_name("rule_reject")
       {:ok, table} = Table.new(:inet, table_name, flags: [:owner])
+
       {:ok, chain} =
         Chain.new("input",
           type: :filter,
@@ -391,7 +396,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: 0,
           policy: :drop
         )
-        |> Ruleset.add_rule!(table_name, "input",
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
           Rule.build!([
             Expr.payload(:tcp_dport),
             Expr.cmp(:eq, <<22::big-16>>),
@@ -471,7 +478,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :prerouting,
           priority: :dstnat
         )
-        |> Ruleset.add_rule!(table_name, "prerouting",
+        |> Ruleset.add_rule!(
+          table_name,
+          "prerouting",
           Rule.build!([
             Expr.payload(:tcp_dport),
             Expr.cmp(:eq, <<8080::big-16>>),
@@ -504,9 +513,7 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :postrouting,
           priority: :srcnat
         )
-        |> Ruleset.add_rule!(table_name, "postrouting",
-          Rule.build!([Expr.masquerade()])
-        )
+        |> Ruleset.add_rule!(table_name, "postrouting", Rule.build!([Expr.masquerade()]))
 
       assert :ok = Netfilter.push(sock, ruleset)
 
@@ -533,7 +540,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :postrouting,
           priority: :srcnat
         )
-        |> Ruleset.add_rule!(table_name, "postrouting",
+        |> Ruleset.add_rule!(
+          table_name,
+          "postrouting",
           Rule.build!([Expr.masquerade(flags: [:random])])
         )
 
@@ -561,7 +570,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :prerouting,
           priority: :dstnat
         )
-        |> Ruleset.add_rule!(table_name, "prerouting",
+        |> Ruleset.add_rule!(
+          table_name,
+          "prerouting",
           Rule.build!([
             Expr.payload(:tcp_dport),
             Expr.cmp(:eq, <<80::big-16>>),
@@ -599,14 +610,18 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :postrouting,
           priority: :srcnat
         )
-        |> Ruleset.add_rule!(table_name, "prerouting",
+        |> Ruleset.add_rule!(
+          table_name,
+          "prerouting",
           Rule.build!([
             Expr.payload(:tcp_dport),
             Expr.cmp(:eq, <<8080::big-16>>),
             Expr.dnat_to({10, 0, 0, 5}, 80)
           ])
         )
-        |> Ruleset.add_rule!(table_name, "postrouting",
+        |> Ruleset.add_rule!(
+          table_name,
+          "postrouting",
           Rule.build!([
             Expr.payload(:ip_daddr),
             Expr.cmp(:eq, <<10, 0, 0, 5>>),
@@ -644,7 +659,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :prerouting,
           priority: :dstnat
         )
-        |> Ruleset.add_rule!(table_name, "prerouting",
+        |> Ruleset.add_rule!(
+          table_name,
+          "prerouting",
           Rule.build!([
             Expr.payload(:tcp_dport),
             Expr.cmp(:eq, <<8080::big-16>>),
@@ -689,7 +706,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: 0,
           policy: :accept
         )
-        |> Ruleset.add_rule!(table_name, "input",
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
           Rule.build!([
             Expr.payload(:ip_saddr),
             Expr.lookup("blocklist"),
@@ -792,7 +811,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: 0,
           policy: :drop
         )
-        |> Ruleset.add_rule!(table_name, "input",
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
           Rule.build!([
             Expr.payload(:tcp_dport),
             Expr.lookup("services", dreg: 0)
@@ -829,7 +850,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: 0,
           policy: :drop
         )
-        |> Ruleset.add_rule!(table_name, "input",
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
           Rule.build!([
             Expr.payload(:tcp_dport),
             Expr.set_literal([22, 80, 443], :inet_service),
@@ -866,7 +889,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: 0,
           policy: :accept
         )
-        |> Ruleset.add_rule!(table_name, "input",
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
           Rule.build!([
             Expr.payload(:ip_saddr),
             Expr.set_literal([{10, 0, 0, 1}, {10, 0, 0, 2}, {192, 168, 1, 100}], :ipv4_addr),
@@ -929,7 +954,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :input,
           priority: 0
         )
-        |> Ruleset.add_rule!(table_name, "input",
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
           Rule.build!([Linx.Netfilter.Verdict.accept()], tag: :allow_all)
         )
 
@@ -957,12 +984,17 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: 0,
           policy: :drop
         )
-        |> Ruleset.add_rule!(table_name, "input",
-          Rule.build!([
-            Expr.payload(:tcp_dport),
-            Expr.cmp(:eq, <<22::big-16>>),
-            Verdict.accept()
-          ], tag: :allow_ssh)
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
+          Rule.build!(
+            [
+              Expr.payload(:tcp_dport),
+              Expr.cmp(:eq, <<22::big-16>>),
+              Verdict.accept()
+            ],
+            tag: :allow_ssh
+          )
         )
 
       assert :ok = Netfilter.push(sock, original)
@@ -980,12 +1012,17 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: 0,
           policy: :drop
         )
-        |> Ruleset.add_rule!(table_name, "input",
-          Rule.build!([
-            Expr.payload(:tcp_dport),
-            Expr.cmp(:eq, <<2222::big-16>>),
-            Verdict.accept()
-          ], tag: :allow_ssh)
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
+          Rule.build!(
+            [
+              Expr.payload(:tcp_dport),
+              Expr.cmp(:eq, <<2222::big-16>>),
+              Verdict.accept()
+            ],
+            tag: :allow_ssh
+          )
         )
 
       # Verify the patch contains exactly one :replace_rule op
@@ -1045,19 +1082,29 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :input,
           priority: 0
         )
-        |> Ruleset.add_rule!(table_name, "input",
-          Rule.build!([
-            Expr.payload(:tcp_dport),
-            Expr.cmp(:eq, <<22::big-16>>),
-            Verdict.accept()
-          ], tag: :allow_ssh)
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
+          Rule.build!(
+            [
+              Expr.payload(:tcp_dport),
+              Expr.cmp(:eq, <<22::big-16>>),
+              Verdict.accept()
+            ],
+            tag: :allow_ssh
+          )
         )
-        |> Ruleset.add_rule!(table_name, "input",
-          Rule.build!([
-            Expr.payload(:tcp_dport),
-            Expr.cmp(:eq, <<80::big-16>>),
-            Verdict.accept()
-          ], tag: :allow_http)
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
+          Rule.build!(
+            [
+              Expr.payload(:tcp_dport),
+              Expr.cmp(:eq, <<80::big-16>>),
+              Verdict.accept()
+            ],
+            tag: :allow_http
+          )
         )
 
       assert :ok = Netfilter.push(sock, original)
@@ -1175,12 +1222,17 @@ defmodule Linx.Netfilter.IntegrationTest do
           hook: :input,
           priority: 0
         )
-        |> Ruleset.add_rule!(table_name, "input",
-          Rule.build!([
-            Expr.payload(:tcp_dport),
-            Expr.cmp(:eq, <<22::big-16>>),
-            Verdict.accept()
-          ], tag: :allow_ssh)
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
+          Rule.build!(
+            [
+              Expr.payload(:tcp_dport),
+              Expr.cmp(:eq, <<22::big-16>>),
+              Verdict.accept()
+            ],
+            tag: :allow_ssh
+          )
         )
 
       assert :ok = Netfilter.push(sock, ruleset)
@@ -1285,7 +1337,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: -200,
           policy: :accept
         )
-        |> Ruleset.add_rule!(table_name, "input",
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
           Rule.build!([
             Expr.payload(:ip_protocol),
             Expr.cmp(:eq, <<1::8>>),
@@ -1297,8 +1351,8 @@ defmodule Linx.Netfilter.IntegrationTest do
       assert :ok = Netfilter.push(sock, ruleset)
 
       # Generate ICMP traffic on lo
-      {_out, _exit} = System.cmd("ping", ["-c", "2", "-W", "1", "127.0.0.1"],
-        stderr_to_stdout: true)
+      {_out, _exit} =
+        System.cmd("ping", ["-c", "2", "-W", "1", "127.0.0.1"], stderr_to_stdout: true)
 
       events = drain_log_events(1_000)
 
@@ -1336,7 +1390,9 @@ defmodule Linx.Netfilter.IntegrationTest do
           priority: -200,
           policy: :accept
         )
-        |> Ruleset.add_rule!(table_name, "input",
+        |> Ruleset.add_rule!(
+          table_name,
+          "input",
           Rule.build!([
             Expr.payload(:ip_protocol),
             Expr.cmp(:eq, <<1::8>>),
@@ -1375,6 +1431,7 @@ defmodule Linx.Netfilter.IntegrationTest do
 
       table_name = unique_name("rule_jump")
       {:ok, table} = Table.new(:inet, table_name, flags: [:owner])
+
       {:ok, base} =
         Chain.new("input",
           type: :filter,

@@ -505,8 +505,8 @@ defmodule Linx.Seccomp.Syscalls do
     landlock_restrict_self: 446
   }
 
-  @x86_64_inv (for {atom, n} <- @x86_64, into: %{}, do: {n, atom})
-  @aarch64_inv (for {atom, n} <- @aarch64, into: %{}, do: {n, atom})
+  @x86_64_inv for {atom, n} <- @x86_64, into: %{}, do: {n, atom}
+  @aarch64_inv for {atom, n} <- @aarch64, into: %{}, do: {n, atom}
 
   @x86_64_atoms MapSet.new(Map.keys(@x86_64))
   @aarch64_atoms MapSet.new(Map.keys(@aarch64))
