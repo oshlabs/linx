@@ -556,11 +556,18 @@ C ASan/UBSan, error-path coverage).
     `{:LICENSE, ...}`) had slipped in with the README slim. When checking
     formatting, read the command's exit code directly — don't pipe it
     through `tail`, which masks the failure.
-  - `mix.exs` `package:` metadata is absent — add it + `CHANGELOG.md`.
-  - **`mix compile --warnings-as-errors` still fails** on pre-existing
-    clause-grouping warnings in `lib/linx/netfilter/encoder.ex`,
-    `lib/linx/nft/compiler.ex`, and `lib/linx/nft/formatter.ex` — group
-    the split clauses before the CI gate.
+  - ✅ **`package:` metadata + `CHANGELOG.md` added** (`d5fb193`).
+    licenses/links/maintainers + a `files:` list that ships `lib` + `c_src`
+    (the NIF compilers under `lib/mix/tasks/compile.*.ex` build the `.c`
+    sources on the consumer's machine; `priv/` artifacts are per-machine and
+    never shipped; `docs/` extras omitted to stay lean). Validated with
+    `mix hex.build` — tarball = lib + 5×c_src + mix.exs + README + LICENSE +
+    CHANGELOG, nothing else. CHANGELOG is also a `mix docs` extra.
+  - ✅ **`mix compile --warnings-as-errors` is clean** (`a75fa32`). The
+    three clause-grouping warnings (`netfilter/encoder.ex`,
+    `nft/compiler.ex`, `nft/formatter.ex`) were fixed by relocating the
+    wedged helper functions out from between clause groups (behavior-
+    preserving; suite green). This gate is ready for CI.
   - `--check-formatted` already passes (done in Phase 2).
   - `mix docs` emits a handful of benign auto-link warnings — ExDoc
     trying to resolve backtick code spans as references: hidden modules
