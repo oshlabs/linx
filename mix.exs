@@ -23,9 +23,26 @@ defmodule Linx.MixProject do
           [:netlink_nif, :linx_process, :linx_tty, :linx_mount, :linx_sysctl],
       deps: deps(),
       name: "Linx",
-      description: "Linux kernel interfaces for Elixir — netlink, and more.",
+      description:
+        "Linux kernel interface primitives for Elixir: netlink/rtnetlink/nf_tables, " <>
+          "process & namespace lifecycle, PTY, cgroup v2, mounts, user namespaces, " <>
+          "capabilities, seccomp, and sysctl.",
       source_url: @source_url,
+      package: package(),
       docs: docs()
+    ]
+  end
+
+  defp package do
+    [
+      licenses: ["MIT"],
+      links: %{"GitHub" => @source_url},
+      # Ship the C sources (c_src) so the NIF/Port custom compilers can build
+      # them on the consumer's machine. priv/ artifacts are built per-machine
+      # and never shipped; the docs/ extras are dev-time `mix docs` material,
+      # omitted to keep the package lean.
+      files: ~w(lib c_src mix.exs README.md LICENSE CHANGELOG.md),
+      maintainers: ["Leon de Rooij"]
     ]
   end
 
@@ -47,6 +64,7 @@ defmodule Linx.MixProject do
       output: "_build/docs",
       extras: [
         "README.md",
+        "CHANGELOG.md",
         "AGENTS.md",
         "docs/netlink/EXAMPLES.md",
         "docs/netlink/REFERENCES.md",
