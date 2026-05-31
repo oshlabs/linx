@@ -373,8 +373,11 @@ proceeds in parallel.
    Linx refuses to be. Especially valuable to the simple host-config consumer that
    has no supervision tree of its own — for which it may be the *recommended* easy
    path, while still never automatic.
-8. **cgroup limits reconcile** (optional, later) — reconcile the knobs; cgroup
-   existence/membership stays in the composite.
+8. **cgroup limits reconcile** — shipped as `Linx.Cgroup.Reconcile` (+ `Report`
+   and a `Source` adapter): reconcile the limit knobs (`memory.max`, `pids.max`,
+   `cpu.max`, weights) as "sysctl-with-hierarchy" — flat `%{file => value}`,
+   best-effort, three-way `last_applied`. cgroup existence/membership stays in
+   the composite (this never creates/destroys the cgroup or moves processes).
 9. **the proof-of-concept consumer.** A nested mix app at `tank/` with `mix.exs`
    declaring `{:linx, path: ".."}`, consuming **only the public `Linx.*` API** so
    it structurally cannot reach internals — which makes it the acceptance test
@@ -432,10 +435,9 @@ diff. Events are hints; resync is truth.
 
 ### Still open
 
-- Nothing blocking. Phase 7 (the thin opt-in loop) is implemented per the verdict
-  above; Phase 8 (cgroup limits reconcile, optional) is the remaining mechanism
-  work; Phase 9's `tank/` is a living PoC to grow as needed; Phase 10 (hardening)
-  remains.
+- Nothing blocking. Phases 7 (the thin opt-in loop) and 8 (cgroup limits
+  reconcile) are implemented; Phase 9's `tank/` is a living PoC to grow as
+  needed; Phase 10 (hardening) is the remaining work.
 
 ## Appendix — minimal reconcile skeleton (illustrative)
 
