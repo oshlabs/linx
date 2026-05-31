@@ -22,8 +22,11 @@ defmodule Linx.ReconcileTest do
       send(test, {:reconciled, desired, last_applied, opts})
 
       case scope[:fail] do
-        true -> {:error, :boom}
-        _ -> {:ok, %{converged?: true, last_applied: desired, applied: [], failed: [], pending: []}}
+        true ->
+          {:error, :boom}
+
+        _ ->
+          {:ok, %{converged?: true, last_applied: desired, applied: [], failed: [], pending: []}}
       end
     end
 
@@ -143,7 +146,9 @@ defmodule Linx.ReconcileTest do
   end
 
   test "child_spec/1 honours :name as the id and is startable" do
-    spec = Reconcile.child_spec(source: FakeSource, scope: %{test: self()}, desired: :v1, name: :foo)
+    spec =
+      Reconcile.child_spec(source: FakeSource, scope: %{test: self()}, desired: :v1, name: :foo)
+
     assert spec.id == :foo
     assert {Reconcile, :start_link, [opts]} = spec.start
     refute Keyword.has_key?(opts, :id)

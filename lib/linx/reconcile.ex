@@ -225,7 +225,12 @@ defmodule Linx.Reconcile do
   end
 
   defp run_pass(state) do
-    case state.source.reconcile(state.scope, state.desired, state.last_applied, state.reconcile_opts) do
+    case state.source.reconcile(
+           state.scope,
+           state.desired,
+           state.last_applied,
+           state.reconcile_opts
+         ) do
       {:ok, report} = ok ->
         notify(state, {:linx_reconcile, :report, report})
         {ok, %{state | report: report, last_applied: report.last_applied}}

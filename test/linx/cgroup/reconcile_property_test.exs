@@ -51,7 +51,9 @@ defmodule Linx.Cgroup.ReconcilePropertyTest do
       owned_extra = Map.drop(extra, Map.keys(desired))
 
       last =
-        Map.new(Map.merge(desired, owned_extra), fn {k, v} -> {k, %{applied: v, original: "x"}} end)
+        Map.new(Map.merge(desired, owned_extra), fn {k, v} ->
+          {k, %{applied: v, original: "x"}}
+        end)
 
       ops = Reconcile.diff(observed_of(desired), desired, last)
       released = for {:release, f} <- ops, do: f

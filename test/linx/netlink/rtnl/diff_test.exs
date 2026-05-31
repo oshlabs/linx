@@ -18,6 +18,7 @@ defmodule Linx.Netlink.Rtnl.DiffTest do
   defp kv_map do
     map(list_of(tuple({integer(0..15), integer(0..3)}), max_length: 10), &Map.new/1)
   end
+
   defp items(m), do: Enum.map(m, fn {k, v} -> %{k: k, v: v} end)
   defp keyset(m), do: m |> Map.keys() |> MapSet.new()
 

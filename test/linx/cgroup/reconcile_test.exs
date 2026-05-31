@@ -38,6 +38,7 @@ defmodule Linx.Cgroup.ReconcileTest do
 
     test "{quota, period} that differs produces a :set" do
       observed = %{"cpu.max" => "max 100000"}
+
       assert Reconcile.diff(observed, %{"cpu.max" => {50_000, 100_000}}) ==
                [{:set, "cpu.max", {50_000, 100_000}}]
     end
@@ -48,6 +49,7 @@ defmodule Linx.Cgroup.ReconcileTest do
 
     test "a raw binary value compares exactly" do
       assert Reconcile.diff(%{"cpu.weight" => "100"}, %{"cpu.weight" => "100"}) == []
+
       assert Reconcile.diff(%{"cpu.weight" => "100"}, %{"cpu.weight" => "200"}) ==
                [{:set, "cpu.weight", "200"}]
     end
