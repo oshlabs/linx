@@ -8,37 +8,38 @@ section; this file is for work that spans subsystems or sequences phases.
 
 1. **Cleanup / polish** — normalize interfaces, consolidate docs, baseline
    hardening. ✅ Done; the branch that introduced this file.
-2. **Declarative reconcile** — the next major capability (below).
-3. **Hardening round 2** — runs *after* reconcile, deliberately. Reconcile
-   adds substantial new code (rtnl `diff` / ownership / `Monitor`), and
-   property-testing + sanitizing a surface that's about to change is wasted
-   effort. Harden once the shape is settled.
+2. **Declarative reconcile** — ✅ Done. The closed loop now spans Netfilter,
+   rtnl, sysctl, and cgroup limits, with an opt-in `Linx.Reconcile` loop on top
+   (below). See `docs/reconcile/EXAMPLES.md` and `docs/reconcile/PLAN.md`.
+3. **Hardening round 2** — runs *after* reconcile, deliberately: property-testing
+   a surface that's about to change is wasted effort, so it waited for the shape
+   to settle. The reconcile-specific hardening landed with the feature; the
+   cross-cutting items below remain.
 4. **Release to hex.pm** — when the maintainer is satisfied. Deferred on
    purpose; the mechanics (package metadata, CHANGELOG, CI) are already in
    place.
 
-## Declarative reconcile (next major work)
+## Declarative reconcile ✅ (shipped)
 
-Make Linx **declarative**: describe desired Linux networking/config state,
-then a reconciler continuously diffs it against the kernel's actual state
-and converges them — the Kubernetes / VintageNet closed loop. Idempotent and
-self-healing across drift, crashes, and reboots.
+Linx is now **declarative**: describe desired networking/config state and a
+reconciler diffs it against the kernel and converges them — the Kubernetes /
+VintageNet closed loop, idempotent and self-healing across drift, crashes, and
+reboots. All of it on the `pull`/`diff`/`push(mode: :reconcile)`/`subscribe`
+template that `Linx.Netfilter` set.
 
-- **The triad already exists in `Linx.Netfilter`:** `pull` (observe) +
-  `diff` (minimal change) + `push(mode: :reconcile)` (apply), with
-  genID-based compare-and-swap, stable per-rule `:tag` identity, and
-  resync-on-`ENOBUFS` subscription. That is a reconciler's substrate.
-- **The gap is rtnl** (links / addresses / routes / rules / neighbours): it
-  has the actuation verbs but not the closed loop. To match Netfilter it
-  needs per-resource `diff`, ownership tagging (`RTPROT_*`), `NLM_F_REPLACE`
-  for safe in-place updates, and a multicast `Monitor` (the `ip monitor`
-  equivalent — also on the netlink forward-compat list).
-- **Open design question (needs a dedicated discussion):** does the
-  reconciler / control loop live *inside* Linx or in a consumer app? Opening
-  position: Linx owns the **mechanism** (diff, ownership tagging, Monitor,
-  CAS); the long-lived control loop + desired-state holder + retry cadence
-  belong in a consumer, or at most a clearly opt-in `Linx.Reconcile` layer —
-  to preserve the "primitives, not a runtime" framing.
+- **rtnl** — per-resource `diff` with two-way (`RTPROT` tag) / three-way
+  (`last_applied`) ownership, `NLM_F_REPLACE` in-place updates, a single-shot
+  `Linx.Netlink.Rtnl.Reconcile`, and a multicast `Monitor`.
+- **sysctl** and **cgroup limits** — single-shot `Reconcile` (three-way
+  ownership, best-effort apply).
+- **`Linx.Reconcile`** — the opt-in, single-subsystem control loop over the
+  `Linx.Reconcile.Source` contract (timer resync + Monitor wakeups).
+
+**The open design question is resolved:** Linx owns the mechanism *and* ships a
+thin, genuinely opt-in `Linx.Reconcile` loop (no boot side effect, no singleton,
+separable) — while the cross-subsystem composite stays in the consumer, proven
+by the `tank/` PoC. "Primitives, not a runtime" holds. Full design in
+`docs/reconcile/PLAN.md`; usage in `docs/reconcile/EXAMPLES.md`.
 
 ## Hardening round 2 (after reconcile)
 
@@ -50,15 +51,17 @@ pipelines). Remaining:
 - **C ASan/UBSan** on the five NIFs — build with
   `-fsanitize=address,undefined` and run the integration suite under them.
   Gated on the CI privileged job below (needs the privileged suite running).
-- **CI privileged integration job** — the 147 `:integration` tests need
+- **CI privileged integration job** — the ~168 `:integration` tests need
   root / namespaces / nf_tables / cgroups. Triage what the GitHub
   `ubuntu-24.04` runner kernel actually supports; promote what passes to a
   (initially non-required) job. See `.github/workflows/ci.yml`.
 - **More property tests** — the `Linx.Netlink.Codec` per-message
   round-trips, seccomp `from_rules` / `to_rules`, the `/proc/<pid>/mountinfo`
   parser.
-- **Reconcile-specific** (once it exists) — `diff` correctness properties,
-  ownership / genID CAS race behaviour, `Monitor` event ordering.
+- **Reconcile-specific** — ✅ Done with the feature: `diff` convergence
+  properties (rtnl + cgroup), `Monitor` event ordering and decode totality, and
+  the partial-apply report paths (rtnl fail-fast, sysctl/cgroup best-effort).
+  Netfilter genID CAS races remain exercised in its own suite.
 
 ## Docs polish (optional)
 
