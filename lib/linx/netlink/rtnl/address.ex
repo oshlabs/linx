@@ -10,6 +10,19 @@ defmodule Linx.Netlink.Rtnl.Address do
   `Linx.IP` structs, not raw bytes; they accept either an `Linx.IP` or a
   string at the verb's input.
 
+  ## Example
+
+      {:ok, sock} = Rtnl.open()
+
+      :ok = Address.add(sock, "eth0", "10.0.0.5", 24)
+      :ok = Address.add(sock, "eth0", "fd00::5", 64)
+
+      {:ok, addrs} = Address.list(sock, "eth0")
+      # => [#Linx.Netlink.Rtnl.Address<10.0.0.5/24 ifindex=2>,
+      #     #Linx.Netlink.Rtnl.Address<fd00::5/64 ifindex=2>]
+
+      :ok = Address.delete(sock, "eth0", "10.0.0.5", 24)
+
   The wire format — `struct ifaddrmsg` and the `IFA_*` attributes
   (`include/uapi/linux/if_addr.h`) — is declared with the
   `Linx.Netlink.Codec` DSL.

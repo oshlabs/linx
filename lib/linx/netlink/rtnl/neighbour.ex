@@ -9,6 +9,18 @@ defmodule Linx.Netlink.Rtnl.Neighbour do
   `%Neighbour{}.dst` is a `Linx.IP`; `:lladdr` is a `Linx.MAC`. Verbs accept
   either strings or the corresponding structs.
 
+  ## Example
+
+      {:ok, sock} = Rtnl.open()
+
+      # A static ARP entry: 10.0.0.1 lives at this MAC on eth0.
+      :ok = Neighbour.add(sock, "eth0", "10.0.0.1", "52:54:00:ab:cd:ef")
+
+      {:ok, neighs} = Neighbour.list(sock, "eth0")
+      # => [#Linx.Netlink.Rtnl.Neighbour<10.0.0.1 -> 52:54:00:ab:cd:ef ifindex=2>]
+
+      :ok = Neighbour.delete(sock, "eth0", "10.0.0.1")
+
   The wire format — `struct ndmsg` and the `NDA_*` attributes
   (`include/uapi/linux/neighbour.h`) — is declared with the
   `Linx.Netlink.Codec` DSL.

@@ -516,11 +516,17 @@ findings) and annotated with outcomes. All fixups shipped on
     convention; fixed the stale `PLAN.md`/`COVERAGE.md` doc-IA mentions.
     `LICENSE` added to `mix.exs` `extras` (titled "License") — its
     `mix docs` page now generates and the README link resolves.
+  - **Netlink resource-module examples** ✅ — added a `## Example` block
+    (house 4-space, prefix-less illustrative shape; output comments match
+    each module's verified `Inspect`) to `Link` / `Address` / `Route` /
+    `Neighbour` / `Rule`. The entry modules (`Netlink`/`Rtnl`/`Nfnl`)
+    already had theirs.
   Remaining:
-  - Minor polish (low priority): inline examples on the five Netlink
-    *resource* modules (`Link`/`Address`/`Route`/`Neighbour`/`Rule` —
-    the entry modules already have them); optional forward-compat notes
-    for Netlink's codec + Process/Tty's version-locked agent protocol.
+  - Optional forward-compat notes for Netlink's codec + Process/Tty's
+    version-locked agent protocol (low priority; can fold into Phase 4).
+
+  **Phase 2 is effectively complete** — only the optional forward-compat
+  notes above are left, and they're not gating.
 
 **Phase 3 — Hardening: ⬜ NOT STARTED** (StreamData property tests,
 C ASan/UBSan, error-path coverage).

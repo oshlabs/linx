@@ -7,6 +7,19 @@ defmodule Linx.Netlink.Rtnl.Link do
   `list/1` / `get/2` retrieve interfaces; mutating verbs create, delete and
   configure them.
 
+  ## Example
+
+      {:ok, sock} = Rtnl.open()
+
+      {:ok, links} = Link.list(sock)
+      # => [#Linx.Netlink.Rtnl.Link<"lo" (1) UP MTU=65536>,
+      #     #Linx.Netlink.Rtnl.Link<"eth0" (2) UP MTU=1500>]
+
+      # A veth pair: bring one end up, hand the peer to a container's netns.
+      :ok = Link.create_veth(sock, "ct0a", "ct0b")
+      :ok = Link.set_up(sock, "ct0a")
+      :ok = Link.move_to_netns(sock, "ct0b", container_pid)
+
   ## Creating
 
   Several kinds of virtual link are supported, each by its own constructor:
