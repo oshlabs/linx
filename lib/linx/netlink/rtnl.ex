@@ -4,8 +4,23 @@ defmodule Linx.Netlink.Rtnl do
   links, addresses, routes and neighbours.
 
   This is the first `Linx.Netlink` protocol family. Each kind of object has
-  its own module — `Linx.Netlink.Rtnl.Link`, with more to come. Open a socket
-  for the family with `open/1` and pass it to those modules' functions.
+  its own module. Open a socket for the family with `open/1` and pass it to
+  those modules' functions.
+
+  ## Example
+
+      {:ok, sock} = Linx.Netlink.Rtnl.open()
+      {:ok, links} = Linx.Netlink.Rtnl.Link.list(sock)
+      {:ok, addrs} = Linx.Netlink.Rtnl.Address.list(sock)
+      :ok = Linx.Netlink.Socket.close(sock)
+
+  ## Status
+
+  Shipped resource modules: `Linx.Netlink.Rtnl.Link` (create / list /
+  configure / delete — macvlan, ipvlan, veth, vlan, bridge, dummy),
+  `Address`, `Route`, `Neighbour`, `Rule`, and read-only `Stats`. One
+  socket drives all of them; cross-namespace work opens the socket in
+  the target netns (`open({:pid, n})`).
   """
 
   alias Linx.Netlink.Socket

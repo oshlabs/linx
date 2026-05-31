@@ -24,6 +24,13 @@ defmodule Linx.Netlink.Nfnl do
   `NFNL_MSG_BATCH_END`), and the `NFT_MSG_GETGEN` / `NEWGEN` codec — live
   in `Linx.Netlink.Nfnl.Codec`. The `batch/2` request engine below
   drives nf_tables mutating transactions on top of those primitives.
+
+  ## Status
+
+  Shipped: the socket (`open/1`), the batched-transaction engine
+  (`batch/2`), and the `Linx.Netlink.Nfnl.Codec` primitives. The
+  NFTABLES sub-subsystem (id 10) is driven by `Linx.Netfilter`;
+  CTNETLINK / QUEUE / HOOK are future families.
   """
 
   import Bitwise
