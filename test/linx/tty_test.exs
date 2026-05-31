@@ -85,7 +85,7 @@ defmodule Linx.TtyTest do
   end
 
   describe "attach/2 session-running guard" do
-    test "refuses with :session_terminated when the workload has already exited" do
+    test "refuses with :no_process when the workload has already exited" do
       # /bin/true exits immediately on proceed. After we observe the
       # :exited event, info/1 reports stage = :exited; attach should
       # refuse rather than wedge.
@@ -94,31 +94,25 @@ defmodule Linx.TtyTest do
       :ok = Linx.Process.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :session_terminated} = Tty.attach(:group_leader, session)
-      assert {:error, :session_terminated} = Tty.attach(:controlling, session)
+      assert {:error, :no_process} = Tty.attach(:group_leader, session)
+      assert {:error, :no_process} = Tty.attach(:controlling, session)
     end
 
-    test "refuses with :session_ended when the session pid is gone" do
+    test "refuses with :no_process when the session pid is gone" do
       # A non-Linx-Process pid that exits immediately. info/1 catches
-      # the GenServer.call exit and returns :session_ended.
+      # the GenServer.call exit and returns :no_process.
       dead_pid = spawn(fn -> :ok end)
       ref = Process.monitor(dead_pid)
       assert_receive {:DOWN, ^ref, :process, ^dead_pid, _}, 500
 
-      assert {:error, :session_ended} = Tty.attach(:group_leader, dead_pid)
-      assert {:error, :session_ended} = Tty.attach(:controlling, dead_pid)
+      assert {:error, :no_process} = Tty.attach(:group_leader, dead_pid)
+      assert {:error, :no_process} = Tty.attach(:controlling, dead_pid)
     end
 
-    test "format_error/1 explains :session_terminated" do
-      msg = Tty.format_error(:session_terminated)
+    test "format_error/1 explains :no_process" do
+      msg = Tty.format_error(:no_process)
       assert is_binary(msg)
       assert msg =~ "terminal"
-      assert msg =~ "Linx.Process.spawn"
-    end
-
-    test "format_error/1 explains :session_ended" do
-      msg = Tty.format_error(:session_ended)
-      assert is_binary(msg)
       assert msg =~ "Linx.Process.spawn"
     end
   end

@@ -516,23 +516,23 @@ defmodule Linx.CapabilitiesTest do
       assert_receive {:linx_process, :signaled, 9}, 2_000
     end
 
-    test "post-terminal: drop_bounding returns :already_terminated" do
+    test "post-terminal: drop_bounding returns :no_process" do
       {:ok, session} = P.spawn(argv: ["/bin/true"])
       assert_receive {:linx_process, :ready, _}, 2_000
       :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :already_terminated} =
+      assert {:error, :no_process} =
                Capabilities.drop_bounding(session, [:cap_chown])
     end
 
-    test "post-terminal: set_thread_sets returns :already_terminated" do
+    test "post-terminal: set_thread_sets returns :no_process" do
       {:ok, session} = P.spawn(argv: ["/bin/true"])
       assert_receive {:linx_process, :ready, _}, 2_000
       :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :already_terminated} =
+      assert {:error, :no_process} =
                Capabilities.set_thread_sets(session,
                  effective: [],
                  permitted: [],
@@ -540,13 +540,13 @@ defmodule Linx.CapabilitiesTest do
                )
     end
 
-    test "post-terminal: set_ambient returns :already_terminated" do
+    test "post-terminal: set_ambient returns :no_process" do
       {:ok, session} = P.spawn(argv: ["/bin/true"])
       assert_receive {:linx_process, :ready, _}, 2_000
       :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :already_terminated} =
+      assert {:error, :no_process} =
                Capabilities.set_ambient(session, [:cap_chown])
     end
   end

@@ -259,7 +259,7 @@ defmodule Linx.Capabilities do
     * `{:error, :not_ready}` — session not yet at the checkpoint.
     * `{:error, :running}` — past `proceed/1`, the child is in
       `execve`'d land.
-    * `{:error, :already_terminated}` — session has ended.
+    * `{:error, :no_process}` — session has ended.
     * `{:error, {:bad_capability, atom}}` — `caps` contains an
       atom Linx doesn't recognise. Validation happens before
       anything is shipped to the agent.
@@ -280,7 +280,7 @@ defmodule Linx.Capabilities do
           | {:error,
              :not_ready
              | :running
-             | :already_terminated
+             | :no_process
              | {:bad_capability, term()}}
   def drop_bounding(session, caps) when is_pid(session) do
     with {:ok, mask} <- caps_to_mask(caps) do
@@ -324,7 +324,7 @@ defmodule Linx.Capabilities do
           | {:error,
              :not_ready
              | :running
-             | :already_terminated
+             | :no_process
              | {:bad_capability, term()}
              | {:bad_thread_sets, {:missing, atom()}}}
   def set_thread_sets(session, opts) when is_pid(session) and is_list(opts) do
@@ -366,7 +366,7 @@ defmodule Linx.Capabilities do
           | {:error,
              :not_ready
              | :running
-             | :already_terminated
+             | :no_process
              | {:bad_capability, term()}}
   def set_ambient(session, caps) when is_pid(session) do
     with {:ok, mask} <- caps_to_mask(caps) do

@@ -556,6 +556,7 @@ defmodule Linx.SeccompTest do
     test "rejects a duplicate with different actions" do
       # Same syscall, different actions → still a duplicate.
       rules = [{:allow, :read}, {:kill_process, :read}]
+
       assert {:error, {:duplicate_rule, :read}} =
                Seccomp.from_rules({rules, :allow})
     end
@@ -578,6 +579,7 @@ defmodule Linx.SeccompTest do
       # The :read rule is valid; the :not_real rule fails. Validation
       # stops there.
       rules = [{:allow, :read}, {:allow, :not_real_syscall}, {:allow, :write}]
+
       assert {:error, {:unknown_syscall, :not_real_syscall}} =
                Seccomp.from_rules({rules, :allow})
     end
@@ -645,14 +647,14 @@ defmodule Linx.SeccompTest do
       assert_receive {:linx_process, :signaled, 9}, 2_000
     end
 
-    test "post-terminal: install returns :already_terminated" do
+    test "post-terminal: install returns :no_process" do
       {:ok, filter} = Seccomp.allow_list([:read, :write, :exit_group])
       {:ok, session} = P.spawn(argv: ["/bin/true"])
       assert_receive {:linx_process, :ready, _}, 2_000
       :ok = P.proceed(session)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert {:error, :already_terminated} = Seccomp.install(session, filter)
+      assert {:error, :no_process} = Seccomp.install(session, filter)
     end
   end
 
@@ -797,16 +799,16 @@ defmodule Linx.SeccompTest do
       {:ok, bpf} = Compiler.compile([], :allow, :x86_64)
 
       # Hand-decoded against include/uapi/linux/{filter,seccomp,audit}.h.
+      # ld [4] (load arch into A)
+      # jeq AUDIT_ARCH_X86_64=0xC000003E, jt=1, jf=0
+      # ret KILL_PROCESS = 0x80000000 (arch mismatch fall-through)
+      # ld [0] (load syscall nr into A)
+      # ret ALLOW = 0x7FFF0000 (default)
       expected =
-        # ld [4] (load arch into A)
         <<0x20, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00>> <>
-          # jeq AUDIT_ARCH_X86_64=0xC000003E, jt=1, jf=0
           <<0x15, 0x00, 0x01, 0x00, 0x3E, 0x00, 0x00, 0xC0>> <>
-          # ret KILL_PROCESS = 0x80000000 (arch mismatch fall-through)
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
-          # ld [0] (load syscall nr into A)
           <<0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
-          # ret ALLOW = 0x7FFF0000 (default)
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x7F>>
 
       assert bpf == expected
@@ -829,20 +831,20 @@ defmodule Linx.SeccompTest do
     test "has the canonical byte layout" do
       {:ok, bpf} = Compiler.compile([{:allow, :read}], :kill_process, :x86_64)
 
+      # ld [4]
+      # jeq AUDIT_ARCH_X86_64, jt=1, jf=0
+      # ret KILL_PROCESS (arch mismatch)
+      # ld [0]
+      # jeq __NR_read=0, jt=1 (skip default RET, land on ALLOW), jf=0
+      # ret KILL_PROCESS (default)
+      # ret ALLOW (per-rule)
       expected =
-        # ld [4]
         <<0x20, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00>> <>
-          # jeq AUDIT_ARCH_X86_64, jt=1, jf=0
           <<0x15, 0x00, 0x01, 0x00, 0x3E, 0x00, 0x00, 0xC0>> <>
-          # ret KILL_PROCESS (arch mismatch)
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
-          # ld [0]
           <<0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
-          # jeq __NR_read=0, jt=1 (skip default RET, land on ALLOW), jf=0
           <<0x15, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
-          # ret KILL_PROCESS (default)
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
-          # ret ALLOW (per-rule)
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x7F>>
 
       assert bpf == expected
@@ -854,9 +856,7 @@ defmodule Linx.SeccompTest do
       # rules with the same action share one terminal RET, so:
       # 3 (prologue) + 1 (ld nr) + 2 (JEQs) + 1 (default RET) + 1 (allow RET) = 8
       {:ok, bpf} =
-        Compiler.compile([{:allow, :read}, {:allow, :write}], :kill_process,
-          :x86_64
-        )
+        Compiler.compile([{:allow, :read}, {:allow, :write}], :kill_process, :x86_64)
 
       assert div(byte_size(bpf), 8) == 8
     end
@@ -1202,9 +1202,7 @@ defmodule Linx.SeccompTest do
 
     try do
       {_output, exit_code} =
-        System.cmd("python3", [helper, path],
-          stderr_to_stdout: true
-        )
+        System.cmd("python3", [helper, path], stderr_to_stdout: true)
 
       exit_code
     after

@@ -381,7 +381,7 @@ defmodule Linx.Seccomp do
       yet. Wait for `{:linx_process, :ready, _}` first.
     * `{:error, :running}` — past `proceed/1`, the child has
       `execve`'d; installing now is too late.
-    * `{:error, :already_terminated}` — the session emitted its
+    * `{:error, :no_process}` — the session emitted its
       terminal event.
 
   Kernel-level install failures arrive asynchronously as
@@ -405,7 +405,7 @@ defmodule Linx.Seccomp do
           | {:error,
              :not_ready
              | :running
-             | :already_terminated}
+             | :no_process}
   def install(session, %Filter{bpf: bpf}) when is_pid(session) and is_binary(bpf) do
     GenServer.call(session, {:seccomp_install, bpf})
   end

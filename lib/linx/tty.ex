@@ -71,9 +71,9 @@ defmodule Linx.Tty do
       mechanism (`:io.setopts(echo: false)` + a linked reader
       sub-process + `:io.put_chars/2` for output + polled winsize).
 
-  Both modes also refuse `{:error, :session_terminated}` (or
-  `:session_ended` for a dead session pid) when called against a
-  session whose workload has already exited — without this the
+  Both modes also refuse `{:error, :no_process}` when called against
+  a session whose workload has already exited (or whose GenServer is
+  gone) — without this the
   pump would set itself up waiting for `:pty_out` events that
   can never arrive, and Ctrl-C wouldn't help (`ssh_cli`
   intercepts it and the pump's reaction is to write `<<3>>` to a
@@ -337,7 +337,7 @@ defmodule Linx.Tty do
   """
   @spec attach(:controlling | :group_leader, session()) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
-          | {:error, :no_local_tty | :session_terminated | :session_ended | :gl_eof | term()}
+          | {:error, :no_local_tty | :no_process | :gl_eof | term()}
   def attach(:controlling, session) when is_pid(session) do
     # Two preconditions in order:
     # 1. The session must still be running. Without this, attach
@@ -414,13 +414,13 @@ defmodule Linx.Tty do
   defp ensure_session_running(session) do
     case Linx.Process.info(session) do
       {:ok, %{stage: stage}} when stage in [:exited, :signaled, :aborted, :errored] ->
-        {:error, :session_terminated}
+        {:error, :no_process}
 
       {:ok, _info} ->
         :ok
 
-      {:error, :session_ended} ->
-        {:error, :session_ended}
+      {:error, :no_process} ->
+        {:error, :no_process}
 
       {:error, _} = other ->
         other
@@ -441,17 +441,12 @@ defmodule Linx.Tty do
       "Linx.Tty.attach(:group_leader, session) instead (T6.1)."
   end
 
-  def format_error(:session_terminated) do
-    "The session's workload has already reached a terminal stage " <>
-      "(exited / signaled / aborted / errored). attach/2 requires " <>
-      "a session that's still running. Inspect Linx.Process.info/1 " <>
-      "for the terminal stage and result; spawn a fresh session " <>
-      "via Linx.Process.spawn/1 to attach to a new workload."
-  end
-
-  def format_error(:session_ended) do
-    "The session's GenServer has terminated -- its pid is gone. " <>
-      "Spawn a fresh session via Linx.Process.spawn/1."
+  def format_error(:no_process) do
+    "There is no live workload for this session -- it has reached a " <>
+      "terminal stage (exited / signaled / aborted / errored), or its " <>
+      "GenServer is gone. attach/2 requires a running session. Inspect " <>
+      "Linx.Process.info/1 for the terminal stage and result, or spawn " <>
+      "a fresh session via Linx.Process.spawn/1."
   end
 
   def format_error(other), do: inspect(other)
