@@ -339,13 +339,15 @@ proceeds in parallel.
 3. **rtnl per-resource `diff` + `RTPROT` ownership tagging.** Carry the validated
    discipline to the decoded structs (§6 keys), with the two-way/three-way
    asymmetry.
-4. **the rtnl `Monitor`.** `RTNLGRP_*` group subscription (constants do not exist
+4. **rtnl single-shot `reconcile`.** The per-namespace ordered pass across resource
+   types, reusing the Phase 2 pattern; the rtnl analogue of
+   `Netfilter.push(mode: :reconcile)`, caller-driven, no long-lived state. Ordered
+   before the Monitor deliberately: timer-based resync already converges (see the
+   observe-loop note below), so reconcile does not depend on the Monitor.
+5. **the rtnl `Monitor`.** `RTNLGRP_*` group subscription (constants do not exist
    yet; `Socket.add_membership/2` does), `ENOBUFS → :resync_needed`. The same
    codec decodes `RTM_NEW*`/`RTM_DEL*` into the same structs, so an event is just
-   a wake-up.
-5. **rtnl single-shot `reconcile`.** The per-namespace ordered pass across resource
-   types, reusing the Phase 2 pattern; the rtnl analogue of
-   `Netfilter.push(mode: :reconcile)`, caller-driven, no long-lived state.
+   a wake-up — a latency layer over the timer-driven reconcile, not a prerequisite.
 6. **`Linx.Process` supervision ergonomics.** `child_spec/1` carrying the spawn
    opts, restart-friendly exit semantics, and reliable OS-process reaping in
    `terminate` so a restart never leaks the old child. This is how "auto-restart
