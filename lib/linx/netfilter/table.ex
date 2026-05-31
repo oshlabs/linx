@@ -250,4 +250,13 @@ defmodule Linx.Netfilter.Table do
   end
 
   defp validate_flags(other), do: {:error, {:bad_table, {:flags_not_list, other}}}
+
+  defimpl Inspect do
+    def inspect(%Linx.Netfilter.Table{} = t, _opts) do
+      rules = Enum.reduce(Map.values(t.chains), 0, fn c, acc -> acc + length(c.rules) end)
+
+      "#Linx.Netfilter.Table<#{t.family} #{t.name}: " <>
+        "#{map_size(t.chains)} chains, #{map_size(t.sets)} sets, #{rules} rules>"
+    end
+  end
 end

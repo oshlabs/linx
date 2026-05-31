@@ -190,6 +190,12 @@ defmodule Linx.Netfilter.Set do
 
   defp validate_pos_int_or_nil(field, other),
     do: {:error, {:bad_set, {:bad_field, field, other}}}
+
+  defimpl Inspect do
+    def inspect(%Linx.Netfilter.Set{} = s, _opts) do
+      "#Linx.Netfilter.Set<#{s.name}(#{s.key_type}): #{length(s.elements)} elements>"
+    end
+  end
 end
 
 defmodule Linx.Netfilter.Set.Element do
@@ -201,18 +207,26 @@ defmodule Linx.Netfilter.Set.Element do
 
   def check(el, :ipv4_addr) do
     cond do
-      is_binary(el) and byte_size(el) == 4 -> :ok
+      is_binary(el) and byte_size(el) == 4 ->
+        :ok
+
       match?({a, b, c, d} when a in 0..255 and b in 0..255 and c in 0..255 and d in 0..255, el) ->
         :ok
-      is_binary(el) -> :ok  # textual "1.2.3.4" form — accepted, parsed later
-      true -> {:error, {:not_ipv4, el}}
+
+      # textual "1.2.3.4" form — accepted, parsed later
+      is_binary(el) ->
+        :ok
+
+      true ->
+        {:error, {:not_ipv4, el}}
     end
   end
 
   def check(el, :ipv6_addr) do
     cond do
       is_binary(el) and byte_size(el) == 16 -> :ok
-      is_binary(el) -> :ok  # textual "::1" form
+      # textual "::1" form
+      is_binary(el) -> :ok
       true -> {:error, {:not_ipv6, el}}
     end
   end
@@ -220,7 +234,8 @@ defmodule Linx.Netfilter.Set.Element do
   def check(el, :ether_addr) do
     cond do
       is_binary(el) and byte_size(el) == 6 -> :ok
-      is_binary(el) -> :ok  # textual "aa:bb:..." form
+      # textual "aa:bb:..." form
+      is_binary(el) -> :ok
       true -> {:error, {:not_ether, el}}
     end
   end
@@ -230,6 +245,7 @@ defmodule Linx.Netfilter.Set.Element do
   def check(el, :inet_proto), do: {:error, {:not_inet_proto, el}}
 
   def check(el, :inet_service) when is_integer(el) and el in 0..65_535, do: :ok
+
   def check({lo, hi}, :inet_service)
       when is_integer(lo) and is_integer(hi) and lo in 0..65_535 and hi in 0..65_535,
       do: :ok

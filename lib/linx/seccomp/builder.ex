@@ -116,4 +116,10 @@ defmodule Linx.Seccomp.Builder do
     rules = Enum.reverse(rev_rules)
     Linx.Seccomp.from_rules({rules, default})
   end
+
+  defimpl Inspect do
+    def inspect(%Linx.Seccomp.Builder{rules: rules}, _opts) do
+      "#Linx.Seccomp.Builder<#{length(rules)} rules>"
+    end
+  end
 end
