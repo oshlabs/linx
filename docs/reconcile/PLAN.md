@@ -385,8 +385,14 @@ proceeds in parallel.
    (`git mv` + flip the dep to a hex version). It exercises the cross-subsystem
    composite (container + namespace + address + rules + restart) that can only
    live in a consumer, and gates Phase 7.
-10. **hardening.** Diff-correctness properties, CAS race behaviour, Monitor event
-    ordering, the partial-apply report paths.
+10. **hardening** — done: diff-correctness *convergence* properties (applying
+    `two_way`/`three_way` ops reaches desired, preserves foreign state, and
+    reaches a fixpoint) for rtnl, and the full property set for cgroup limits to
+    match sysctl; Monitor event-ordering and decode totality; and the
+    partial-apply report paths (rtnl fail-fast — one failed, the rest pending;
+    sysctl/cgroup best-effort — a failing op never starves the others, pending
+    stays empty). (Netfilter's genID CAS retry is exercised in the netfilter
+    suite, the reference triad this work rhymes with.)
 
 A note on the observe loop: you do **not** need the Monitor to start. For static
 config, run the reconcile on a timer — re-`list`, diff, apply — and you already
@@ -435,9 +441,10 @@ diff. Events are hints; resync is truth.
 
 ### Still open
 
-- Nothing blocking. Phases 7 (the thin opt-in loop) and 8 (cgroup limits
-  reconcile) are implemented; Phase 9's `tank/` is a living PoC to grow as
-  needed; Phase 10 (hardening) is the remaining work.
+- Nothing open. All phases (1–10) are implemented; Phase 9's `tank/` remains a
+  living PoC to grow as needed. The reconcile triad (`pull`/`diff`/`push` +
+  Monitor) now spans Netfilter, rtnl, sysctl, and cgroup limits, with the thin
+  opt-in `Linx.Reconcile` loop over the `Source` contract on top.
 
 ## Appendix — minimal reconcile skeleton (illustrative)
 

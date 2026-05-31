@@ -151,6 +151,22 @@ defmodule Linx.Cgroup.ReconcileTest do
       assert [{{:set, "nonsense.max", 1}, %Cgroup.Error{}}] = r.failed
     end
 
+    test "best-effort: a failing knob never starves the others in the same pass", %{path: path} do
+      # One valid knob and one bogus one: best-effort attempts both, so the
+      # valid one still applies while the bogus one is reported as failed —
+      # and pending stays empty (only fail-fast subsystems leave work pending).
+      assert {:ok, r} = Reconcile.reconcile(path, %{"pids.max" => 100, "nonsense.max" => 1})
+
+      refute r.converged?
+      assert {:ok, "100"} = Cgroup.read(path, "pids.max")
+      assert [{:set, "pids.max", 100}] = r.applied
+      assert [{{:set, "nonsense.max", 1}, %Cgroup.Error{}}] = r.failed
+      assert r.pending == []
+      # The successful knob is owned; the failed one is not claimed.
+      assert Map.has_key?(r.last_applied, "pids.max")
+      refute Map.has_key?(r.last_applied, "nonsense.max")
+    end
+
     test "the opt-in loop drives the cgroup source and self-heals drift", %{path: path} do
       pid =
         start_supervised!(

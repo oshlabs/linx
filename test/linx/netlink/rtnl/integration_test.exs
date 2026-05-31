@@ -392,6 +392,27 @@ defmodule Linx.Netlink.Rtnl.IntegrationTest do
     assert Enum.any?(all, &(&1.dst == ~IP"10.77.0.0" and &1.protocol == 4))
   end
 
+  test "reconcile is fail-fast: the first failing op stops the pass, the rest stay pending",
+       %{socket: socket} do
+    assert :ok = Link.set_up(socket, "dummy0")
+
+    # No address in 10.99.0.0/24, so a route via 10.99.0.1 is unreachable and
+    # the kernel rejects it (ENETUNREACH). Two such routes: ordered apply stops
+    # at the first failure and never attempts the second.
+    desired = %{routes: [{"10.50.0.0", 24, "10.99.0.1"}, {"10.60.0.0", 24, "10.99.0.1"}]}
+
+    assert {:ok, %Report{} = r} = Reconcile.reconcile(socket, desired)
+
+    refute r.converged?
+    assert r.applied == []
+    # Fail-fast: exactly one failed (structured error), exactly one pending.
+    assert [{{:create, %Route{}}, %Error{}}] = r.failed
+    assert [{:create, %Route{}}] = r.pending
+    # Nothing was installed, and ownership claims nothing it didn't apply.
+    assert routes76(socket) == []
+    assert r.last_applied == %{addresses: MapSet.new()}
+  end
+
   # --- Phase 5: the rtnl Monitor --------------------------------------------
 
   alias Linx.Netlink.Rtnl.Monitor

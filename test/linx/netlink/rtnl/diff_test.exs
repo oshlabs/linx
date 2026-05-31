@@ -11,7 +11,13 @@ defmodule Linx.Netlink.Rtnl.DiffTest do
   #
   # Exercised with plain maps: key = & &1.k, value = & &1.v.
 
-  defp kv_map, do: map_of(integer(0..15), integer(0..3), max_length: 10)
+  # A small key space (0..15) so desired/observed overlap often, exercising
+  # updates and deletes. Built from a list of pairs (collisions collapse,
+  # last-wins) rather than `map_of`, whose unique-key retry trips
+  # `TooManyDuplicatesError` on so few possible keys.
+  defp kv_map do
+    map(list_of(tuple({integer(0..15), integer(0..3)}), max_length: 10), &Map.new/1)
+  end
   defp items(m), do: Enum.map(m, fn {k, v} -> %{k: k, v: v} end)
   defp keyset(m), do: m |> Map.keys() |> MapSet.new()
 
@@ -57,6 +63,58 @@ defmodule Linx.Netlink.Rtnl.DiffTest do
       assert [] == for({:delete, _} <- ops, do: :x)
       created = for({:create, i} <- ops, do: i.k) |> MapSet.new()
       assert created == MapSet.difference(keyset(dm), keyset(om))
+    end
+  end
+
+  # Reference apply: fold ops over the observed-by-key map exactly as a
+  # reconciler would (create/update put, delete drops). Convergence is the
+  # property that actually matters — the op-set tests above only describe the
+  # ops, not that applying them reaches the goal.
+  defp apply_ops(observed, ops, keyfn) do
+    base = Map.new(observed, &{keyfn.(&1), &1})
+
+    Enum.reduce(ops, base, fn
+      {:create, i}, acc -> Map.put(acc, keyfn.(i), i)
+      {:update, i}, acc -> Map.put(acc, keyfn.(i), i)
+      {:delete, o}, acc -> Map.delete(acc, keyfn.(o))
+    end)
+  end
+
+  property "two-way: applying the ops converges to desired, and a re-diff is empty" do
+    check all(dm <- kv_map(), om <- kv_map()) do
+      key = & &1.k
+      val = & &1.v
+      ops = Diff.two_way(items(dm), items(om), key, val)
+      post = apply_ops(items(om), ops, key)
+
+      # The post-state is exactly desired, keyed.
+      assert post == Map.new(items(dm), &{key.(&1), &1})
+      # And the loop has reached a fixpoint: nothing left to do.
+      assert Diff.two_way(items(dm), Map.values(post), key, val) == []
+    end
+  end
+
+  property "three-way: applying converges desired, preserves foreign state, reaches a fixpoint" do
+    check all(dm <- kv_map(), om <- kv_map(), owned <- list_of(integer(0..15))) do
+      key = & &1.k
+      val = & &1.v
+      owned_set = MapSet.new(owned)
+      ops = Diff.three_way(items(dm), items(om), owned_set, key, val)
+      post = apply_ops(items(om), ops, key)
+
+      # Every desired item is present with its desired value.
+      for d <- items(dm), do: assert(post[d.k] == d)
+
+      # Foreign observed items (not owned, not desired) are untouched.
+      for {k, o} <- Map.new(items(om), &{&1.k, &1}),
+          not MapSet.member?(owned_set, k),
+          not Map.has_key?(dm, k),
+          do: assert(post[k] == o)
+
+      # Re-diffing with the same ownership leaves only foreign-cleanup nothing:
+      # desired is satisfied, so no create/update remains.
+      redo = Diff.three_way(items(dm), Map.values(post), owned_set, key, val)
+      assert [] == for({op, _} <- redo, op in [:create, :update], do: :x)
     end
   end
 
