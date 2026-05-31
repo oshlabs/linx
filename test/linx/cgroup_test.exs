@@ -24,6 +24,7 @@ defmodule Linx.CgroupTest do
 
     test "from_posix/3 builds a struct with code looked up from the POSIX table" do
       err = Error.from_posix(:eexist, "/sys/fs/cgroup/test", :create)
+
       assert %Error{path: "/sys/fs/cgroup/test", operation: :create, errno: :eexist, code: 17} =
                err
     end
@@ -35,7 +36,9 @@ defmodule Linx.CgroupTest do
 
     test "Exception.message/1 renders cleanly with errno integer" do
       err = Error.from_posix(:ebusy, "/sys/fs/cgroup/x", :destroy)
-      assert Exception.message(err) == "cgroup destroy failed on /sys/fs/cgroup/x: ebusy (errno 16)"
+
+      assert Exception.message(err) ==
+               "cgroup destroy failed on /sys/fs/cgroup/x: ebusy (errno 16)"
     end
 
     test "Exception.message/1 renders cleanly without errno integer for unmapped" do
@@ -263,7 +266,7 @@ defmodule Linx.CgroupTest do
   end
 
   describe "C1 integration round-trip" do
-    @moduletag :integration
+    @describetag :integration
 
     # Real cgroup operations against /sys/fs/cgroup. Needs root + a
     # cgroup v2 unified hierarchy. Each test gets its own
@@ -345,7 +348,7 @@ defmodule Linx.CgroupTest do
   end
 
   describe "C2 freeze/thaw integration" do
-    @moduletag :integration
+    @describetag :integration
 
     setup do
       path = "/sys/fs/cgroup/linx-test-#{System.unique_integer([:positive])}"
@@ -368,7 +371,7 @@ defmodule Linx.CgroupTest do
   end
 
   describe "C2 typed limit setters integration" do
-    @moduletag :integration
+    @describetag :integration
 
     # The host needs the memory/pids/cpu controllers delegated at the
     # root (/sys/fs/cgroup/cgroup.subtree_control). On systemd hosts
@@ -423,7 +426,7 @@ defmodule Linx.CgroupTest do
   end
 
   describe "C3 stats integration" do
-    @moduletag :integration
+    @describetag :integration
 
     setup do
       path = "/sys/fs/cgroup/linx-test-#{System.unique_integer([:positive])}"
@@ -439,6 +442,7 @@ defmodule Linx.CgroupTest do
       # Every field present on this host (root has the standard
       # controllers delegated) should be a non-negative integer.
       assert is_nil(s.cpu_usec) or (is_integer(s.cpu_usec) and s.cpu_usec >= 0)
+
       assert is_nil(s.memory_current) or
                (is_integer(s.memory_current) and s.memory_current >= 0)
 
@@ -469,7 +473,7 @@ defmodule Linx.CgroupTest do
   end
 
   describe "C4 enable_controllers/2 integration" do
-    @moduletag :integration
+    @describetag :integration
 
     setup do
       path = "/sys/fs/cgroup/linx-test-#{System.unique_integer([:positive])}"
