@@ -31,6 +31,23 @@ This is `linx`, an Elixir library providing Linux kernel interfaces (netlink, an
         @type t :: %__MODULE__{fd: non_neg_integer, netns: :host | {:pid, pos_integer}}
       end
 
+- **Error handling — the shape is decided by how much context the error carries**, not by where it came from. Three lanes, applied uniformly across every subsystem:
+
+  1. **Context-rich kernel/syscall failure → `%Linx.X.Error{}`.** One error struct per subsystem (`Linx.Cgroup.Error`, `Linx.Mount.Error`, …), returned as `{:error, %Linx.X.Error{}}`. Every such struct **`defexception` and implements `message/1`**, so `Exception.message/1` is the single uniform way to render any Linx error as a human string. Uniform **core fields — `operation`, `errno` (a POSIX atom), `code` (the raw integer, or `nil`)** — are always present. Add **honest extras only where they're ever non-nil**: `path` (filesystem/procfs-backed subsystems), `message` (a kernel extended-ack string), and genuine subsystem specifics (e.g. Netfilter's batch `subsys`/`batch_seq`/`attr_offset`). Never pad a struct with a field that is forever `nil`. Build via a `from_posix/_` factory that maps the errno atom to its code.
+  2. **Context-free condition → a bare atom.** When there is nothing to attach, a struct is empty ceremony — return `{:error, :no_process}` (the same spirit as stdlib `File`'s `{:error, :enoent}` or `:gen_tcp`'s `{:error, :closed}`).
+  3. **Caller-side validation → a tagged tuple `{:error, {:bad_*, reason}}`** (e.g. `{:bad_flag, atom}`, `{:bad_map, reason}`). Do **not** raise `ArgumentError` for these — Linx's inputs are usually dynamic runtime data, so keep everything in the `{:ok, _} | {:error, _}` world for `with` pipelines.
+
+      defmodule Linx.Cgroup.Error do
+        @enforce_keys [:operation, :errno]
+        defexception [:operation, :errno, :code, :path]
+
+        @type t :: %__MODULE__{operation: atom, errno: atom, code: pos_integer | nil, path: Path.t() | nil}
+
+        @impl Exception
+        def message(%__MODULE__{} = e),
+          do: "cgroup #{e.operation} failed on #{e.path}: #{e.errno} (errno #{e.code})"
+      end
+
 - Lists **do not support index based access via the access syntax**. Use `Enum.at`, pattern matching, or `List`:
 
       mylist = ["blue", "green"]

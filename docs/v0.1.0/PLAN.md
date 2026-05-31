@@ -1,163 +1,408 @@
 # Linx 0.1.0 — release-preparation plan
 
-> Not a per-subsystem `PLAN.md` like the eight in `docs/<subsystem>/`
-> that this work will delete. This is a project-wide one-off plan
-> covering the path from "eight subsystems shipped on main" to
-> "0.1.0 published on Hex." This file deletes itself in the final
-> phase.
+> A project-wide, one-off plan — **not** a per-subsystem `PLAN.md` like
+> the ten under `docs/<subsystem>/` that this work will retire. It
+> covers the path from "all subsystems shipped on main" to "0.1.0
+> published on Hex." This file deletes itself in the final phase
+> (Phase 4); the per-subsystem `PLAN.md`/`COVERAGE.md` files are
+> retired earlier, in Phase 2.
 
 ## Why this branch exists
 
-All eight subsystems ship on main as of `e30ef41`:
+The feature set is done. What's missing for a first Hex release isn't
+more features — it's making the library read as **one** library, not
+ten overlapping ones that happen to share a repo. That consistency
+pass, plus hardening and release mechanics, is the whole job of this
+branch.
 
-  Linx.Netlink, Linx.Process, Linx.Tty, Linx.Cgroup,
-  Linx.Mount, Linx.User, Linx.Capabilities, Linx.Seccomp.
+### Ten subsystems, not eight
 
-`mix test`: 452 plain + 9 doctests, 0 failures.
-`./sudotest.sh`: 538 plain + 9 doctests + the kernel-acceptance
-integration tests, 0 failures.
+The original version of this plan counted **eight** subsystems. Two
+more have landed on main since and are first-class throughout:
 
-What's missing for a first Hex release isn't more features — it's
-making sure the library reads as **one** library, not eight
-overlapping ones that happen to share a repo. That's the job of
-this branch.
+  - **`Linx.Sysctl`** — `/proc/sys` kernel tunables (NIF; S0–S3 shipped).
+  - **`Linx.Netfilter`** — nf_tables firewalling *and* the `~NFT`
+    sigil DSL. The **largest** subsystem (~26 `Linx.Netfilter.*`
+    modules + 8 `Linx.NFT.*` modules) and the one most likely to harbour
+    interface-normalisation issues. First-class in the Phase-1 audit
+    and the Phase-3 property-testing work.
+
+The canonical list (use this everywhere — audit, docs sweep, CHANGELOG):
+
+| # | Subsystem | Entry module | Native | Error struct | Notes |
+|---|---|---|---|---|---|
+| 1 | Netlink | `Linx.Netlink` (+ `Rtnl`, `Nfnl`) | NIF (`netlink_socket.c`) | `Linx.Netlink.Error` | core + rtnetlink + nfnetlink |
+| 2 | Process | `Linx.Process` | **Port** (`linx_process.c`) | `Linx.Process.Error` *(to add)* | clone/exec checkpoint |
+| 3 | Tty | `Linx.Tty` | NIF (`linx_tty.c`) | `Linx.Tty.Error` *(to add)* | PTY / termios / attach |
+| 4 | Cgroup | `Linx.Cgroup` | none (cgroupfs) | `Linx.Cgroup.Error` | v2 unified hierarchy |
+| 5 | Mount | `Linx.Mount` | NIF (`linx_mount.c`) | `Linx.Mount.Error` | mount/umount/pivot_root + mountinfo |
+| 6 | User | `Linx.User` | none (procfs) | `Linx.User.Error` | uid/gid maps |
+| 7 | Capabilities | `Linx.Capabilities` | none (procfs + Process) | `Linx.Capabilities.Error` | 5 cap sets |
+| 8 | Seccomp | `Linx.Seccomp` | none (BPF via Process) | `Linx.Seccomp.Error` | cBPF syscall filters |
+| 9 | Sysctl | `Linx.Sysctl` | NIF (`linx_sysctl.c`) | `Linx.Sysctl.Error` | `/proc/sys` tunables |
+| 10 | Netfilter | `Linx.Netfilter` / `Linx.NFT` | NIF (shared netlink) | `Linx.Netfilter.Error` + `Linx.NFT.ParseError` | nf_tables + `~NFT` sigil |
+
+Plus shared public value types: `Linx.IP`, `Linx.IP.Subnet`,
+`Linx.MAC`.
+
+## Branch status
+
+This branch (`polish-v0.1.0`) **is already rebased onto current main**
+(`be77478`). The old resume-note claim that it "branches from
+`e30ef41`" is stale and superseded by this paragraph. Treat current
+`main` as the base.
+
+---
+
+## Decisions locked during planning
+
+These were settled in discussion before Phase 1; the audit *applies*
+them, it does not re-litigate them. Recorded here so they survive
+context compaction.
+
+### D1 — Post-terminal condition unifies on `:no_process`
+
+Process + Tty return **four** atoms today for "the workload is gone,
+you can't do that": `:already_terminated` (`proceed/1`, `abort/1`, cap
+commands), `:ended` (`signal/2`), `:session_terminated` (Tty
+`attach/2`), and `:session_ended` (`wait/1`, `info/1`, and Tty when the
+GenServer is gone).
+
+**Collapse all four into one atom: `{:error, :no_process}`.** Drop the
+"workload terminated vs session-GenServer gone" distinction entirely —
+callers don't care. `:no_process` is precise: at the parked checkpoint
+a process genuinely exists (cloned, parked, pre-`execve`), so the error
+only ever fires once the OS process is truly gone. Apply across **both**
+Process and Tty in one commit; it's the headline breaking change for
+0.1.0 (and breaking is free — no users yet). Note it in the CHANGELOG.
+
+### D2 — Error model: context-richness decides the shape
+
+The axis is **how much context the error carries**, not caller-vs-kernel.
+Three lanes, applied uniformly across all ten subsystems:
+
+  1. **Context-rich kernel/syscall failure → `%Linx.X.Error{}`.**
+     Every error struct **implements the `Exception` behaviour** so
+     `Exception.message/1` is the one uniform way to render any Linx
+     error as a human string (the strongly-endorsed Elixir-y form —
+     see Redix/Postgrex/Mint/Ecto/NimbleOptions and the Elixir
+     anti-patterns doc). Uniform **core fields: `operation` + `errno` +
+     `code`**, always present. Optional **honest extras** only where
+     genuinely non-nil: `path` (filesystem/procfs subsystems),
+     `message` (kernel extended-ack string), and subsystem-specifics
+     (e.g. Netfilter's `subsys`/`batch_seq`/`attr_offset`). No padding
+     a struct with fields that are forever `nil`.
+  2. **Context-free condition → bare atom.** Carries nothing to attach,
+     so a struct would be empty ceremony. `:no_process` is the
+     canonical example (cf. stdlib `File`'s `{:error, :enoent}`,
+     `:gen_tcp`'s `{:error, :closed}`, Redix's reason atoms).
+  3. **Caller validation → tagged tuple `{:error, {:bad_*, reason}}`.**
+     Do **not** raise `ArgumentError` here even though the official doc
+     permits it for pure programmer errors — Linx's "bad" inputs are
+     usually *dynamic runtime data* (a uid-map list, an `~NFT` string,
+     a parsed flag set), so staying in the `{:ok,_}/{:error,_}` world
+     keeps them composable in `with`.
+
+Consequences for the audit:
+  - **Add `Linx.Process.Error` and `Linx.Tty.Error`** (Family-B shape:
+    `operation`/`errno`/`code`, no `path`). Process's async mailbox
+    errors become `{:linx_process, :error, %Linx.Process.Error{}}`
+    (keep the `stage` field name — it carries real clone→exec meaning;
+    it *is* the `operation`). Tty's NIF `{:error, {:stage, errno}}`
+    becomes `%Linx.Tty.Error{}`.
+  - **Add `:operation` to `Linx.Netlink.Error`** (it lacks one today; a
+    netlink error always comes from a specific request type). Align its
+    `from_errno/2` constructor with the `from_posix` family naming.
+  - This is the de-facto convention to codify in `AGENTS.md`.
+
+### D3 — Inspect: minimal for 0.1.0; the clever bits get their own plan
+
+  - **0.1.0:** add plain **summary** `Inspect` to the container structs
+    that fall through to default today — Netfilter `Table`, `Chain`,
+    `Set`, `Map`, `Ruleset`, `Flowtable`, `Object` (e.g.
+    `#Linx.Netfilter.Ruleset<2 tables, 8 chains, 240 rules>`) — and to
+    `Seccomp.Builder`. Leaf structs (`Rule`/`Verdict`/`Expr`) keep
+    their existing content-showing impls. House rule: **summarise
+    containers, show leaves.**
+  - **Deferred to a separate plan:** rendering `inspect(ruleset)` as its
+    round-trippable `~NFT"""..."""` source (elegant — `~NFT` is valid
+    Elixir — but needs a fallback for rulesets using features the
+    formatter emits as `# <unsupported>` comments), `~NFT.Chain` /
+    `~NFT.Rule` sub-sigils, and whether `Linx.NFT` folds into
+    `Linx.Netfilter`. Capture these in **`docs/netfilter/DESIGN.md`** —
+    a *new* forward-looking doc, explicitly **not** swept up by the
+    Phase-2 consolidation. Post-0.1.0 scope.
+
+### D4 — Docs: slim README, migrate depth into code, three doctest lanes
+
+  - **Root `README.md` shrinks to the standard Elixir shape:** what it
+    is, install, a brief per-subsystem blurb each linking to its module
+    docs, the headline composition, status + license. The ~62 KB of
+    depth currently inlined migrates *into* the moduledocs, where ExDoc
+    renders it as first-class API documentation.
+  - **Doctest policy — three lanes** (this is how the root/non-root
+    split is handled under `mix test`):
+      1. **Pure, verifiable examples → real doctests, *with* `iex>`
+         prefixes** (the documented exception to the no-`iex>`-prefix
+         house style). Run under plain `mix test`, CI-verified.
+         Candidates: `Linx.NFT.parse`/`format`, `Netlink.Codec`
+         round-trips, `Linx.IP`/`Subnet`/`MAC`, the `Constants`
+         round-trips, `Mount.parse_mountinfo(sample)`,
+         `Capabilities.parse_status(sample)`.
+      2. **Root-requiring / side-effecting examples → plain code blocks,
+         *no* `iex>` prefix.** A block without the prompt is not
+         collected as a doctest, so `mix test` never runs it; ExDoc
+         still renders it (and it stays paste-friendly). This makes the
+         root/non-root problem vanish — you can't fail a test you never
+         generated.
+      3. **Verified root *behaviour* → the integration suite**
+         (`@describetag :integration`, run via `./sudotest.sh`), not
+         doctests.
+  - **External markdown per subsystem after consolidation:** keep
+    **`EXAMPLES.md`** (big multi-subsystem recipes) **and**
+    **`REFERENCES.md`** (man-page / kernel-header bibliography). Delete
+    `PLAN.md` and `COVERAGE.md` (and `netfilter/TODO.md`).
+
+### Open — deferred decisions
+
+  - **Elixir / Erlang version floor.** `mix.exs` currently pins
+    `elixir: "~> 1.19"` (bleeding edge). Whether to lower it for reach
+    is deferred — decide during Phase 4.
+
+---
 
 ## Phases — in order, because each makes the next obvious
 
-  1. **Combined review** — consistency audit across all eight subsystems.
-  2. **Docs consolidation** — delete `PLAN.md` + `COVERAGE.md` everywhere;
-     promote what's load-bearing to module `@moduledoc`.
-  3. **Hardening** — property-based tests, C-code memory audit, error-path
+  1. **Combined review** — consistency audit across all ten subsystems
+     (applies D1–D2).
+  2. **Docs consolidation** — retire `PLAN.md` + `COVERAGE.md`
+     everywhere; promote rationale into `@moduledoc` (applies D4).
+  3. **Hardening** — property-based tests, C memory audit, error-path
      coverage.
-  4. **0.1.0 release** — CI, CHANGELOG, mix.exs polish, Hex publish.
+  4. **0.1.0 release** — CI, CHANGELOG, mix.exs polish, Hex publish
+     (resolves the version-floor open question).
+
+Phase ordering is **not** flexible. Don't skip ahead.
+
+---
 
 ## Phase 1 — Combined review
 
-**Goal:** surface inconsistencies between subsystems before they get
-baked into the first Hex release.
+**Goal:** apply D1–D2 and surface/fix any remaining inconsistencies
+between subsystems before they get baked into the first Hex release.
+Atoms, error shapes, and verb names ship to external callers — fixing
+them is a one-shot breaking change, so it happens *before* publish.
+
+**Deliverable:** `docs/v0.1.0/AUDIT.md` (sibling to this file): every
+inconsistency found, what it should be, and which subsystem(s) need
+editing. Make small fixup commits per dimension — not one mega-commit.
+
+**Execution note:** this phase runs as a **deep multi-agent sweep**
+(parallel readers per subsystem × dimension → synthesis into
+`AUDIT.md` → per-dimension fixup commits). That's a token-heavy
+workflow and an explicit opt-in — confirm before launching.
 
 ### Audit dimensions
 
 | Dimension | What to check |
 |---|---|
-| **Error struct shapes** | `%Linx.X.Error{}` fields + semantics consistent across Cgroup / Mount / User / Capabilities / Seccomp / Netlink. `from_posix/_` signatures uniform. `defexception` + `message/1` impls present. |
-| **Inspect impls** | Compact `#Linx.X<…>` rendering everywhere with meaningful content; no struct-default fallthrough on user-facing types. |
-| **Verb naming** | `create/1` vs `open/1` vs `spawn/1` vs `read/1` — same word for the same conceptual operation across subsystems? |
-| **Forward-compat** | Unknown-bit / unknown-number handling consistent? Capabilities logs once on unknown bits past `last_cap`; Seccomp returns `:unknown` from `from_number/2`; Mount? Netlink? |
-| **Test conventions** | `@describetag :integration` (not `@moduletag`) used everywhere per the memory note `exunit-describetag-not-moduletag`? `sudotest.sh`-friendly? |
-| **`@spec` + `@type` coverage** | Every public function spec'd? Internals marked `@moduledoc false`? |
-| **Moduledoc shape** | Every subsystem's top-level moduledoc has the same outline: what it is / why / motivating example / status? |
-| **Common idioms** | MapSet-of-atoms-at-the-API + raw-bits-on-the-wire used consistently? `:in {:pid, _}` / `:in {:path, _}` shape consistent where cross-namespace? |
-| **Post-terminal error atoms** | `Linx.Process` returns three different atoms for "the workload already terminated": `:ended` (`signal/2`), `:already_terminated` (`proceed/1`, `abort/1`), `:session_ended` (`pty_write/2`, `pty_set_winsize/2`). `Linx.Tty.attach/2` adds a fourth — `:session_terminated` (workload exited) plus `:session_ended` (GenServer gone). Unify on one atom across subsystems for the same condition; decide whether "workload terminated, session GenServer alive" and "session GenServer gone entirely" are worth distinguishing at all (probably not — callers rarely care). Atoms ship to external callers, so the unification is a one-shot breaking change — bundle with any other 0.1.0 atom renames before publishing. |
+| **Error struct shapes** | Apply **D2**: uniform core `operation`/`errno`/`code` + `Exception` impl on every `%Linx.X.Error{}`; `path`/`message`/extras only where non-nil. Add `operation` to `Netlink.Error`. |
+| **New error structs** | Apply **D2**: add `Linx.Process.Error` + `Linx.Tty.Error`; migrate Process's async mailbox tuple and Tty's `{:stage, errno}` onto them. |
+| **Error constructor naming** | Unify on `from_posix`; reconcile Netlink's `from_errno/2` (wire int) with the atom-based `from_posix/N` family. Keep arity differences only where the extra context (e.g. Sysctl's `:key`) is real. |
+| **`defexception` + `message/1`** | Present + parallel wording on every error struct: `"<subsys> <op> failed on <path>: <errno> (errno N)"`. |
+| **Post-terminal atoms** | Apply **D1**: collapse to `{:error, :no_process}` across Process + Tty. |
+| **Inspect impls** | Apply **D3**: summary Inspect on Netfilter containers + `Seccomp.Builder`; leaves unchanged. |
+| **Verb naming** | `open` (sockets), `create`/`create_*` (cgroup, links), `spawn` (process), `add`/`delete` (addresses/routes/neighbours/rules), `build`/`push`/`pull`/`diff` (netfilter). Same word for the same op? `supported?/0` idiom — confirm naming parity across the seven that have it. |
+| **Validation-vs-kernel split** | Apply **D2 lane 3**: caller mistakes → `{:error, {:bad_*, reason}}`; verify tuple shapes are predictable and documented as intentional. |
+| **Forward-compat / unknown handling** | Four strategies today (silent-drop, keep-raw-bytes, `:unknown` sentinel, log-once). Decide the right one *per situation* and document the rule. |
+| **Test conventions** | `@describetag :integration` for mixed files (per memory `exunit-describetag-not-moduletag`); `@moduletag` only in dedicated all-integration files. Fix Cgroup's `cgroup_test.exs` (`async: true` + `@moduletag`). Process/Tty have no integration tag — add where a test touches the kernel. |
+| **`@spec` + `@type` coverage** | Every public function spec'd; internals `@moduledoc false`. |
+| **Moduledoc shape** | Same outline everywhere: what / why / motivating example / status. Netlink is the laggard (sparse top-level + entry modules, no inline examples). |
+| **Common idioms** | MapSet-of-atoms at the API + raw bits on the wire; the `:in {:pid,_}`/`{:path,_}`/`:self` cross-namespace option (Mount + Sysctl share it — confirm parity elsewhere). |
 
-### Deliverable
+### Per-subsystem Phase-1 checklists
 
-`docs/v0.1.0/AUDIT.md` (sibling to this file): every inconsistency
-found, what it should be, and which subsystem(s) need editing.
+> Tick these off in `AUDIT.md`. ✎ = concrete fix identified during
+> planning; ⚲ = verify-only (likely already fine).
 
-Make small fixup commits per dimension. Don't try to land all the
-fixes in one mega-commit.
+**1. Netlink** — the moduledoc laggard + error-shape outlier.
+  - ✎ Add `:operation` to `Netlink.Error`; reconcile `from_errno/2`
+    with the `from_posix` family naming (D2).
+  - ✎ Bring `Linx.Netlink`, `Rtnl`, `Nfnl` moduledocs to the house
+    shape; add inline examples to resource modules (Link/Address/…).
+  - ⚲ Verify unknown-attr / unknown-`LinkInfo`-kind handling matches
+    the documented forward-compat rule.
+  - ⚲ `rtnl/integration_test.exs` `@moduletag` — fine if all-integration.
+  - ⚲ Verb-naming review across Link/Address/Route/Neighbour/Rule.
+
+**2. Process** — D1 + D2 headliner.
+  - ✎ Collapse terminated atoms to `:no_process` (D1).
+  - ✎ Add `Linx.Process.Error`; move async mailbox errors to
+    `{:linx_process, :error, %Linx.Process.Error{}}` (keep `stage`).
+  - ⚲ `@spec` coverage on all public verbs.
+  - ⚲ `Process.Info` Inspect already present — confirm fields.
+
+**3. Tty** — D1 + D2 partner.
+  - ✎ Apply `:no_process` to `attach/2` (D1).
+  - ✎ Add `Linx.Tty.Error`; migrate `{:error, {:stage, errno}}` onto it.
+  - ⚲ Confirm `Tty.Saved` / `Tty.WindowSize` Inspect + specs.
+
+**4. Cgroup**
+  - ✎ `cgroup_test.exs`: `@moduletag :integration` on an `async: true`
+    mixed file → convert to `@describetag`.
+  - ⚲ `enable_controllers/2` → `{:partial, failures}` is an intentional
+    outlier; document, don't "fix."
+  - ⚲ Error shape (the `path` family reference) + `from_posix/3` +
+    `message/1` parity.
+
+**5. Mount**
+  - ⚲ Error shape — reference for the `path` family.
+  - ⚲ `:bad_flag`/`:bad_in` — canonical validation-split example (D2).
+  - ⚲ `mount/4` returning three error shapes — confirm documented.
+
+**6. User**
+  - ⚲ Error shape + `User.Map` range Inspect — already good.
+  - ⚲ Validation tuples (`:bad_map`/`:bad_setup`/`:bad_setgroups`).
+
+**7. Capabilities**
+  - ⚲ Log-once-on-unknown-bits — document as the chosen forward-compat
+    strategy for bitmask growth.
+  - ⚲ `Constants.to_bits/from_bits` faithful within known bits (lossy
+    above `last_cap` — note for Phase 3).
+  - ⚲ `State` count-only Inspect + Error shape.
+
+**8. Seccomp**
+  - ⚲ Error shape (no `path`) — confirm justified under D2.
+  - ✎ Add summary `Inspect` to `Seccomp.Builder` (mirror `Filter`'s) (D3).
+  - ⚲ `Syscalls.from_number/2` → `:unknown`; round-trip invariants for
+    Phase 3.
+
+**9. Sysctl** — newly first-class.
+  - ⚲ Error shape (`path` family + `:key`) + `from_posix/4`.
+  - ⚲ `:in` cross-namespace option matches Mount exactly.
+  - ⚲ Key-validation regex blocks traversal — flag for Phase 3 fuzzing.
+  - ✎ Ensure Sysctl appears in the README subsystem list + CHANGELOG.
+
+**10. Netfilter + `~NFT`** — the big one.
+  - ✎ Add summary `Inspect` to `Table`/`Chain`/`Set`/`Map`/`Ruleset`/
+    `Flowtable`/`Object` (D3); leaves unchanged.
+  - ⚲ `Netfilter.Error` rich shape — confirm the extra fields are
+    justified honest-extras under D2.
+  - ⚲ `NFT.ParseError` caret rendering — confirm parity with Elixir-style
+    errors.
+  - ⚲ Validation tuples (`:bad_table`/`:bad_chain`) parity.
+  - ✎ Fold `docs/netfilter/TODO.md` Tier-1 blockers into Deferred (below);
+    open `docs/netfilter/DESIGN.md` for the deferred Inspect/sigil/
+    namespace work (D3).
+  - ⚲ Flag parse→compile→format round-trip + "never crash" for Phase 3.
+
+---
 
 ## Phase 2 — Docs consolidation
 
-**Goal:** the per-subsystem `PLAN.md` and `COVERAGE.md` files have
-served their purpose. Time to retire them and move what's still
-load-bearing into the modules.
+**Goal:** apply **D4**. Retire the per-subsystem `PLAN.md`/`COVERAGE.md`;
+slim the README; migrate depth into moduledocs as doctests where pure.
 
-### Steps
+### Per `docs/<x>/` directory (all ten)
 
-For each `docs/<x>/` directory (one of the eight subsystems):
+  1. **`PLAN.md`** — extract design *rationale* a consumer benefits from
+     into the relevant `@moduledoc`; "what's next" is git history's job;
+     delete the file. (Netlink's 442 lines, Netfilter's 1702, Tty's 1087
+     carry the most salvageable rationale.)
+  2. **`COVERAGE.md`** — delete. Every row is shipped; README sections +
+     module docs cover the surface better.
+  3. **`EXAMPLES.md`** — keep (multi-subsystem recipes).
+  4. **`REFERENCES.md`** — keep (citations).
 
-  1. **`PLAN.md`** — read it. Extract any *design rationale* that
-     consumers would benefit from (the "why" behind a decision)
-     into the relevant module's `@moduledoc`. The "what we're going
-     to build next" content is git history's job. Delete the file.
+### Netfilter's extra files
 
-  2. **`COVERAGE.md`** — delete. Every row is ✅ now; the README's
-     subsystem sections + module docs cover the same surface
-     better.
+  - `docs/netfilter/TODO.md` (183 lines) — its Tier-1 blockers are 0.2+
+    scope; move them into the Deferred section here, then delete it.
+  - `docs/netfilter/DESIGN.md` — **new**, created in Phase 1 for the
+    deferred `~NFT`-Inspect / sub-sigil / namespace work (D3). **Not**
+    deleted — it's the post-0.1.0 design doc.
 
-  3. **`EXAMPLES.md`** — keep. Real recipes that don't fit in a
-     moduledoc.
+### Docs-into-code (D4)
 
-  4. **`REFERENCES.md`** — keep. Man-page / kernel-header citation
-     hygiene.
+  - Migrate the README's per-subsystem depth into moduledocs.
+  - Convert pure examples to `iex>` doctests; leave root/side-effecting
+    examples as prefix-less code blocks; keep verified root behaviour in
+    `@describetag :integration` tests. (See D4's three lanes.)
+  - Slim root `README.md` to the standard shape.
 
-Then:
+### Then
 
-  - Update `mix.exs` `docs.extras` + `groups_for_extras` to drop
-    every deleted file.
-  - Update `AGENTS.md` to reflect the new convention
-    (`EXAMPLES.md` + `REFERENCES.md` only per subsystem).
-  - Update the memory note `maintain-living-docs` (it currently
-    mentions all four).
+  - Update `mix.exs` `docs.extras` + `groups_for_extras` to drop every
+    deleted file (all ten subsystems' `PLAN.md`/`COVERAGE.md` +
+    `netfilter/TODO.md`); add `netfilter/DESIGN.md`. With `PLAN`/
+    `COVERAGE` gone, the per-subsystem "— design" groups collapse to
+    just `REFERENCES.md` — re-think the `groups_for_extras` IA (e.g.
+    per-subsystem "Guides" = EXAMPLES, a single "References" group).
+  - Update `AGENTS.md`: docs convention is now `EXAMPLES.md` +
+    `REFERENCES.md` per subsystem.
+  - Update memory note `maintain-living-docs` (drop PLAN/COVERAGE).
 
-### Subsystems to walk through
+Pick granularity by review burden. Don't delete a subsystem's `PLAN.md`
+until its rationale has been audited into moduledocs first.
 
-`docs/netlink/`, `docs/process/`, `docs/tty/`, `docs/cgroup/`,
-`docs/mount/`, `docs/user/`, `docs/capabilities/`, `docs/seccomp/`.
-
-Eight directories. Could be one commit per subsystem or one big
-"retire PLAN.md + COVERAGE.md" sweep — pick by review burden.
+---
 
 ## Phase 3 — Hardening
 
-**Goal:** raise confidence that the library survives malformed
-input, kernel oddities, and stress.
-
-Three layers, cheapest-first.
+**Goal:** raise confidence the library survives malformed input, kernel
+oddities, and stress. Three layers, cheapest first.
 
 ### 3a. Property-based testing (StreamData)
 
-Add `{:stream_data, "~> 1.0", only: :test}` to `mix.exs`.
+Add `{:stream_data, "~> 1.0", only: :test}` to `mix.exs`. Targets:
 
-High-value targets:
+  - **Netlink `Codec`** — every message type encode → decode → equal.
+  - **Netfilter `~NFT`** (highest-value) — parse → compile → format →
+    re-parse yields a structurally equivalent ruleset; tokenizer/parser/
+    compiler **never crash** on arbitrary input (always `ParseError`).
+  - **Capabilities `Constants`** — `to_bits(from_bits(n))` faithful for
+    arbitrary u64 masks *modulo bits above `last_cap`* (deliberately
+    lossy there).
+  - **Seccomp `Constants`** — action u32 round-trips per `{action,errno}`.
+    **`Seccomp.Syscalls`** — per arch: no dup numbers; every atom
+    round-trips `to_number`/`from_number`; `all/1` == forward-map keys.
+  - **Parsers on arbitrary bytes** (never crash; reject cleanly):
+    `Capabilities.parse_status/2`, `Mount.parse_mountinfo/1`,
+    `User.parse_map/1`, `Sysctl` key validation.
 
-  - **Codec round-trips.** `Linx.Netlink.Codec`: every message type
-    encode → decode → assert equal. `Linx.Capabilities.Constants`:
-    `to_bits(from_bits(n)) == n` for arbitrary u64 masks (modulo
-    bits above last_cap). `Linx.Seccomp.Constants`: action u32
-    round-trips for every {action, errno} combination.
-  - **Parsers eating arbitrary bytes.** `Linx.Capabilities.parse_status/2`
-    fed arbitrary `/proc/<pid>/status`-ish strings. `Linx.Mount.list`
-    fed arbitrary mountinfo lines. Should never crash; should reject
-    cleanly.
-  - **Syscall-table invariants.** `Linx.Seccomp.Syscalls`: for each
-    arch, no duplicate numbers; every atom round-trips through
-    `to_number/from_number`; `all/1` equals the set of forward-map
-    keys.
+### 3b. C memory audit
 
-Property tests are cheap to add and routinely catch edge cases
-unit tests miss.
+Five C units (the original plan listed four — `linx_sysctl.c` was missing):
 
-### 3b. C-code memory audit
+  - `c_src/linx_process.c` (Port) — fork/exec fd leaks, CLOEXEC, the
+    `free_request`/`free_str_array` pairs, the BPF seccomp-blob
+    malloc/free, `report_error` pre-exec paths.
+  - `c_src/netlink_socket.c` (NIF) — ei frame decode over-reads,
+    malloc/free pairing.
+  - `c_src/linx_tty.c` (NIF) — minimal alloc; errno→atom switch coverage.
+  - `c_src/linx_mount.c` (NIF) — setns-on-throwaway-pthread teardown,
+    error-path frees.
+  - `c_src/linx_sysctl.c` (NIF) — same setns-pthread pattern; audit alike.
 
-Targets: `c_src/linx_process.c`, `c_src/netlink_socket.c`,
-`c_src/linx_tty.c`, `c_src/linx_mount.c`.
-
-  - Add a `scripts/asan.sh` that compiles the C parts with
-    `-fsanitize=address -fsanitize=undefined -g -O0` and runs the
-    integration suite under sudo.
-  - Watch for: leaks in error paths (every `goto cleanup`-style
-    path), double-frees in fork/exec, unchecked `errno` use,
-    over-reads in ei frame decoding, malloc/free pair mismatches.
-  - Document any deliberate one-shot allocations the agent doesn't
-    free at exit (since `_exit(_)` recovers everything).
+Add `scripts/asan.sh`: compile with `-fsanitize=address
+-fsanitize=undefined -g -O0`, run the integration suite under sudo.
+Watch `goto cleanup` error paths, fork/exec double-frees, unchecked
+`errno`. Document deliberate one-shot allocations not freed before
+`_exit`.
 
 ### 3c. Error-path coverage
 
-Most tests hit happy paths. For every errno that surfaces in a
-`%Linx.X.Error{}` or `{:linx_process, :error, errno, stage}`:
+For every errno surfacing in a `%Linx.X.Error{}` or
+`{:linx_process, :error, %Linx.Process.Error{}}`:
 
-  - `EACCES` via `chmod 000`.
-  - `ENOENT` via reading bogus pids.
-  - `EMFILE` via `setrlimit(RLIMIT_NOFILE)`.
-  - `EBUSY` (cgroup destroy with members) — already tested.
-  - `EPERM` (cap drops without CAP_SETPCAP) — already tested.
-  - `EINVAL` (malformed BPF) — already tested via integration.
+  - `EACCES` via `chmod 000`; `ENOENT` via bogus pids / nonexistent
+    sysctl keys; `EMFILE` via `setrlimit(RLIMIT_NOFILE)`.
+  - `EBUSY` (cgroup destroy with members), `EPERM` (cap drops without
+    `CAP_SETPCAP`), `EINVAL` (malformed BPF) — already tested.
 
-Document what's hard to test (`ENOMEM` mid-syscall) and accept
-the gap.
+Document what's hard to test (`ENOMEM` mid-syscall) and accept the gap.
+
+---
 
 ## Phase 4 — 0.1.0 Hex release
 
@@ -165,33 +410,29 @@ the gap.
 
 ### Pre-flight
 
-  - [ ] `mix.exs` package metadata: `homepage`, `package: [licenses:
-        ["MIT"], links: %{"GitHub" => @source_url}, maintainers:
-        [...]]`.
-  - [ ] `CHANGELOG.md` at the repo root, starting with the 0.1.0
-        entry summarising every subsystem.
-  - [ ] `LICENSE` already present (MIT).
-  - [ ] README polished for Hex (it's already excellent; minor
-        tweaks at most — the headline composition is the right
-        opener).
+  - [ ] Resolve the **Elixir/Erlang version floor** open question; set
+        `elixir:` accordingly in `mix.exs`.
+  - [ ] `mix.exs` package metadata (**currently absent**): `package:
+        [licenses: ["MIT"], links: %{"GitHub" => @source_url},
+        maintainers: [...]]` + `homepage`/`source_url`.
+  - [ ] `CHANGELOG.md` at repo root — 0.1.0 entry summarising all ten
+        subsystems + the `:no_process` breaking change (D1).
+  - [ ] `LICENSE` present (MIT). ✓
+  - [ ] README polished for Hex; Sysctl + Netfilter represented.
   - [ ] `mix format --check-formatted` clean.
   - [ ] `mix compile --warnings-as-errors` clean.
-  - [ ] `mix dialyzer` clean (or known-acceptable warnings
-        documented).
+  - [ ] `mix dialyzer` clean (or documented known-acceptable warnings).
   - [ ] `mix credo --strict` reviewed.
   - [ ] `mix hex.audit` passes.
 
-### CI (GitHub Actions)
-
-`.github/workflows/ci.yml`:
+### CI (GitHub Actions) — `.github/workflows/ci.yml`
 
   - `mix format --check-formatted`
   - `mix compile --warnings-as-errors`
-  - `mix test` (plain — runs on a regular GitHub runner)
-  - `mix test --include integration` in a privileged container
-    (needed for clone(2) namespace flags, setns, capset, seccomp
-    install)
-  - Optional: matrix Elixir 1.18 / 1.19, OTP 27 / 28.
+  - `mix test` (plain — regular runner; runs pure doctests + unit tests)
+  - `mix test --include integration` in a privileged container (clone(2)
+    namespace flags, setns, capset, seccomp install, nft batches)
+  - Optional: matrix Elixir 1.18/1.19, OTP 27/28 (per the floor decision).
 
 ### Publish
 
@@ -200,53 +441,55 @@ the gap.
 
 ### Tag + merge
 
-  - Final cleanup: **delete `docs/v0.1.0/`** (this file and any
-    siblings).
+  - Final cleanup: **delete `docs/v0.1.0/`** (this file + `AUDIT.md`).
+    Keep `docs/netfilter/DESIGN.md`.
   - Commit: "Linx 0.1.0".
-  - Merge `v0.1.0` → `main`.
-  - Tag `v0.1.0`, push tag.
+  - Merge `polish-v0.1.0` → `main`. Tag `v0.1.0`, push tag.
 
-## Deferred — captured so we don't lose them
+---
 
-To 0.2 or later. Each was in scope at some point during the
-foundational work but is correctly out of scope for 0.1.0.
+## Deferred — captured so we don't lose them (0.2+)
 
-  - **`Linx.Seccomp` per-arg matching** (`allow_if/3` — S1.5).
-  - **`Linx.Seccomp` multi-arch routing**.
-  - **`Linx.Seccomp` `SECCOMP_USER_NOTIF`** (userspace decision
-    handlers).
-  - **`Linx.Capabilities.File`** — file capabilities
-    (`security.capability` xattrs; `setcap(8)` / `getcap(8)`).
-  - **`Linx.Capabilities` securebits** (`SECBIT_*`).
-  - **`Linx.Cgroup`** typed setters for less-common controllers
+  - **`Linx.Netfilter` / `~NFT`** — round-trippable `~NFT`-rendering
+    Inspect, `~NFT.Chain`/`~NFT.Rule` sub-sigils, `NFT`↔`Netfilter`
+    namespace integration (all → `docs/netfilter/DESIGN.md`). Plus the
+    old `TODO.md` Tier-1 blockers: `limit rate`, `meta FIELD set` /
+    `ct … set`, named objects, flowtables, concatenated set/map keys,
+    NPTv6, `include` substitution, the `nftables.conf` codec + `mix
+    format` plugin.
+  - **`Linx.Seccomp`** — per-arg matching (`allow_if/3`), multi-arch
+    routing, `SECCOMP_USER_NOTIF`.
+  - **`Linx.Capabilities`** — file capabilities (`security.capability`
+    xattrs; `setcap`/`getcap`); securebits (`SECBIT_*`).
+  - **`Linx.Cgroup`** — typed setters for less-common controllers
     (`io.max`, `cpuset.cpus`, `memory.swap.max`); event monitoring
-    (`memory.events`, OOM); `cgroup.kill` for atomic teardown.
-  - **`Linx.Mount` new mount API** (`fsopen` / `fsmount` /
-    `open_tree` / `move_mount` / `mount_setattr`); typed parsing
-    of `mount_options` / `super_options`.
-  - **`Linx.User` `newuidmap(1)` / `newgidmap(1)` integration**
-    for unprivileged multi-range maps via `/etc/subuid`
-    / `/etc/subgid`.
-  - **`Linx.Netlink`** Connection GenServer for concurrent
-    in-flight requests; Monitor for multicast event subscription;
-    `NETLINK_GENERIC` family; more link kinds (`bond`, `vxlan`,
-    `tun`/`tap`).
-  - **`Linx.Process` Phoenix LiveView terminal demo** (memory
-    note `linx-demo-web-phoenix-liveview`).
-  - **Cross-distro testing**: Debian, Ubuntu, Fedora, Alpine — let
-    early 0.1.0 users surface distro-specific issues; act on the
-    real reports.
+    (`memory.events`, OOM); `cgroup.kill`.
+  - **`Linx.Mount`** — new mount API (`fsopen`/`fsmount`/`open_tree`/
+    `move_mount`/`mount_setattr`); typed `mount_options`/`super_options`.
+  - **`Linx.User`** — `newuidmap(1)`/`newgidmap(1)` for unprivileged
+    multi-range maps via `/etc/subuid`/`/etc/subgid`.
+  - **`Linx.Netlink`** — Connection GenServer for concurrent in-flight
+    requests; Monitor for multicast events; `NETLINK_GENERIC`; more link
+    kinds (`bond`, `vxlan`, `tun`/`tap`).
+  - **`Linx.Process`** — Phoenix LiveView terminal demo (memory note
+    `linx-demo-web-phoenix-liveview`).
+  - **Cross-distro testing** — Debian, Ubuntu, Fedora, Alpine.
+
+---
 
 ## Notes for resuming after context compaction
 
-  - This branch is `v0.1.0`.
-  - It branches from `e30ef41` on main (post-seccomp-foundations
-    merge + README updates).
-  - Phase ordering is **not** flexible — each phase makes the next
-    one obvious. Don't skip ahead.
-  - The "what's next" section of the README will be re-trimmed in
-    Phase 2 as part of docs consolidation.
-  - Every per-subsystem `PLAN.md` will be deleted in Phase 2; the
-    project-wide one — this file — is deleted in Phase 4. Don't
-    delete subsystem PLAN.md until their content has been audited
-    for design rationale that should move to moduledocs first.
+  - Branch `polish-v0.1.0`, already rebased onto current `main`
+    (`be77478`). Ignore the old "branches from `e30ef41`" note.
+  - **Ten** subsystems, not eight — Sysctl and Netfilter are first-class.
+  - **D1–D4 are locked** (see "Decisions locked during planning"). The
+    audit applies them; it does not re-debate them.
+  - Phase ordering is **not** flexible.
+  - Phase 1 produces `docs/v0.1.0/AUDIT.md` as a deep multi-agent
+    sweep (token-heavy opt-in — confirm before launching). Atom/error/
+    verb renames are breaking and land before publish.
+  - Phase 2 deletes every per-subsystem `PLAN.md` + `COVERAGE.md` (+
+    `netfilter/TODO.md`) — but only after rationale moves into
+    moduledocs. `docs/netfilter/DESIGN.md` is kept; this file deletes
+    itself in Phase 4.
+  - The error-shape convention (D2) is mirrored into `AGENTS.md`.
