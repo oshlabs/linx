@@ -532,7 +532,20 @@ findings) and annotated with outcomes. All fixups shipped on
 C ASan/UBSan, error-path coverage).
 
 **Phase 4 — Release: ⬜ NOT STARTED.** Known open items:
-  - Resolve the **Elixir/Erlang version floor** (`mix.exs` pins `~> 1.19`).
+  - ✅ **Version floor decided.** `mix.exs` now pins `elixir: "~> 1.15"`
+    (was `~> 1.19`, which was just the dev box — a feature scan found no
+    stdlib usage past ~1.15). The real binding constraint is **OTP ≥ 26**,
+    forced by `Linx.Tty.attach(:group_leader)`'s `:prim_tty` internals
+    (`disable_reader`/`enable_reader` + the `:sys.replace_state` output-mode
+    flip); 1.15 is the oldest Elixir that supports OTP 26. mix.exs can't
+    express an OTP floor, so it lives in the README "Requirements" note +
+    must be CI-enforced. CI matrix (still TODO): `elixir {1.15, latest} ×
+    otp {26, latest}`, and **only the latest-Elixir cell runs
+    `mix format --check-formatted`** (formatter output is version-sensitive
+    — running the check on the 1.15 cell would fail spuriously against code
+    formatted on 1.19). Optional: a `.tool-versions` pinning dev/format to
+    the latest so contributors format identically. Kernel floor (6.6 LTS,
+    target 6.12) is also in the README Requirements note now.
   - `mix.exs` `package:` metadata is absent — add it + `CHANGELOG.md`.
   - **`mix compile --warnings-as-errors` still fails** on pre-existing
     clause-grouping warnings in `lib/linx/netfilter/encoder.ex`,

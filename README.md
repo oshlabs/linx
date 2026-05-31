@@ -20,7 +20,7 @@ def deps do
 end
 ```
 
-Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Windows.
+**Requirements.** Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Windows. Elixir **1.15+** on Erlang/**OTP 26+** (the `Linx.Tty` group-leader attach mode depends on the OTP-26 `prim_tty` driver). Kernel **6.6 LTS** or newer; the nf_tables paths target 6.12 LTS.
 
 ## The headline composition
 

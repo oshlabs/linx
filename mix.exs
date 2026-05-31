@@ -8,7 +8,7 @@ defmodule Linx.MixProject do
     [
       app: :linx,
       version: @version,
-      elixir: "~> 1.19",
+      elixir: "~> 1.15",
       start_permanent: Mix.env() == :prod,
       # Custom compilers for the project's native code, run as part of
       # `mix compile`:
