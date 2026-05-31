@@ -210,8 +210,12 @@ defmodule Linx.Mount do
 
   defp parse_propagation(tag) do
     case String.split(tag, ":", parts: 2) do
-      ["shared", n] -> with {:ok, i} <- parse_int(n), do: {:shared, i}, else: (_ -> :skip)
-      ["master", n] -> with {:ok, i} <- parse_int(n), do: {:master, i}, else: (_ -> :skip)
+      ["shared", n] ->
+        with {:ok, i} <- parse_int(n), do: {:shared, i}, else: (_ -> :skip)
+
+      ["master", n] ->
+        with {:ok, i} <- parse_int(n), do: {:master, i}, else: (_ -> :skip)
+
       ["propagate_from", n] ->
         with {:ok, i} <- parse_int(n), do: {:propagate_from, i}, else: (_ -> :skip)
 
@@ -243,6 +247,7 @@ defmodule Linx.Mount do
   # in the root, mount_point, and source fields. We handle any
   # \nnn three-digit octal sequence to stay defensive.
   @doc false
+  @spec unescape(binary()) :: binary()
   def unescape(s) when is_binary(s), do: unescape(s, <<>>)
 
   defp unescape(<<>>, acc), do: acc
@@ -594,8 +599,11 @@ defmodule Linx.Mount do
 
   defp do_pivot_root(new_root, put_old, ns_path) do
     case Native.pivot_root(new_root, put_old, ns_path) do
-      :ok -> :ok
-      {:error, {stage, errno}} -> {:error, build_pivot_root_error(stage, errno, new_root, ns_path)}
+      :ok ->
+        :ok
+
+      {:error, {stage, errno}} ->
+        {:error, build_pivot_root_error(stage, errno, new_root, ns_path)}
     end
   end
 
