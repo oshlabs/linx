@@ -21,6 +21,78 @@ The decisions are **locked** — this document records what to change to satisfy
 
 State of the library: Linx is in good shape for v0.1.0. The bulk of the design — validation-tuple conventions, forward-compat strategies, `@spec` coverage of public APIs, `Inspect` on leaf types, and moduledoc shape across nine of ten subsystems — is already consistent and verified. The actionable work clusters into a small number of well-defined seams: (1) the **D1 atom unification** ripples through Process, Tty, Capabilities, Seccomp specs, every relevant test file, and the docs; (2) the **D2 error-shape work** is mostly the two missing structs (`Linx.Process.Error`, `Linx.Tty.Error`) plus adding `:operation` to `Linx.Netlink.Error`, the only existing error struct missing it; (3) the **D3 Inspect work** is five Netfilter container structs plus `Seccomp.Builder`, following the already-established `Patch`/`Filter` summary pattern. Beyond the locked decisions, the two recurring polish themes are the **Netlink subsystem tree** (sparse moduledocs, no examples/status, the lone documentation laggard) and **forward-compat strategy documentation** (the behavior is correct everywhere but undocumented). The `cgroup_test.exs` `@moduletag :integration`-in-a-mixed-file bug is the one test-hygiene defect that silently excludes unit tests from the default run.
 
+## Phase-1 outcome — what actually shipped
+
+This section was added after the fixup phase. The findings below are the
+*raw* audit; this records how they were resolved (commits on
+`polish-v0.1.0`), including where the audit over-reported or where a
+finding was resolved by a deliberate decision rather than a literal fix.
+
+**Shipped (fixup commits):**
+
+  - **D1 atom unification** → `{:error, :no_process}` across Process +
+    Tty (impl, specs, docstrings, all tests, merged `Tty.format_error/1`)
+    + the kept docs. `:no_pty` was deliberately **kept distinct** (it's a
+    "not a PTY session" mode error, not a terminated condition).
+  - **D2 error model fully realised** — all ten subsystems now have a
+    `%Linx.X.Error{}`. Added `Linx.Process.Error` (replaces the bare
+    `{:error, %{errno, stage}}` map from `wait/1`/`info/1`; `:agent_died`
+    carries an exit code, not an errno) and `Linx.Tty.Error` (wraps the
+    NIF's `{stage, errno}`; `attach/2`'s pre-exec failure now yields a
+    `Process.Error`). Validation tuples uniformised in `Process`
+    (`{:bad_*, reason}`).
+  - **D3 Inspect** — summary impls on Netfilter `Table`/`Chain`/`Set`/
+    `Map`/`Ruleset` + `Seccomp.Builder`.
+  - **Misc** — `@impl Exception` on `Netlink.Error`; `mount unescape/1`
+    spec; `cgroup_test.exs` `@describetag` fix (verified: 30 unit tests
+    were being silently skipped).
+
+**Decisions that overrode a literal finding:**
+
+  - **`netlink-missing-operation` → option (c), not (a).** `Netlink.Error`
+    deliberately keeps **no `:operation`**: the error returns straight
+    from the verb the caller invoked, and the kernel extended-ack
+    `message` is a richer diagnostic than the only honestly-available
+    operation value (the request's numeric, family-dependent message
+    type, not even cleanly available on the nfnl batch path). Documented
+    in the moduledoc; `from_errno/2` kept (it takes a wire int, not a
+    POSIX atom). Also unified the `malformed_error` shape across
+    `request.ex`/`nfnl.ex`.
+  - **`seccomp-bad-action-vs-unknown-syscall` → not done.** Kept
+    `:unknown_syscall` (more descriptive than `:bad_syscall`; the `:bad_*`
+    prefix was never a universal seccomp convention —
+    `:duplicate_rule`/`:unsupported_arch` are descriptive too). Only the
+    genuine wart `:bad_rules_arg` → `:bad_rules` shipped.
+  - **`supported-parity-gap` (commit 14) → not done.** `Process`/`Tty`/
+    `Mount` primitives are always present on Linux, so a `supported?/0`
+    would near-trivially return `true` — unlike Cgroup/Sysctl/Netfilter,
+    which probe a feature that can be absent. Adding it is noise.
+  - **`create-vs-add-collision` / Netfilter verb renames → deferred** to
+    `docs/netfilter/DESIGN.md` (post-0.1.0), with the round-trippable
+    `~NFT` Inspect and sub-sigils. `tty window_size`/`set_window_size`
+    kept (mirrors the `TIOCGWINSZ`/`TIOCSWINSZ` get/set ioctls).
+
+**Audit over-reporting (verified false positives):**
+
+  - The **`@spec` dimension** was unreliable: of six "missing spec"
+    findings, **five were already covered by union `@spec`s** (`netfilter
+    pull/2`, `mount list/1`, `capabilities read/1`, `tty format_error/1`,
+    `seccomp from_rules`/`to_rules`, `sysctl list/1`). Only `mount
+    unescape/1` was genuinely missing one. The library's spec discipline
+    is stronger than the headline 36 "gaps" implied.
+  - `doc-v0.1.0-plan-post-terminal` was a false positive — the plan lists
+    the four atoms precisely to *prescribe* their collapse.
+
+**Bonus bug fixed (found by running the suite):** `Linx.MAC.decode/1`
+crashed `Rtnl.Neighbour.list/1` on an empty/non-Ethernet `NDA_LLADDR`
+(INCOMPLETE/FAILED neighbours, Infiniband links). Now decodes non-6-byte
+addresses to `nil`.
+
+**Deferred to Phase 2 (docs):** `missing-moduledoc-false-*` (hide
+internal codec/DSL modules), the **Netlink moduledoc tree** enrichment,
+and the **forward-compat `@moduledoc` sections** — all part of the
+docs-consolidation phase.
+
 ## Findings by dimension
 
 ### 1. Error struct shapes & D2 conformance
