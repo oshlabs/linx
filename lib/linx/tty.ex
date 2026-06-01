@@ -743,6 +743,11 @@ defmodule Linx.Tty do
       # pause.
       tty_state = take_tty_quietly()
       sigwinch_id = make_ref()
+      # Opened before the try so `after` can close it: the port holds a
+      # `driver_select` on `fd`, and leaving it open leaks that registration.
+      # A later attach then reuses the fd number and the new port "steals
+      # control" of it from this stale one (a VM warning on fd reuse).
+      port = :erlang.open_port({:fd, fd, fd}, [:binary, :stream])
 
       try do
         # Arm a SIGWINCH forwarder so the pump sees terminal-resize
@@ -759,14 +764,24 @@ defmodule Linx.Tty do
           {:error, _} -> :ok
         end
 
-        port = :erlang.open_port({:fd, fd, fd}, [:binary, :stream])
         __pump__(port, session, fd, %{key: detach_key, pending: ""})
       after
         disarm_sigwinch(sigwinch_id)
+        # Restore termios *before* closing the port — the fd must still be open
+        # for the tcsetattr — then drop the port to release its fd select.
         restore_and_close(fd, saved)
+        close_port(port)
         give_tty_back(tty_state)
       end
     end
+  end
+
+  # Close the `{:fd, _, _}` port from attach, tolerating an already-closed one.
+  defp close_port(port) when is_port(port) do
+    Port.close(port)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   # Suspend `prim_tty`'s reader process so it doesn't pull keystrokes
