@@ -585,6 +585,40 @@ defmodule Linx.Process do
     GenServer.call(session, :pty_master)
   end
 
+  @doc """
+  Reassigns the session's **owner** — the process that receives the
+  `{:linx_process, _}` lifecycle events and, in PTY mode, `:pty_out`. Returns
+  `:ok` (or `{:error, :no_process}` if the session GenServer is already gone).
+
+  The owner is set at `spawn/1` / `enter/2` (defaulting to the caller) and is
+  normally the process supervising the workload. `set_owner/2` hands that event
+  stream to a *different* process for a while — the model behind interactively
+  *attaching* to a session another process owns:
+
+    * the supervisor calls `set_owner(session, attacher)` so the attaching
+      process receives `:pty_out` (and lifecycle) for the duration,
+    * the attacher runs `Linx.Tty.attach/3`,
+    * on return the supervisor calls `set_owner(session, supervisor)` to take
+      the stream back.
+
+  Only one owner receives events at a time. If the workload **terminates while
+  detached** (owned by the attacher), the supervisor will not have seen the
+  `:exited` / `:signaled` event — so after reclaiming ownership it should
+  re-derive the workload's state from `info/1` and act on it. This keeps the
+  handoff a clean single-owner swap, with the lifecycle decision level-triggered
+  on the supervisor side rather than threaded through the attach.
+
+  Setting the owner on a session whose workload has already terminated is
+  harmless (the session lingers); the new owner simply won't receive past
+  events.
+  """
+  @spec set_owner(t(), pid()) :: :ok | {:error, :no_process}
+  def set_owner(session, new_owner) when is_pid(session) and is_pid(new_owner) do
+    GenServer.call(session, {:set_owner, new_owner})
+  catch
+    :exit, _ -> {:error, :no_process}
+  end
+
   # --- input validation -----------------------------------------------------
 
   defp build_spawn_request(opts) do
@@ -1013,6 +1047,12 @@ defmodule Linx.Process do
 
   def handle_call(:pty_master, _from, state) do
     {:reply, {:error, :no_pty}, state}
+  end
+
+  # Owner handoff: redirect lifecycle / :pty_out events to a new process. Valid
+  # in any stage (a lingering terminated session accepts it as a no-op).
+  def handle_call({:set_owner, new_owner}, _from, state) do
+    {:reply, :ok, %{state | owner: new_owner}}
   end
 
   # Winsize forwarding -- only meaningful in PTY mode and only

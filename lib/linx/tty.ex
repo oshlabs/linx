@@ -247,8 +247,24 @@ defmodule Linx.Tty do
       works on a local terminal; it's the universal mode.
 
   Returns the terminal event from the session — `{:ok, {:exited, n}}`,
-  `{:ok, {:signaled, n}}` — or `{:error, _}` for a setup failure
-  or a pre-exec workload error.
+  `{:ok, {:signaled, n}}` — `{:ok, :detached}` if the caller typed the detach
+  sequence (see below), or `{:error, _}` for a setup failure or a pre-exec
+  workload error.
+
+  ## Detaching (leaving the workload running)
+
+  `opts[:detach_key]` is a byte sequence that, when typed, ends the attach
+  **without** stopping the workload: the pump returns `{:ok, :detached}` and
+  the terminal is restored, but the workload keeps running, ready to be
+  re-attached. It defaults to `<<16, 17>>` — Ctrl-P Ctrl-Q, docker's default.
+  Pass `detach_key: nil` (or `""`) to disable it, in which case `attach/3`
+  returns only when the workload itself terminates.
+
+  The sequence is matched byte-for-byte across reads: a lone first byte (e.g.
+  Ctrl-P) is held one keystroke; if the following byte does not complete the
+  sequence, the held byte is forwarded to the workload ahead of it, so a
+  detach prefix that is also a useful key still reaches the workload when it
+  isn't a detach.
 
   ## `:group_leader` mode specifics
 
@@ -331,10 +347,12 @@ defmodule Linx.Tty do
   unconditionally via `try/after`, even on a crash inside the loop,
   so a wedged terminal is structurally impossible.
   """
-  @spec attach(:controlling | :group_leader, session()) ::
-          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+  @spec attach(:controlling | :group_leader, session(), keyword()) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()} | :detached}
           | {:error, :no_local_tty | :no_process | :gl_eof | term()}
-  def attach(:controlling, session) when is_pid(session) do
+  def attach(target, session, opts \\ [])
+
+  def attach(:controlling, session, opts) when is_pid(session) do
     # Two preconditions in order:
     # 1. The session must still be running. Without this, attach
     #    happily sets up its byte pump on a session whose workload
@@ -351,7 +369,7 @@ defmodule Linx.Tty do
     with :ok <- ensure_session_running(session) do
       case Env.classify_caller_terminal() do
         :ssh -> {:error, :no_local_tty}
-        _ -> attach_controlling(session)
+        _ -> attach_controlling(session, detach_key(opts))
       end
     end
   end
@@ -397,9 +415,22 @@ defmodule Linx.Tty do
   # 250ms is the right call.
   @winsize_poll_ms 250
 
-  def attach(:group_leader, session) when is_pid(session) do
+  # Docker's default detach sequence: Ctrl-P Ctrl-Q.
+  @default_detach_key <<16, 17>>
+
+  def attach(:group_leader, session, opts) when is_pid(session) do
     with :ok <- ensure_session_running(session) do
-      attach_group_leader(session, @winsize_poll_ms)
+      attach_group_leader(session, @winsize_poll_ms, detach_key(opts))
+    end
+  end
+
+  # The configured detach sequence: typing these bytes inside an attach returns
+  # `{:ok, :detached}` and leaves the workload running. Defaults to Ctrl-P
+  # Ctrl-Q (docker's default); `detach_key: nil` (or "") disables it.
+  defp detach_key(opts) do
+    case Keyword.get(opts, :detach_key, @default_detach_key) do
+      key when is_binary(key) and byte_size(key) > 0 -> key
+      _ -> nil
     end
   end
 
@@ -447,7 +478,7 @@ defmodule Linx.Tty do
 
   def format_error(other), do: inspect(other)
 
-  defp attach_group_leader(session, winsize_poll_ms) do
+  defp attach_group_leader(session, winsize_poll_ms, detach_key) do
     gl = Process.group_leader()
     saved_echo = Keyword.get(:io.getopts(gl), :echo, true)
     saved_trap = Process.flag(:trap_exit, true)
@@ -475,7 +506,10 @@ defmodule Linx.Tty do
       reader = spawn_link(__MODULE__, :__gl_reader__, [self(), gl])
 
       try do
-        __pump_gl__(reader, gl, session, winsize_poll_ms, initial_ws)
+        __pump_gl__(reader, gl, session, winsize_poll_ms, initial_ws, %{
+          key: detach_key,
+          pending: ""
+        })
       after
         # Reader is stuck in :io.get_chars; an exit signal unblocks it.
         if Process.alive?(reader), do: Process.exit(reader, :shutdown)
@@ -575,15 +609,22 @@ defmodule Linx.Tty do
   # `nil` if the initial seed failed or hasn't happened). The polling
   # `after` clause forwards a new size only when it differs, so a quiet
   # terminal generates no work beyond the periodic `:io` round-trips.
-  @spec __pump_gl__(pid(), pid(), session(), pos_integer(), WindowSize.t() | nil) ::
-          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+  @spec __pump_gl__(pid(), pid(), session(), pos_integer(), WindowSize.t() | nil, map()) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()} | :detached}
           | {:error, term()}
-  def __pump_gl__(reader, gl, session, poll_ms, last_ws)
+  def __pump_gl__(reader, gl, session, poll_ms, last_ws, detach \\ %{key: nil, pending: ""})
       when is_pid(reader) and is_pid(gl) and is_pid(session) and is_integer(poll_ms) do
     receive do
       {:linx_tty_gl, :data, bytes} ->
-        _ = Linx.Process.pty_write(session, bytes)
-        __pump_gl__(reader, gl, session, poll_ms, last_ws)
+        case scan_detach(detach.pending, bytes, detach.key) do
+          {:detach, flush} ->
+            if flush != "", do: Linx.Process.pty_write(session, flush)
+            {:ok, :detached}
+
+          {:forward, out, pending} ->
+            if out != "", do: Linx.Process.pty_write(session, out)
+            __pump_gl__(reader, gl, session, poll_ms, last_ws, %{detach | pending: pending})
+        end
 
       {:linx_process, :pty_out, bytes} ->
         # `:io.put_chars/2`, not `IO.binwrite/2`. `:io.put_chars/2`
@@ -600,7 +641,7 @@ defmodule Linx.Tty do
         # arbitrary binary content may fail
         # `:unicode.characters_to_binary/1` inside ssh_cli.
         _ = :io.put_chars(gl, bytes)
-        __pump_gl__(reader, gl, session, poll_ms, last_ws)
+        __pump_gl__(reader, gl, session, poll_ms, last_ws, detach)
 
       {:linx_tty_gl, :eof} ->
         {:error, :gl_eof}
@@ -619,7 +660,7 @@ defmodule Linx.Tty do
         # round-trips. Translate to a `\x03` byte for the workload
         # so SIGINT propagation still works.
         _ = Linx.Process.pty_write(session, <<3>>)
-        __pump_gl__(reader, gl, session, poll_ms, last_ws)
+        __pump_gl__(reader, gl, session, poll_ms, last_ws, detach)
 
       {:linx_process, :exited, code} ->
         {:ok, {:exited, code}}
@@ -632,7 +673,7 @@ defmodule Linx.Tty do
     after
       poll_ms ->
         new_ws = maybe_forward_winsize(gl, session, last_ws)
-        __pump_gl__(reader, gl, session, poll_ms, new_ws)
+        __pump_gl__(reader, gl, session, poll_ms, new_ws, detach)
     end
   end
 
@@ -653,7 +694,47 @@ defmodule Linx.Tty do
     end
   end
 
-  defp attach_controlling(session) do
+  # Detach-key scanner, shared by both pumps. `key` is the configured detach
+  # sequence (`nil` disables it). `pending` is the prefix of `key` matched at
+  # the tail of earlier input and held back (not yet sent to the workload).
+  # Given new `bytes`, returns one of:
+  #
+  #   {:detach, flush}         -- `key` completed; `flush` is the input that
+  #                               preceded it and should still reach the
+  #                               workload before we detach.
+  #   {:forward, out, pending} -- not complete; write `out` to the workload now
+  #                               and carry `pending` (a held key-prefix) on.
+  #
+  # Holding a partial match means a lone first key-byte (e.g. Ctrl-P) is
+  # delayed one keystroke; if the next byte breaks the match the held prefix is
+  # flushed ahead of it, so nothing is lost and the sequence may straddle reads.
+  defp scan_detach(_pending, bytes, nil), do: {:forward, bytes, ""}
+
+  defp scan_detach(pending, bytes, key) do
+    buf = pending <> bytes
+
+    case :binary.match(buf, key) do
+      {start, _len} ->
+        {:detach, binary_part(buf, 0, start)}
+
+      :nomatch ->
+        held = held_prefix(buf, key)
+        {:forward, binary_part(buf, 0, byte_size(buf) - byte_size(held)), held}
+    end
+  end
+
+  # The longest non-empty suffix of `buf` that is also a (proper) prefix of
+  # `key`, or "" if there is none.
+  defp held_prefix(buf, key) do
+    max = min(byte_size(key) - 1, byte_size(buf))
+
+    Enum.find_value(max..1//-1, "", fn i ->
+      suffix = binary_part(buf, byte_size(buf) - i, i)
+      if suffix == binary_part(key, 0, i), do: suffix
+    end)
+  end
+
+  defp attach_controlling(session, detach_key) do
     with {:ok, fd, saved} <- open_controlling_raw() do
       # Pause Erlang's prim_tty reader so it stops competing with us
       # for /dev/tty reads. See the module doc's "Coexisting with
@@ -679,7 +760,7 @@ defmodule Linx.Tty do
         end
 
         port = :erlang.open_port({:fd, fd, fd}, [:binary, :stream])
-        __pump__(port, session, fd)
+        __pump__(port, session, fd, %{key: detach_key, pending: ""})
       after
         disarm_sigwinch(sigwinch_id)
         restore_and_close(fd, saved)
@@ -958,19 +1039,26 @@ defmodule Linx.Tty do
   # The caller must own `session` -- the :pty_out events arrive in the
   # owner's mailbox, and this function expects to receive them in its
   # own mailbox. See attach/2's docs for the constraint.
-  @spec __pump__(port(), session(), fd() | nil) ::
-          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()}}
+  @spec __pump__(port(), session(), fd() | nil, map()) ::
+          {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()} | :detached}
           | {:error, term()}
-  def __pump__(port, session, local_fd \\ nil)
+  def __pump__(port, session, local_fd \\ nil, detach \\ %{key: nil, pending: ""})
       when is_port(port) and is_pid(session) and (is_integer(local_fd) or is_nil(local_fd)) do
     receive do
       {^port, {:data, bytes}} ->
-        _ = Linx.Process.pty_write(session, bytes)
-        __pump__(port, session, local_fd)
+        case scan_detach(detach.pending, bytes, detach.key) do
+          {:detach, flush} ->
+            if flush != "", do: Linx.Process.pty_write(session, flush)
+            {:ok, :detached}
+
+          {:forward, out, pending} ->
+            if out != "", do: Linx.Process.pty_write(session, out)
+            __pump__(port, session, local_fd, %{detach | pending: pending})
+        end
 
       {:linx_process, :pty_out, bytes} ->
         Port.command(port, bytes)
-        __pump__(port, session, local_fd)
+        __pump__(port, session, local_fd, detach)
 
       {:linx_tty, :sigwinch} ->
         if is_integer(local_fd) do
@@ -980,7 +1068,7 @@ defmodule Linx.Tty do
           end
         end
 
-        __pump__(port, session, local_fd)
+        __pump__(port, session, local_fd, detach)
 
       {:linx_process, :exited, code} ->
         {:ok, {:exited, code}}

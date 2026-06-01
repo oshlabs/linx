@@ -321,6 +321,59 @@ sequential calls from the iex evaluator. In an OTP application you
 typically structure the calling process so it owns the session for
 the duration of the attach.
 
+## Detaching — leaving the workload running
+
+By default, typing `Ctrl-P Ctrl-Q` (docker's detach sequence) ends an
+attach *without* stopping the workload: `attach/3` returns
+`{:ok, :detached}`, your terminal is restored, and the workload keeps
+running, ready to be re-attached.
+
+```elixir
+case Linx.Tty.attach(:group_leader, c) do
+  {:ok, :detached} -> :still_running       # Ctrl-P Ctrl-Q was typed
+  {:ok, {:exited, n}} -> {:exited, n}       # the workload itself ended
+  {:ok, {:signaled, n}} -> {:signaled, n}
+  {:error, reason} -> {:error, reason}
+end
+```
+
+Change or disable the sequence per attach:
+
+```elixir
+Linx.Tty.attach(:group_leader, c, detach_key: <<1, 4>>)   # Ctrl-A Ctrl-D
+Linx.Tty.attach(:group_leader, c, detach_key: nil)        # no detach; return only on exit
+```
+
+The sequence is matched across reads; a lone first byte is held one
+keystroke and flushed ahead of the next if the match doesn't complete —
+so a detach prefix that is also a useful key still reaches the workload
+when you don't follow it with the second byte.
+
+## Attaching to a session another process owns
+
+`attach/3` must run in the session's owner (above). When a *supervisor*
+owns the session — running the workload as a long-lived service — hand
+the event stream over for the duration of the attach with
+`Linx.Process.set_owner/2`, then hand it back:
+
+```elixir
+# `runtime` owns `session`; attach from this process for a while.
+:ok = Linx.Process.set_owner(session, self())
+
+result =
+  try do
+    Linx.Tty.attach(:group_leader, session)
+  after
+    Linx.Process.set_owner(session, runtime)
+  end
+```
+
+If the workload exits *while detached*, the supervisor won't have seen
+the `:exited` event — so on reclaiming ownership it re-derives the
+workload's state from `Linx.Process.info/1` and acts on it. The
+lifecycle decision stays the supervisor's, level-triggered. See
+`Linx.Process.set_owner/2` and `docs/process/EXAMPLES.md`.
+
 ## Composing with `Linx.Process` namespaces
 
 Putting it all together — the headline `docker attach` /

@@ -426,6 +426,35 @@ This is the primitive the `Linx.Tty` subsystem composes
 with — `Linx.Tty.attach/2` calls `pty_set_winsize/2` automatically at
 entry, seeding the workload with the caller's terminal size.
 
+### Handing off the owner
+
+The **owner** — the process receiving `{:linx_process, _}` lifecycle
+events (and `:pty_out` in PTY mode) — defaults to the spawner but can be
+reassigned at runtime with `set_owner/2`. This is what lets one process
+*attach* to a session another process supervises: hand the event stream
+over, attach, then hand it back.
+
+```elixir
+{:ok, c} = P.spawn(argv: ["/bin/cat"], stdio: :pty, owner: supervisor)
+# ... the supervisor drives it as a long-lived service ...
+
+# Borrow the session to attach interactively, then return it:
+:ok = P.set_owner(c, self())
+
+result =
+  try do
+    Linx.Tty.attach(:group_leader, c)
+  after
+    P.set_owner(c, supervisor)
+  end
+```
+
+Only one owner receives events at a time. If the workload terminates
+while the borrower holds it, the supervisor won't have seen the
+`:exited` / `:signaled` event; on reclaiming ownership it re-derives the
+state from `info/1` (level-triggered) rather than relying on having
+caught the message. That keeps `set_owner/2` a clean single-owner swap.
+
 
 ## Supervising a workload
 

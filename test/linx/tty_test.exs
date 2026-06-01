@@ -509,6 +509,74 @@ defmodule Linx.TtyTest do
       assert_received {:fake_gl_geometry, :columns}
       assert_received {:fake_gl_geometry, :rows}
     end
+
+    test "the detach sequence returns {:ok, :detached} and leaves the workload running" do
+      {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = Linx.Process.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      gl = fake_gl(self())
+      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+
+      send(self(), {:linx_tty_gl, :data, <<16, 17>>})
+
+      assert {:ok, :detached} =
+               Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil, %{
+                 key: <<16, 17>>,
+                 pending: ""
+               })
+
+      # Detaching does not stop the workload.
+      assert {:ok, %{stage: :running}} = Linx.Process.info(session)
+      :ok = Linx.Process.signal(session, 9)
+    end
+
+    test "the detach sequence is recognised when split across two reads" do
+      {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = Linx.Process.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      gl = fake_gl(self())
+      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+
+      send(self(), {:linx_tty_gl, :data, <<16>>})
+      send(self(), {:linx_tty_gl, :data, <<17>>})
+
+      assert {:ok, :detached} =
+               Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil, %{
+                 key: <<16, 17>>,
+                 pending: ""
+               })
+
+      :ok = Linx.Process.signal(session, 9)
+    end
+
+    test "a held detach-prefix byte is flushed to the workload when the sequence breaks" do
+      {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = Linx.Process.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      gl = fake_gl(self())
+      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+
+      # With detach key "QQ", a lone "Q" is held; the following "x" breaks the
+      # match, so "Qx" must reach the workload (and echo back from cat).
+      send(self(), {:linx_tty_gl, :data, "Q"})
+      send(self(), {:linx_tty_gl, :data, "x"})
+
+      spawn_link(fn ->
+        Process.sleep(1_000)
+        :ok = Linx.Process.signal(session, 15)
+      end)
+
+      assert {:ok, {:signaled, 15}} =
+               Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil, %{key: "QQ", pending: ""})
+
+      assert collect_fake_writes() =~ "Qx"
+    end
   end
 
   describe "__gl_reader__/2 (T6.1)" do

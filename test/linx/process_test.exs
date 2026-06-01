@@ -521,6 +521,47 @@ defmodule Linx.ProcessTest do
     end
   end
 
+  describe "set_owner/2" do
+    test "redirects lifecycle and pty_out to the new owner, and hands back" do
+      {:ok, session} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      test = self()
+      relay = spawn_link(fn -> relay_loop(test) end)
+      :ok = P.set_owner(session, relay)
+
+      # The PTY echoes input; that :pty_out now lands on the relay, which
+      # forwards it here tagged -- not on this test process directly.
+      :ok = P.pty_write(session, "ping\n")
+      assert_receive {:relayed, {:linx_process, :pty_out, bytes}}, 2_000
+      assert bytes =~ "ping"
+      refute_received {:linx_process, :pty_out, _}
+
+      # Hand ownership back; terminal events return to this process.
+      :ok = P.set_owner(session, test)
+      :ok = P.signal(session, 15)
+      assert_receive {:linx_process, :signaled, 15}, 2_000
+    end
+
+    test "returns {:error, :no_process} when the session GenServer is gone" do
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _}, 1_000
+
+      assert {:error, :no_process} = P.set_owner(dead, self())
+    end
+  end
+
+  defp relay_loop(dest) do
+    receive do
+      msg ->
+        send(dest, {:relayed, msg})
+        relay_loop(dest)
+    end
+  end
+
   describe "enter/2" do
     test "rejects a non-positive target pid" do
       assert_raise FunctionClauseError, fn -> P.enter(0, argv: ["/bin/true"]) end
