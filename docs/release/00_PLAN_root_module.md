@@ -1,6 +1,6 @@
 # 00 — Root `Linx` module
 
-**Status:** planned · **Gates 0.1.0:** yes (publish blocker) · **Topic:** root module / hexdocs front matter
+**Status:** done (commit d35cd3c) · **Gates 0.1.0:** yes (publish blocker) · **Topic:** root module / hexdocs front matter
 
 ## Problem
 

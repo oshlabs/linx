@@ -8,21 +8,28 @@ A library of low-level Linux primitives — netlink sockets, process and namespa
 
 Linx is a library of **primitives**, not a runtime. A container engine, a network orchestrator, or an observability tool is a *consumer* of Linx; the runtime concepts (images, supervision policies, request routing) live in those projects.
 
-> ⚠️ **Early days.** Linx is still settling — APIs are evolving and breaking changes are likely.
+> ⚠️ **0.x.** The API is still settling; minor releases may include breaking changes until 1.0.
 
 ## Installation
 
-Not on Hex yet. Depend on it from Git:
+Add `linx` to your dependencies:
 
 ```elixir
 def deps do
   [
-    {:linx, github: "oshlabs/linx"}
+    {:linx, "~> 0.1"}
   ]
 end
 ```
 
 **Requirements.** Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Windows. Elixir **1.15+** on Erlang/**OTP 26+** (the `Linx.Tty` group-leader attach mode depends on the OTP-26 `prim_tty` driver). Kernel **6.6 LTS** or newer; the nf_tables paths target 6.12 LTS.
+
+**Build prerequisites.** The kernel-interface NIFs and the process Port are compiled from C (`c_src/`) at install time, so a C compiler and the relevant headers must be present:
+
+- **Debian / Ubuntu:** `sudo apt install build-essential` *(add `erlang-dev` if you installed Erlang from apt rather than asdf/precompiled)*
+- **Arch:** `sudo pacman -S base-devel` *(the `erlang` / `erlang-nox` package already ships the Erlang headers)*
+
+`build-essential` / `base-devel` also pull in the libc and Linux UAPI headers the sources include.
 
 ## The headline composition
 
@@ -139,7 +146,7 @@ Kernel-level failures are structured exceptions — `%Linx.Cgroup.Error{}`, `%Li
 
 ## Docs
 
-`mix docs` generates HexDocs-style HTML under `_build/docs/`. The per-subsystem `EXAMPLES.md` and `REFERENCES.md` are surfaced there alongside the module docs. Once Linx has a first hex release, generated docs will be hosted at [hexdocs.pm/linx](https://hexdocs.pm/linx).
+Generated docs are hosted at [hexdocs.pm/linx](https://hexdocs.pm/linx). Locally, `mix docs` builds HexDocs-style HTML under `_build/docs/`; the per-subsystem `EXAMPLES.md` and `REFERENCES.md` are surfaced there alongside the module docs.
 
 ## License
 
