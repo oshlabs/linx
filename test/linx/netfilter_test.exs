@@ -177,6 +177,13 @@ defmodule Linx.NetfilterTest do
     end
   end
 
+  describe "log_listen/2 input validation" do
+    test "an out-of-range group is a tagged tuple, not an init crash" do
+      assert {:error, {:bad_group, 0}} = Netfilter.log_listen(self(), group: 0)
+      assert {:error, {:bad_group, nil}} = Netfilter.log_listen(self(), [])
+    end
+  end
+
   # N0 shipped scaffolding; N1 value types; N2 push/pull;
   # N3 NAT; N4 sets/maps/vmaps; N5 diff/:reconcile;
   # N6 subscribe (monitor); N7 log_listen (NFLOG).

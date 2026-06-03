@@ -480,6 +480,10 @@ defmodule Linx.ProcessTest do
       assert {:error, :no_process} = P.pty_set_winsize(session, {24, 80, 0, 0})
     end
 
+    test "pty_set_winsize/2 rejects a malformed size with a tagged tuple" do
+      assert {:error, {:bad_winsize, :nope}} = P.pty_set_winsize(self(), :nope)
+    end
+
     test "pty_set_winsize/2 accepts a struct-shaped map" do
       {:ok, session} =
         P.spawn(argv: ["/bin/sh", "-c", "stty size"], stdio: :pty)

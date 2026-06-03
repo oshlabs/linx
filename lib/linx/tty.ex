@@ -424,6 +424,9 @@ defmodule Linx.Tty do
     end
   end
 
+  def attach(target, _session, _opts) when target not in [:controlling, :group_leader],
+    do: {:error, {:bad_target, target}}
+
   # The configured detach sequence: typing these bytes inside an attach returns
   # `{:ok, :detached}` and leaves the workload running. Defaults to Ctrl-P
   # Ctrl-Q (docker's default); `detach_key: nil` (or "") disables it.

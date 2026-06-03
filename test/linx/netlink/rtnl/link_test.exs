@@ -4,6 +4,18 @@ defmodule Linx.Netlink.Rtnl.LinkTest do
   alias Linx.Netlink.{Attr, Error, Rtnl, Socket}
   alias Linx.Netlink.Rtnl.Link
 
+  describe "create_macvlan/create_ipvlan input validation" do
+    test "an unknown macvlan mode is a tagged tuple, not a crash" do
+      assert {:error, {:bad_mode, :nonsense}} =
+               Link.create_macvlan(:fake_socket, "ct0", "eth0", :nonsense)
+    end
+
+    test "an unknown ipvlan mode is a tagged tuple, not a crash" do
+      assert {:error, {:bad_mode, :nope}} =
+               Link.create_ipvlan(:fake_socket, "ct0", "eth0", :nope)
+    end
+  end
+
   describe "decode/1" do
     test "decodes an ifinfomsg body with IFLA attributes" do
       # ifinfomsg: AF_UNSPEC, ifi_type ARPHRD_ETHER (1), index 2, flags

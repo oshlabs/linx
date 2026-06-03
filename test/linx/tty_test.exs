@@ -82,6 +82,10 @@ defmodule Linx.TtyTest do
       assert Tty.format_error({:some, :tuple}) == "{:some, :tuple}"
       assert Tty.format_error(:weird_atom) == ":weird_atom"
     end
+
+    test "an unknown attach target is a tagged tuple, not a crash" do
+      assert {:error, {:bad_target, :bogus}} = Tty.attach(:bogus, self())
+    end
   end
 
   describe "attach/2 session-running guard" do

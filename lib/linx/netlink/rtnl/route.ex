@@ -302,7 +302,7 @@ defmodule Linx.Netlink.Rtnl.Route do
   defp coerce_ip(string) when is_binary(string), do: IP.parse(string)
 
   defp check_families(family, family), do: :ok
-  defp check_families(_, _), do: {:error, :family_mismatch}
+  defp check_families(a, b), do: {:error, {:family_mismatch, {a, b}}}
 
   defp check_prefix(:inet, p) when p in 0..32, do: :ok
   defp check_prefix(:inet6, p) when p in 0..128, do: :ok

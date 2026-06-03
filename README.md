@@ -140,10 +140,6 @@ Name a module after a mechanism only when the mechanism has shared shape worth f
 
 Each subsystem owns its living docs under `docs/<subsystem>/`: `EXAMPLES.md` (iex-style usage) and `REFERENCES.md` (external sources). Roadmap and forward-compatibility notes live in each subsystem's module doc.
 
-## Errors
-
-Kernel-level failures are structured exceptions — `%Linx.Cgroup.Error{}`, `%Linx.Mount.Error{}`, `%Linx.Netlink.Error{}`, and so on — never raw `{:error, :enoent}` tuples. Each carries a uniform `operation` / `errno` / `code` core (so you can pattern-match a specific failure) and implements `Exception`, so `raise` and `Exception.message/1` work. Caller-side input mistakes are tagged tuples (`{:error, {:bad_key, _}}`, `{:error, {:unknown_syscall, _}}`, …), distinct from kernel rejections; context-free lifecycle conditions stay bare atoms (`{:error, :not_ready}`, `{:error, :no_process}`).
-
 ## Docs
 
 Generated docs are hosted at [hexdocs.pm/linx](https://hexdocs.pm/linx). Locally, `mix docs` builds HexDocs-style HTML under `_build/docs/`; the per-subsystem `EXAMPLES.md` and `REFERENCES.md` are surfaced there alongside the module docs.

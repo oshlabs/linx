@@ -660,7 +660,13 @@ defmodule Linx.Netfilter do
   @spec log_listen(pid(), keyword()) :: {:ok, pid()} | {:error, term()}
   def log_listen(owner_pid \\ self(), opts \\ [])
       when is_pid(owner_pid) and is_list(opts) do
-    Linx.Netfilter.Log.start_link([owner: owner_pid] ++ opts)
+    group = Keyword.get(opts, :group)
+
+    if is_integer(group) and group in 1..65_535 do
+      Linx.Netfilter.Log.start_link([owner: owner_pid] ++ opts)
+    else
+      {:error, {:bad_group, group}}
+    end
   end
 
   @doc """

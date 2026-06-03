@@ -49,7 +49,7 @@ defmodule Linx.Netlink.Rtnl.ReconcileTest do
     test "a malformed route spec is a normalize error" do
       desired = %{routes: [{"10.0.0.0", 24, "fc00::1"}]}
 
-      assert {:error, {:normalize, {:route, :family_mismatch}}} =
+      assert {:error, {:normalize, {:route, {:family_mismatch, _}}}} =
                Reconcile.normalize(desired, @by_name, 76)
     end
 

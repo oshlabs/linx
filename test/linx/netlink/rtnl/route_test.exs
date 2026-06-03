@@ -148,7 +148,7 @@ defmodule Linx.Netlink.Rtnl.RouteTest do
     end
 
     test "still validates family agreement and prefix width" do
-      assert {:error, :family_mismatch} = Route.build("10.0.0.0", 24, "fc00::1", 0)
+      assert {:error, {:family_mismatch, _}} = Route.build("10.0.0.0", 24, "fc00::1", 0)
       assert {:error, {:bad_prefix, 40}} = Route.build("10.0.0.0", 40, "10.0.0.1", 0)
     end
   end

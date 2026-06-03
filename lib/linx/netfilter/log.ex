@@ -122,11 +122,6 @@ defmodule Linx.Netfilter.Log do
   def init(opts) do
     owner = Keyword.fetch!(opts, :owner)
     group = Keyword.fetch!(opts, :group)
-
-    unless is_integer(group) and group in 1..65_535 do
-      raise ArgumentError, "log_listen :group must be an integer 1..65535"
-    end
-
     netns = Keyword.get(opts, :netns, :host)
     copy_mode = Keyword.get(opts, :copy_mode, :meta)
     qthresh = Keyword.get(opts, :qthresh, 1)

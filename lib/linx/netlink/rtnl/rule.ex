@@ -190,7 +190,7 @@ defmodule Linx.Netlink.Rtnl.Rule do
   defp pick_family(f, nil), do: {:ok, f}
   defp pick_family(nil, f), do: {:ok, f}
   defp pick_family(f, f), do: {:ok, f}
-  defp pick_family(_, _), do: {:error, :family_mismatch}
+  defp pick_family(a, b), do: {:error, {:family_mismatch, {a, b}}}
 
   defp family_int(:inet), do: @af_inet
   defp family_int(:inet6), do: @af_inet6

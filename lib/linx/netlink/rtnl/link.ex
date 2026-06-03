@@ -144,10 +144,12 @@ defmodule Linx.Netlink.Rtnl.Link do
   """
   @spec create_macvlan(Socket.t(), binary, binary, :bridge | :private) :: :ok | {:error, term}
   def create_macvlan(socket, name, parent, mode \\ :bridge) do
-    create_kinded(socket, name, parent, %LinkInfo{
-      kind: "macvlan",
-      info_data: %LinkInfo.Macvlan{mode: macvlan_mode(mode)}
-    })
+    with {:ok, m} <- macvlan_mode(mode) do
+      create_kinded(socket, name, parent, %LinkInfo{
+        kind: "macvlan",
+        info_data: %LinkInfo.Macvlan{mode: m}
+      })
+    end
   end
 
   @doc """
@@ -157,10 +159,12 @@ defmodule Linx.Netlink.Rtnl.Link do
   """
   @spec create_ipvlan(Socket.t(), binary, binary, :l2 | :l3) :: :ok | {:error, term}
   def create_ipvlan(socket, name, parent, mode \\ :l3) do
-    create_kinded(socket, name, parent, %LinkInfo{
-      kind: "ipvlan",
-      info_data: %LinkInfo.Ipvlan{mode: ipvlan_mode(mode)}
-    })
+    with {:ok, m} <- ipvlan_mode(mode) do
+      create_kinded(socket, name, parent, %LinkInfo{
+        kind: "ipvlan",
+        info_data: %LinkInfo.Ipvlan{mode: m}
+      })
+    end
   end
 
   @doc """
@@ -335,11 +339,13 @@ defmodule Linx.Netlink.Rtnl.Link do
     end
   end
 
-  defp macvlan_mode(:bridge), do: @macvlan_mode_bridge
-  defp macvlan_mode(:private), do: @macvlan_mode_private
+  defp macvlan_mode(:bridge), do: {:ok, @macvlan_mode_bridge}
+  defp macvlan_mode(:private), do: {:ok, @macvlan_mode_private}
+  defp macvlan_mode(other), do: {:error, {:bad_mode, other}}
 
-  defp ipvlan_mode(:l3), do: @ipvlan_mode_l3
-  defp ipvlan_mode(:l2), do: @ipvlan_mode_l2
+  defp ipvlan_mode(:l3), do: {:ok, @ipvlan_mode_l3}
+  defp ipvlan_mode(:l2), do: {:ok, @ipvlan_mode_l2}
+  defp ipvlan_mode(other), do: {:error, {:bad_mode, other}}
 
   defp ack({:ok, _messages}), do: :ok
   defp ack({:error, _} = error), do: error

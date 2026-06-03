@@ -570,6 +570,8 @@ defmodule Linx.Process do
     pty_set_winsize(session, {r, c, xp, yp})
   end
 
+  def pty_set_winsize(_session, bad), do: {:error, {:bad_winsize, bad}}
+
   @doc """
   Returns `{:ok, session}` if the session was started with `stdio: :pty`
   — the session pid is itself the handle to read from (via
