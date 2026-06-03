@@ -1,7 +1,7 @@
 defmodule Linx.MixProject do
   use Mix.Project
 
-  @version "0.2.0"
+  @version "0.1.0"
   @source_url "https://github.com/oshlabs/linx"
 
   def project do
@@ -41,7 +41,7 @@ defmodule Linx.MixProject do
       # them on the consumer's machine. priv/ artifacts are built per-machine
       # and never shipped; the docs/ extras are dev-time `mix docs` material,
       # omitted to keep the package lean.
-      files: ~w(lib c_src mix.exs README.md LICENSE CHANGELOG.md),
+      files: ~w(lib c_src mix.exs README.md LICENSE),
       maintainers: ["Leon de Rooij"]
     ]
   end
@@ -65,7 +65,6 @@ defmodule Linx.MixProject do
       output: "_build/docs",
       extras: [
         "README.md",
-        "CHANGELOG.md",
         "AGENTS.md",
         "docs/netlink/EXAMPLES.md",
         "docs/netlink/REFERENCES.md",
