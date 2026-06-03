@@ -243,7 +243,7 @@ If the workload tries to allocate past `memory.max`, the kernel
 OOM-kills it inside the cgroup; `Linx.Process` then delivers the
 `{:linx_process, :signaled, 9}` you'd expect.
 
-## Reconciling limits declaratively
+## Declarative reconciliation
 
 The setters above are imperative. To describe the limits you *want* and have
 them converged — and re-converged after manual drift — use

@@ -132,7 +132,7 @@ rules = [
 {:ok, {^rules, :allow}} = Linx.Seccomp.to_rules(filter)
 ```
 
-## Error shapes
+## Errors
 
 Build errors are caller-actionable atoms — what the failing
 expression returned, and what to fix:
@@ -186,7 +186,7 @@ receive do {:linx_process, :ready, _} -> :ok end
 receive do {:linx_process, :running} -> :ok end
 ```
 
-## Composition with `Linx.Capabilities`
+## Composing with `Linx.Capabilities`
 
 Both subsystems hook into the same checkpoint window. The order
 matters in principle but not for correctness — caps and

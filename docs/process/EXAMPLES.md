@@ -306,7 +306,7 @@ flush()
 # => {:linx_process, :error, 2, :open_ns_user}      # ENOENT opening /proc/.../ns/user
 ```
 
-## Error paths
+## Errors
 
 ```elixir
 # Bad argv (no such binary) — execve fails after proceed/1.

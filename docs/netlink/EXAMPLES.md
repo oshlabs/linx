@@ -271,7 +271,7 @@ Rule.delete(sock, from: "10.0.0.0/24", table: 100)
 # => :ok
 ```
 
-## Reconciliation: diffing observed vs desired
+## Declarative reconciliation
 
 `Linx.Netlink.Rtnl.Diff` computes the minimal create / update / delete ops
 that converge observed kernel state onto a desired state — the diff half of

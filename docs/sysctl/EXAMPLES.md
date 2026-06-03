@@ -96,7 +96,7 @@ Common patterns:
 :ok = Linx.Sysctl.write("kernel.printk", [3, 4, 1, 7])
 ```
 
-## Validation: two error shapes
+## Errors
 
 `Linx.Sysctl` distinguishes caller-side input mistakes from kernel
 rejections, mirroring `Linx.User`'s `:bad_map` / `%Error{}` split.

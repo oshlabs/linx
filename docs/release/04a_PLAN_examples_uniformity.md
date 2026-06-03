@@ -1,6 +1,6 @@
 # 04a — EXAMPLES.md uniformity
 
-**Status:** planned · **Gates 0.1.0:** fast-follow-eligible, but cheap → do for 0.1.0 · **Topic:** per-subsystem EXAMPLES.md
+**Status:** done · **Gates 0.1.0:** fast-follow-eligible, but cheap → do for 0.1.0 · **Topic:** per-subsystem EXAMPLES.md
 
 Split from `04`. Companion: `04b` (REFERENCES.md links). EXAMPLES.md are runnable
 recipe pages, surfaced on hexdocs via `mix.exs` extras.
