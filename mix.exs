@@ -63,17 +63,33 @@ defmodule Linx.MixProject do
     <script type="module">
       import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
       mermaid.initialize({startOnLoad: false});
+
       let id = 0;
-      for (const code of document.querySelectorAll("pre code.mermaid")) {
-        const pre = code.parentElement;
-        const graph = code.textContent;
-        const {svg, bindFunctions} = await mermaid.render("mermaid-graph-" + id++, graph);
-        const div = document.createElement("div");
-        div.className = "mermaid";
-        div.innerHTML = svg;
-        if (bindFunctions) bindFunctions(div);
-        pre.replaceWith(div);
+      let rendering = false;
+
+      async function renderMermaid() {
+        if (rendering) return;
+        const blocks = document.querySelectorAll("pre code.mermaid");
+        if (blocks.length === 0) return;
+        rendering = true;
+        for (const code of blocks) {
+          const pre = code.parentElement;
+          const graph = code.textContent;
+          const {svg, bindFunctions} = await mermaid.render("mermaid-graph-" + id++, graph);
+          const div = document.createElement("div");
+          div.className = "mermaid";
+          div.innerHTML = svg;
+          if (bindFunctions) bindFunctions(div);
+          pre.replaceWith(div);
+        }
+        rendering = false;
       }
+
+      // ex_doc navigates client-side (fetch + innerHTML swap + pushState), so the
+      // one-shot render only covers the first full load. Re-render after each
+      // content swap; renderMermaid() is a cheap no-op when nothing is pending.
+      renderMermaid();
+      new MutationObserver(renderMermaid).observe(document.body, {childList: true, subtree: true});
     </script>
     """
   end
