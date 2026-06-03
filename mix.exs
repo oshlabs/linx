@@ -57,16 +57,46 @@ defmodule Linx.MixProject do
     ]
   end
 
+  # Injects mermaid.js so ```mermaid code blocks in the docs render as diagrams.
+  defp mermaid_script(:html) do
+    """
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+    <script>
+      document.addEventListener("DOMContentLoaded", function () {
+        mermaid.initialize({startOnLoad: false});
+        let id = 0;
+        for (const code of document.querySelectorAll("pre code.mermaid")) {
+          const pre = code.parentElement;
+          const graph = code.textContent;
+          mermaid.render("mermaid-graph-" + id++, graph).then(({svg, bindFunctions}) => {
+            const div = document.createElement("div");
+            div.className = "mermaid";
+            div.innerHTML = svg;
+            if (bindFunctions) bindFunctions(div);
+            pre.replaceWith(div);
+          });
+        }
+      });
+    </script>
+    """
+  end
+
+  defp mermaid_script(_), do: ""
+
   defp docs do
     [
       main: "readme",
       # Generated HTML lands under _build/, alongside other build artefacts,
       # so the top-level `doc/` slot stays free for the `docs/` source tree.
       output: "_build/docs",
+      # Render ```mermaid fenced blocks as diagrams (GitHub does this natively;
+      # ex_doc needs this script injected).
+      before_closing_body_tag: &mermaid_script/1,
       extras: [
         "README.md",
         "docs/netlink/EXAMPLES.md",
         "docs/netlink/REFERENCES.md",
+        {"docs/process/README.md", filename: "process-overview"},
         "docs/process/EXAMPLES.md",
         "docs/process/REFERENCES.md",
         "docs/tty/EXAMPLES.md",
@@ -95,7 +125,11 @@ defmodule Linx.MixProject do
       # into the moduledocs; Netfilter keeps a forward-looking DESIGN.md.
       groups_for_extras: [
         Netlink: ["docs/netlink/EXAMPLES.md", "docs/netlink/REFERENCES.md"],
-        Process: ["docs/process/EXAMPLES.md", "docs/process/REFERENCES.md"],
+        Process: [
+          "docs/process/README.md",
+          "docs/process/EXAMPLES.md",
+          "docs/process/REFERENCES.md"
+        ],
         Tty: ["docs/tty/EXAMPLES.md", "docs/tty/REFERENCES.md"],
         Cgroup: ["docs/cgroup/EXAMPLES.md", "docs/cgroup/REFERENCES.md"],
         Mount: ["docs/mount/EXAMPLES.md", "docs/mount/REFERENCES.md"],
