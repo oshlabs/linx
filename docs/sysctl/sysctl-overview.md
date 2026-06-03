@@ -54,7 +54,7 @@ flowchart LR
 
 - **API** — `Linx.Sysctl` (with `Linx.Sysctl.Entry` for walked rows,
   `Linx.Sysctl.Reconcile`, and `Linx.Sysctl.Error`)
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): reading/writing, walking the tree,
+- **Examples** — [sysctl-examples.md](sysctl-examples.md): reading/writing, walking the tree,
   the `:in` option, and reconciliation
-- **References** — [REFERENCES.md](REFERENCES.md): the `/proc/sys/` and
+- **References** — [sysctl-references.md](sysctl-references.md): the `/proc/sys/` and
   per-namespace kernel docs and man pages

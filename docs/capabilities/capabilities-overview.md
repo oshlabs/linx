@@ -48,7 +48,7 @@ flowchart TD
 - **API** — `Linx.Capabilities` (verbs `read/1`, `set_thread_sets/2`,
   `drop_bounding/2`, `set_ambient/2`), with `Linx.Capabilities.State` and
   `Linx.Capabilities.Error`
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): reading a process's sets, the
+- **Examples** — [capabilities-examples.md](capabilities-examples.md): reading a process's sets, the
   drop-to-minimum recipe, ambient caps
-- **References** — [REFERENCES.md](REFERENCES.md): `capabilities(7)` and the
+- **References** — [capabilities-references.md](capabilities-references.md): `capabilities(7)` and the
   per-thread syscall surface

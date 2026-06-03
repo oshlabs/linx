@@ -53,7 +53,7 @@ flowchart TD
 
 - **API** — `Linx.Mount` (with `Linx.Mount.Entry` for parsed mountinfo rows and
   `Linx.Mount.Error`)
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): reading the table, bind/remount/move,
+- **Examples** — [mount-examples.md](mount-examples.md): reading the table, bind/remount/move,
   cross-namespace mounts, the full `pivot_root` ritual
-- **References** — [REFERENCES.md](REFERENCES.md): the mount syscalls,
+- **References** — [mount-references.md](mount-references.md): the mount syscalls,
   propagation docs, and man pages

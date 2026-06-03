@@ -52,9 +52,9 @@ flowchart LR
 
 - **API** — `Linx.Netfilter` (with `Linx.Netfilter.Ruleset`, `Table`, `Chain`,
   `Rule`, `Set`/`Map`/`Vmap`, `Object`, `Monitor`, and `Log` for NFLOG)
-- **Design** — [DESIGN.md](DESIGN.md): the value-not-handle model, transactions,
+- **Design** — [netfilter-design.md](netfilter-design.md): the value-not-handle model, transactions,
   ownership, and reconcile rationale
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): building, pushing, pulling,
+- **Examples** — [netfilter-examples.md](netfilter-examples.md): building, pushing, pulling,
   diffing, monitoring, and NFLOG capture
-- **References** — [REFERENCES.md](REFERENCES.md): the nfnetlink protocol and
+- **References** — [netfilter-references.md](netfilter-references.md): the nfnetlink protocol and
   nft kernel surface

@@ -53,7 +53,7 @@ flowchart TD
 
 - **API** — `Linx.Cgroup` (with `Linx.Cgroup.Stats`, `Linx.Cgroup.Reconcile`,
   and `Linx.Cgroup.Error`)
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): lifecycle, limits, freeze/thaw,
+- **Examples** — [cgroup-examples.md](cgroup-examples.md): lifecycle, limits, freeze/thaw,
   counters, controller delegation, reconciliation
-- **References** — [REFERENCES.md](REFERENCES.md): the cgroup v2 kernel docs and
+- **References** — [cgroup-references.md](cgroup-references.md): the cgroup v2 kernel docs and
   man pages

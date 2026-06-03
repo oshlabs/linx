@@ -48,7 +48,7 @@ flowchart LR
 - **API** — `Linx.Tty` (verbs `attach/2`, `open_controlling_raw/0`,
   `restore_and_close/2`, `window_size/1`), with `Linx.Tty.WindowSize`,
   `Linx.Tty.Saved` (the restore blob), and `Linx.Tty.Error`
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): attaching, the `:controlling` vs
+- **Examples** — [tty-examples.md](tty-examples.md): attaching, the `:controlling` vs
   `:group_leader` modes, save/restore, window size
-- **References** — [REFERENCES.md](REFERENCES.md): `termios(3)`, `tty_ioctl(4)`,
+- **References** — [tty-references.md](tty-references.md): `termios(3)`, `tty_ioctl(4)`,
   the PTY man pages, and the Erlang I/O-protocol notes

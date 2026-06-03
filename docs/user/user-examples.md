@@ -317,7 +317,7 @@ my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integ
 # BEAM (uid 1000) will get EPERM here. The runc-style workaround
 # in that case is to have the workload itself do the /proc
 # remount after its execve (where it has full caps in its own
-# user ns); see docs/mount/EXAMPLES.md for the rootless caveat.
+# user ns); see docs/mount/mount-examples.md for the rootless caveat.
 :ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
 
 # Release -- the workload execs already inside its own user ns

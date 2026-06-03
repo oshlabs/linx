@@ -18,7 +18,7 @@ the verbs; the desired-state source of truth, the cadence, and the supervision
 are yours.
 
 Every reconcilable subsystem rhymes on the same four verbs (the template is
-`Linx.Netfilter`, which had them first — see `docs/netfilter/EXAMPLES.md`):
+`Linx.Netfilter`, which had them first — see `docs/netfilter/netfilter-examples.md`):
 
   * **observe** — read current kernel state into plain values;
   * **diff** — compute the minimal set of create/update/delete ops;
@@ -104,8 +104,8 @@ The same shape, per subsystem (full examples on each page):
   })
 ```
 
-See `docs/sysctl/EXAMPLES.md`, `docs/netlink/EXAMPLES.md`, and
-`docs/cgroup/EXAMPLES.md` for the subsystem-specific detail (value shapes,
+See `docs/sysctl/sysctl-examples.md`, `docs/netlink/netlink-examples.md`, and
+`docs/cgroup/cgroup-examples.md` for the subsystem-specific detail (value shapes,
 `revert_on_release`, route options, namespaces).
 
 ## Diffing without applying
@@ -143,7 +143,7 @@ Linx.Netlink.Rtnl.Monitor.unsubscribe(mon)
 ```
 
 You rarely wire this up by hand — the loop below does it for you. See
-`docs/netlink/EXAMPLES.md` for the standalone Monitor.
+`docs/netlink/netlink-examples.md` for the standalone Monitor.
 
 ## `Linx.Reconcile` — the opt-in loop
 
@@ -307,12 +307,12 @@ from the host at the spawn checkpoint. See `tank/README.md` and
   * `docs/reconcile/PLAN.md` — the design, the mechanism/policy seam, ownership
     and lifetime, the subsystem classification, and the decisions behind all of
     the above.
-  * `docs/sysctl/EXAMPLES.md` — "Declarative reconciliation" and "A long-lived
+  * `docs/sysctl/sysctl-examples.md` — "Declarative reconciliation" and "A long-lived
     loop (opt-in)".
-  * `docs/netlink/EXAMPLES.md` — "Reconciliation", "Single-shot reconcile", "the
+  * `docs/netlink/netlink-examples.md` — "Reconciliation", "Single-shot reconcile", "the
     Monitor", and "A long-lived loop (opt-in)".
-  * `docs/cgroup/EXAMPLES.md` — "Reconciling limits declaratively".
-  * `docs/process/EXAMPLES.md` — "Supervising a workload" (how a crashed
+  * `docs/cgroup/cgroup-examples.md` — "Reconciling limits declaratively".
+  * `docs/process/process-examples.md` — "Supervising a workload" (how a crashed
     workload is restarted via OTP, not a reconcile loop).
-  * `docs/netfilter/EXAMPLES.md` and `docs/netfilter/DESIGN.md` — the reference
+  * `docs/netfilter/netfilter-examples.md` and `docs/netfilter/netfilter-design.md` — the reference
     triad every other subsystem rhymes with.

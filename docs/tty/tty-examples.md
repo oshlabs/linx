@@ -372,7 +372,7 @@ If the workload exits *while detached*, the supervisor won't have seen
 the `:exited` event — so on reclaiming ownership it re-derives the
 workload's state from `Linx.Process.info/1` and acts on it. The
 lifecycle decision stays the supervisor's, level-triggered. See
-`Linx.Process.set_owner/2` and `docs/process/EXAMPLES.md`.
+`Linx.Process.set_owner/2` and `docs/process/process-examples.md`.
 
 ## Composing with `Linx.Process` namespaces
 

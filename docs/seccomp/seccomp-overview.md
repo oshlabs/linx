@@ -45,7 +45,7 @@ flowchart TD
 - **API** — `Linx.Seccomp` (verbs `allow_list/2`, `deny_list/2`, `from_rules/1`,
   `install/2`), with `Linx.Seccomp.Builder` (the fluent DSL),
   `Linx.Seccomp.Filter`, and `Linx.Seccomp.Error`
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): allow/deny lists, the Builder,
+- **Examples** — [seccomp-examples.md](seccomp-examples.md): allow/deny lists, the Builder,
   importing external profiles, default actions
-- **References** — [REFERENCES.md](REFERENCES.md): `seccomp(2)` and the cBPF /
+- **References** — [seccomp-references.md](seccomp-references.md): `seccomp(2)` and the cBPF /
   `seccomp_filter` kernel docs

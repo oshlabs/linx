@@ -91,78 +91,101 @@ defmodule Linx.MixProject do
       before_closing_body_tag: &mermaid_script/1,
       extras: [
         "README.md",
-        {"docs/netlink/README.md", filename: "netlink-overview"},
-        "docs/netlink/EXAMPLES.md",
-        "docs/netlink/REFERENCES.md",
-        {"docs/process/README.md", filename: "process-overview"},
-        "docs/process/EXAMPLES.md",
-        "docs/process/REFERENCES.md",
-        {"docs/tty/README.md", filename: "tty-overview"},
-        "docs/tty/EXAMPLES.md",
-        "docs/tty/REFERENCES.md",
-        {"docs/cgroup/README.md", filename: "cgroup-overview"},
-        "docs/cgroup/EXAMPLES.md",
-        "docs/cgroup/REFERENCES.md",
-        {"docs/mount/README.md", filename: "mount-overview"},
-        "docs/mount/EXAMPLES.md",
-        "docs/mount/REFERENCES.md",
-        {"docs/user/README.md", filename: "user-overview"},
-        "docs/user/EXAMPLES.md",
-        "docs/user/REFERENCES.md",
-        {"docs/capabilities/README.md", filename: "capabilities-overview"},
-        "docs/capabilities/EXAMPLES.md",
-        "docs/capabilities/REFERENCES.md",
-        {"docs/seccomp/README.md", filename: "seccomp-overview"},
-        "docs/seccomp/EXAMPLES.md",
-        "docs/seccomp/REFERENCES.md",
-        {"docs/sysctl/README.md", filename: "sysctl-overview"},
-        "docs/sysctl/EXAMPLES.md",
-        "docs/sysctl/REFERENCES.md",
-        {"docs/netfilter/README.md", filename: "netfilter-overview"},
-        "docs/netfilter/EXAMPLES.md",
-        "docs/netfilter/DESIGN.md",
-        "docs/netfilter/REFERENCES.md",
-        {"docs/reconcile/README.md", filename: "reconcile-overview"},
-        "docs/reconcile/EXAMPLES.md",
+        "docs/netlink/netlink-overview.md",
+        "docs/netlink/netlink-examples.md",
+        "docs/netlink/netlink-references.md",
+        "docs/process/process-overview.md",
+        "docs/process/process-examples.md",
+        "docs/process/process-references.md",
+        "docs/tty/tty-overview.md",
+        "docs/tty/tty-examples.md",
+        "docs/tty/tty-references.md",
+        "docs/cgroup/cgroup-overview.md",
+        "docs/cgroup/cgroup-examples.md",
+        "docs/cgroup/cgroup-references.md",
+        "docs/mount/mount-overview.md",
+        "docs/mount/mount-examples.md",
+        "docs/mount/mount-references.md",
+        "docs/user/user-overview.md",
+        "docs/user/user-examples.md",
+        "docs/user/user-references.md",
+        "docs/capabilities/capabilities-overview.md",
+        "docs/capabilities/capabilities-examples.md",
+        "docs/capabilities/capabilities-references.md",
+        "docs/seccomp/seccomp-overview.md",
+        "docs/seccomp/seccomp-examples.md",
+        "docs/seccomp/seccomp-references.md",
+        "docs/sysctl/sysctl-overview.md",
+        "docs/sysctl/sysctl-examples.md",
+        "docs/sysctl/sysctl-references.md",
+        "docs/netfilter/netfilter-overview.md",
+        "docs/netfilter/netfilter-examples.md",
+        "docs/netfilter/netfilter-design.md",
+        "docs/netfilter/netfilter-references.md",
+        "docs/reconcile/reconcile-overview.md",
+        "docs/reconcile/reconcile-examples.md",
         {:LICENSE, [title: "License"]}
       ],
       source_ref: "v#{@version}",
-      # Per-subsystem pages: EXAMPLES.md (recipes) + REFERENCES.md
-      # (citations). The retired PLAN.md/COVERAGE.md design docs moved
-      # into the moduledocs; Netfilter keeps a forward-looking DESIGN.md.
+      # Per-subsystem pages, each a unique basename (ex_doc resolves cross-doc
+      # links by basename): <sub>-overview (the group landing), <sub>-examples
+      # (recipes), <sub>-references (citations); Netfilter adds netfilter-design.
       groups_for_extras: [
         Netlink: [
-          "docs/netlink/README.md",
-          "docs/netlink/EXAMPLES.md",
-          "docs/netlink/REFERENCES.md"
+          "docs/netlink/netlink-overview.md",
+          "docs/netlink/netlink-examples.md",
+          "docs/netlink/netlink-references.md"
         ],
         Process: [
-          "docs/process/README.md",
-          "docs/process/EXAMPLES.md",
-          "docs/process/REFERENCES.md"
+          "docs/process/process-overview.md",
+          "docs/process/process-examples.md",
+          "docs/process/process-references.md"
         ],
-        Tty: ["docs/tty/README.md", "docs/tty/EXAMPLES.md", "docs/tty/REFERENCES.md"],
-        Cgroup: ["docs/cgroup/README.md", "docs/cgroup/EXAMPLES.md", "docs/cgroup/REFERENCES.md"],
-        Mount: ["docs/mount/README.md", "docs/mount/EXAMPLES.md", "docs/mount/REFERENCES.md"],
-        User: ["docs/user/README.md", "docs/user/EXAMPLES.md", "docs/user/REFERENCES.md"],
+        Tty: [
+          "docs/tty/tty-overview.md",
+          "docs/tty/tty-examples.md",
+          "docs/tty/tty-references.md"
+        ],
+        Cgroup: [
+          "docs/cgroup/cgroup-overview.md",
+          "docs/cgroup/cgroup-examples.md",
+          "docs/cgroup/cgroup-references.md"
+        ],
+        Mount: [
+          "docs/mount/mount-overview.md",
+          "docs/mount/mount-examples.md",
+          "docs/mount/mount-references.md"
+        ],
+        User: [
+          "docs/user/user-overview.md",
+          "docs/user/user-examples.md",
+          "docs/user/user-references.md"
+        ],
         Capabilities: [
-          "docs/capabilities/README.md",
-          "docs/capabilities/EXAMPLES.md",
-          "docs/capabilities/REFERENCES.md"
+          "docs/capabilities/capabilities-overview.md",
+          "docs/capabilities/capabilities-examples.md",
+          "docs/capabilities/capabilities-references.md"
         ],
         Seccomp: [
-          "docs/seccomp/README.md",
-          "docs/seccomp/EXAMPLES.md",
-          "docs/seccomp/REFERENCES.md"
+          "docs/seccomp/seccomp-overview.md",
+          "docs/seccomp/seccomp-examples.md",
+          "docs/seccomp/seccomp-references.md"
         ],
-        Sysctl: ["docs/sysctl/README.md", "docs/sysctl/EXAMPLES.md", "docs/sysctl/REFERENCES.md"],
+        Sysctl: [
+          "docs/sysctl/sysctl-overview.md",
+          "docs/sysctl/sysctl-examples.md",
+          "docs/sysctl/sysctl-references.md"
+        ],
         Netfilter: [
-          "docs/netfilter/README.md",
-          "docs/netfilter/EXAMPLES.md",
-          "docs/netfilter/DESIGN.md",
-          "docs/netfilter/REFERENCES.md"
+          "docs/netfilter/netfilter-overview.md",
+          "docs/netfilter/netfilter-examples.md",
+          "docs/netfilter/netfilter-design.md",
+          "docs/netfilter/netfilter-references.md"
         ],
-        Reconcile: ["docs/reconcile/README.md", "docs/reconcile/EXAMPLES.md"]
+        Reconcile: [
+          "docs/reconcile/reconcile-overview.md",
+          "docs/reconcile/reconcile-examples.md"
+        ]
       ],
       groups_for_modules: [
         "Public types": [

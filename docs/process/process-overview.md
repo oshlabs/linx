@@ -62,6 +62,6 @@ flowchart TD
 ## Learn more
 
 - **API** — `Linx.Process` (with `Linx.Process.Error` and `Linx.Process.Info`)
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): spawning, the checkpoint, namespaces,
+- **Examples** — [process-examples.md](process-examples.md): spawning, the checkpoint, namespaces,
   signals, stdio, attaching, supervision
-- **References** — [REFERENCES.md](REFERENCES.md): the kernel syscalls and man pages
+- **References** — [process-references.md](process-references.md): the kernel syscalls and man pages

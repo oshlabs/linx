@@ -51,5 +51,5 @@ flowchart LR
 
 - **API** — `Linx.Reconcile` (the opt-in loop) and `Linx.Reconcile.Source` (the
   per-subsystem plug-in contract)
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): the shared reconcile model, the
+- **Examples** — [reconcile-examples.md](reconcile-examples.md): the shared reconcile model, the
   opt-in loop, the Source contract, and how the pieces fit

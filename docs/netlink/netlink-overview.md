@@ -55,7 +55,7 @@ flowchart LR
   `Linx.Netlink.Attr`, `Linx.Netlink.Request`, `Linx.Netlink.Codec`) and the
   rtnetlink family `Linx.Netlink.Rtnl` (`Link`, `Address`, `Route`, `Neighbour`,
   `Rule`, plus `Monitor`)
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): sockets, namespaces, listing and
+- **Examples** — [netlink-examples.md](netlink-examples.md): sockets, namespaces, listing and
   mutating links, addresses, and routes
-- **References** — [REFERENCES.md](REFERENCES.md): the netlink protocols and
+- **References** — [netlink-references.md](netlink-references.md): the netlink protocols and
   kernel man pages

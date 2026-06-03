@@ -100,29 +100,29 @@ nginx_syscalls = ~w(read write openat close fstat brk mmap munmap mprotect
 :ok = Process.proceed(c)
 ```
 
-The subsystems are independent — you can spawn without namespaces, use netlink without spawning, drop caps without seccomp. They compose cleanly because they share one primitive (the checkpoint), not because there's a framework holding them together. Each subsystem's module doc carries the standalone walkthroughs and the progressively-richer composition recipes; `docs/<subsystem>/EXAMPLES.md` has runnable, copy-paste transcripts.
+The subsystems are independent — you can spawn without namespaces, use netlink without spawning, drop caps without seccomp. They compose cleanly because they share one primitive (the checkpoint), not because there's a framework holding them together. Each subsystem's module doc carries the standalone walkthroughs and the progressively-richer composition recipes; `docs/<subsystem>/<subsystem>-examples.md` has runnable, copy-paste transcripts.
 
 ## Subsystems
 
-- **`Linx.Process`** — `clone(2)` with namespace flags, `setns(2)`, signal delivery, `waitpid(2)`, and stdio plumbing (inherit / `/dev/null` / AF_UNIX / PTY). The syscalls run in a small external C *agent* — a Port, not a NIF — because `clone()`/`fork()`/`unshare()` inside the multithreaded BEAM corrupts the VM. The **checkpoint** (the parked window between `clone()` and `execve()`) is the seam every other subsystem hooks into. See [`docs/process/EXAMPLES.md`](docs/process/EXAMPLES.md).
+- **`Linx.Process`** — `clone(2)` with namespace flags, `setns(2)`, signal delivery, `waitpid(2)`, and stdio plumbing (inherit / `/dev/null` / AF_UNIX / PTY). The syscalls run in a small external C *agent* — a Port, not a NIF — because `clone()`/`fork()`/`unshare()` inside the multithreaded BEAM corrupts the VM. The **checkpoint** (the parked window between `clone()` and `execve()`) is the seam every other subsystem hooks into. See [`docs/process/process-overview.md`](docs/process/process-overview.md).
 
-- **`Linx.Tty`** — the terminal surface: `/dev/tty`, `termios(3)` (raw / save / restore), window-size ioctls, and `attach/2`, which pumps bytes between a `:pty` workload and the caller's terminal — `:controlling` for a local terminal, `:group_leader` for SSH / `:remsh` — restoring all transient terminal state unconditionally on return. See [`docs/tty/EXAMPLES.md`](docs/tty/EXAMPLES.md).
+- **`Linx.Tty`** — the terminal surface: `/dev/tty`, `termios(3)` (raw / save / restore), window-size ioctls, and `attach/2`, which pumps bytes between a `:pty` workload and the caller's terminal — `:controlling` for a local terminal, `:group_leader` for SSH / `:remsh` — restoring all transient terminal state unconditionally on return. See [`docs/tty/tty-overview.md`](docs/tty/tty-overview.md).
 
-- **`Linx.Cgroup`** — cgroup v2 resource control via direct `/sys/fs/cgroup` file I/O (no NIF, no `cgcreate`). The path is the handle; typed setters for memory / pids / cpu; live counters as `%Linx.Cgroup.Stats{}`; errors as `%Linx.Cgroup.Error{}`. See [`docs/cgroup/EXAMPLES.md`](docs/cgroup/EXAMPLES.md).
+- **`Linx.Cgroup`** — cgroup v2 resource control via direct `/sys/fs/cgroup` file I/O (no NIF, no `cgcreate`). The path is the handle; typed setters for memory / pids / cpu; live counters as `%Linx.Cgroup.Stats{}`; errors as `%Linx.Cgroup.Error{}`. See [`docs/cgroup/cgroup-overview.md`](docs/cgroup/cgroup-overview.md).
 
-- **`Linx.Mount`** — `mount(2)`, `umount2(2)`, `pivot_root(2)`, convenience verbs (`bind` / `remount` / `move`), a pure-Elixir `/proc/<pid>/mountinfo` parser, and a cross-namespace `:in` option that targets any process's mount namespace, not just the BEAM's. See [`docs/mount/EXAMPLES.md`](docs/mount/EXAMPLES.md).
+- **`Linx.Mount`** — `mount(2)`, `umount2(2)`, `pivot_root(2)`, convenience verbs (`bind` / `remount` / `move`), a pure-Elixir `/proc/<pid>/mountinfo` parser, and a cross-namespace `:in` option that targets any process's mount namespace, not just the BEAM's. See [`docs/mount/mount-overview.md`](docs/mount/mount-overview.md).
 
-- **`Linx.User`** — user-namespace identity mapping. Writes `/proc/<pid>/{uid_map,gid_map,setgroups}` to turn a `:user`-namespaced workload from a kernel-default `nobody` into a mapped identity — typically the rootless "root inside ↔ me outside" trick. Pure Elixir; maps are write-once per namespace. See [`docs/user/EXAMPLES.md`](docs/user/EXAMPLES.md).
+- **`Linx.User`** — user-namespace identity mapping. Writes `/proc/<pid>/{uid_map,gid_map,setgroups}` to turn a `:user`-namespaced workload from a kernel-default `nobody` into a mapped identity — typically the rootless "root inside ↔ me outside" trick. Pure Elixir; maps are write-once per namespace. See [`docs/user/user-overview.md`](docs/user/user-overview.md).
 
-- **`Linx.Capabilities`** — the five per-thread capability sets (effective / permitted / inheritable / bounding / ambient) as `MapSet`s of `:cap_*` atoms. Pure-Elixir read from `/proc/<pid>/status`; checkpoint-window write verbs (`drop_bounding` / `set_thread_sets` / `set_ambient`). Root-only for writes. See [`docs/capabilities/EXAMPLES.md`](docs/capabilities/EXAMPLES.md).
+- **`Linx.Capabilities`** — the five per-thread capability sets (effective / permitted / inheritable / bounding / ambient) as `MapSet`s of `:cap_*` atoms. Pure-Elixir read from `/proc/<pid>/status`; checkpoint-window write verbs (`drop_bounding` / `set_thread_sets` / `set_ambient`). Root-only for writes. See [`docs/capabilities/capabilities-overview.md`](docs/capabilities/capabilities-overview.md).
 
-- **`Linx.Seccomp`** — per-thread cBPF syscall filters compiled in pure Elixir (no `libseccomp`). `allow_list/2`, `deny_list/2`, and the `Linx.Seccomp.Builder` DSL produce a `%Linx.Seccomp.Filter{}`, installed at the checkpoint just before `execve`; `from_rules/1` / `to_rules/1` is the data seam external policy adapters (e.g. a Docker `seccomp.json` parser in a consumer) plug into. See [`docs/seccomp/EXAMPLES.md`](docs/seccomp/EXAMPLES.md).
+- **`Linx.Seccomp`** — per-thread cBPF syscall filters compiled in pure Elixir (no `libseccomp`). `allow_list/2`, `deny_list/2`, and the `Linx.Seccomp.Builder` DSL produce a `%Linx.Seccomp.Filter{}`, installed at the checkpoint just before `execve`; `from_rules/1` / `to_rules/1` is the data seam external policy adapters (e.g. a Docker `seccomp.json` parser in a consumer) plug into. See [`docs/seccomp/seccomp-overview.md`](docs/seccomp/seccomp-overview.md).
 
-- **`Linx.Sysctl`** — the `/proc/sys/` knobs `sysctl(8)` reads and writes, with dot-form keys, per-namespace routing, and the same `:in` option as `Linx.Mount`. Pure-Elixir host path; a small NIF handles the cross-namespace case. See [`docs/sysctl/EXAMPLES.md`](docs/sysctl/EXAMPLES.md).
+- **`Linx.Sysctl`** — the `/proc/sys/` knobs `sysctl(8)` reads and writes, with dot-form keys, per-namespace routing, and the same `:in` option as `Linx.Mount`. Pure-Elixir host path; a small NIF handles the cross-namespace case. See [`docs/sysctl/sysctl-overview.md`](docs/sysctl/sysctl-overview.md).
 
-- **`Linx.Netlink`** — an `AF_NETLINK` client with rtnetlink (links / addresses / routes / neighbours / rules / stats — full CRUD across IPv4 and IPv6) and nfnetlink (surfaced separately as `Linx.Netfilter`). Pure-Elixir encode/decode; a NIF only for entering another netns on a throwaway thread. `Rtnl.open({:pid, n})` binds a socket to a child's network namespace for its whole life. See [`docs/netlink/EXAMPLES.md`](docs/netlink/EXAMPLES.md).
+- **`Linx.Netlink`** — an `AF_NETLINK` client with rtnetlink (links / addresses / routes / neighbours / rules / stats — full CRUD across IPv4 and IPv6) and nfnetlink (surfaced separately as `Linx.Netfilter`). Pure-Elixir encode/decode; a NIF only for entering another netns on a throwaway thread. `Rtnl.open({:pid, n})` binds a socket to a child's network namespace for its whole life. See [`docs/netlink/netlink-overview.md`](docs/netlink/netlink-overview.md).
 
-- **`Linx.Netfilter`** — nf_tables (the iptables / ip6tables / ebtables successor) over `NETLINK_NETFILTER`. A `%Linx.Netfilter.Ruleset{}` is plain data; build it with the pipeline DSL or the compile-time `~NFT` sigil (real nft syntax), then `push` / `pull` / `diff`. Tables are **socket-owned by default** — when the supervisor that opened the socket dies, the kernel atomically destroys the rules. Live `subscribe/1` monitor + NFLOG `log_listen/2`, plus a `mix format` plugin for `~NFT` bodies and `.nft` files. See [`docs/netfilter/EXAMPLES.md`](docs/netfilter/EXAMPLES.md); [`docs/netfilter/DESIGN.md`](docs/netfilter/DESIGN.md) covers the road to `nft` feature-parity.
+- **`Linx.Netfilter`** — nf_tables (the iptables / ip6tables / ebtables successor) over `NETLINK_NETFILTER`. A `%Linx.Netfilter.Ruleset{}` is plain data; build it with the pipeline DSL or the compile-time `~NFT` sigil (real nft syntax), then `push` / `pull` / `diff`. Tables are **socket-owned by default** — when the supervisor that opened the socket dies, the kernel atomically destroys the rules. Live `subscribe/1` monitor + NFLOG `log_listen/2`, plus a `mix format` plugin for `~NFT` bodies and `.nft` files. See [`docs/netfilter/netfilter-overview.md`](docs/netfilter/netfilter-overview.md); [`docs/netfilter/netfilter-design.md`](docs/netfilter/netfilter-design.md) covers the road to `nft` feature-parity.
 
 - **Value types** — `Linx.IP` (with `Linx.IP.Subnet`) and `Linx.MAC`. Each has a compile-time sigil (`~IP`, `~MAC`) that `Inspect` round-trips. Decoded netlink fields carry these structs directly; verbs accept either the struct or the equivalent string.
 
@@ -138,11 +138,11 @@ Three kinds of top-level module, named for what they organize:
 
 Name a module after a mechanism only when the mechanism has shared shape worth factoring out; otherwise name it after the kernel subsystem or concept. `Namespace` isn't a subsystem — it's a cross-cutting flag on `clone(2)` — so it doesn't get its own module; the *operations* live where they belong.
 
-Each subsystem owns its living docs under `docs/<subsystem>/`: `EXAMPLES.md` (iex-style usage) and `REFERENCES.md` (external sources). Roadmap and forward-compatibility notes live in each subsystem's module doc.
+Each subsystem owns its living docs under `docs/<subsystem>/`: an overview, runnable examples, and external references. Roadmap and forward-compatibility notes live in each subsystem's module doc.
 
 ## Docs
 
-Generated docs are hosted at [hexdocs.pm/linx](https://hexdocs.pm/linx). Locally, `mix docs` builds HexDocs-style HTML under `_build/docs/`; the per-subsystem `EXAMPLES.md` and `REFERENCES.md` are surfaced there alongside the module docs.
+Generated docs are hosted at [hexdocs.pm/linx](https://hexdocs.pm/linx). Locally, `mix docs` builds HexDocs-style HTML under `_build/docs/`; the per-subsystem overview, examples, and references pages are surfaced there alongside the module docs.
 
 ## License
 

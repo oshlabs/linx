@@ -49,7 +49,7 @@ unprivileged host uid — full power in the container, none of it on the host.
 - **API** — `Linx.User` (verbs `setup_maps/2`, `set_uid_map/2`, `set_gid_map/2`,
   `deny_setgroups/1`, `read_uid_map/1`), with `Linx.User.Map` (a parsed map
   entry) and `Linx.User.Error`
-- **Examples** — [EXAMPLES.md](EXAMPLES.md): the rootless mapping, the
+- **Examples** — [user-examples.md](user-examples.md): the rootless mapping, the
   `{inside, outside, length}` shape, the setgroups dance, reading maps back
-- **References** — [REFERENCES.md](REFERENCES.md): `user_namespaces(7)` and the
+- **References** — [user-references.md](user-references.md): `user_namespaces(7)` and the
   procfs surface
