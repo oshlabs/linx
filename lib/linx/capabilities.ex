@@ -43,7 +43,7 @@ defmodule Linx.Capabilities do
 
   Set operations (`MapSet.union/2`, `MapSet.difference/2`) come for
   free; pattern-matching on cap atoms is natural; the bitmask
-  conversion happens in one place (`Linx.Capabilities.Constants`).
+  conversion happens in one place (Linx.Capabilities.Constants).
   The `:cap_` prefix is kept so the atom is unambiguous in a
   mailbox of mixed message types.
 
@@ -114,7 +114,7 @@ defmodule Linx.Capabilities do
       :cap_sys_admin
       :cap_net_bind_service
 
-  See `Linx.Capabilities.Constants.all/0` for the full set.
+  See Linx.Capabilities.Constants.all/0 for the full set.
   """
   @type cap :: atom()
 

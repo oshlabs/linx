@@ -20,7 +20,7 @@ defmodule Linx.Capabilities.State do
 
   Each field is a `MapSet` of `:cap_*` atoms — never `nil` and
   never an integer bitmask (that representation belongs to
-  `Linx.Capabilities.Constants` and the agent's syscalls).
+  Linx.Capabilities.Constants and the agent's syscalls).
 
   See `capabilities(7)` for the full semantics, especially
   "Transformation of capabilities during execve()".

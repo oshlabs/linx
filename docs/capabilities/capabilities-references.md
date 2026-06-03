@@ -35,7 +35,7 @@ non-obvious.
 - **[`include/uapi/linux/capability.h`](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/linux/capability.h)** — the UAPI header with
   the `CAP_*` constants and the capability data structures used
   by `capget/capset`. The 41-entry constants table in
-  `Linx.Capabilities.Constants` mirrors this.
+  Linx.Capabilities.Constants mirrors this.
 
 ## Adjacent userspace tooling (background, not implementation)
 

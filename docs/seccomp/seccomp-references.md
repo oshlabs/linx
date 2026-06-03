@@ -51,7 +51,7 @@ sections in the source when interpretation is non-obvious.
 
 ## Syscall number sources
 
-These are the canonical references for the `Linx.Seccomp.Syscalls`
+These are the canonical references for the Linx.Seccomp.Syscalls
 hand-curated table. See `Linx.Seccomp` "Extending the
 syscall table" for the procedure.
 

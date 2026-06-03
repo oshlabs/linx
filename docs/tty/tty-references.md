@@ -21,7 +21,7 @@ The syscalls and concepts `Linx.Tty` exposes:
   pseudoterminal overview. Pair to `Linx.Process`'s `stdio: :pty`.
 - [`ptmx(4)`](https://man7.org/linux/man-pages/man4/ptmx.4.html) —
   `/dev/ptmx` and the multiplexor PTY creation path. (Used by
-  `Linx.Process` originally; a future standalone `Linx.Tty.openpt/0`
+  `Linx.Process` originally; a future standalone Linx.Tty.openpt/0
   would land here.)
 
 ## Prior art

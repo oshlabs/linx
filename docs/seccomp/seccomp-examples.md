@@ -55,7 +55,7 @@ MapSet.size(Linx.Seccomp.Syscalls.all(:x86_64))
 # => 239
 ```
 
-`Linx.Seccomp.Syscalls` is `@moduledoc false` and the inverse is
+Linx.Seccomp.Syscalls is `@moduledoc false` and the inverse is
 intended for use by `Linx.Seccomp` itself, but it's accessible for
 introspection. See `Linx.Seccomp` "Extending the syscall
 table" for how to add an entry the table doesn't ship yet.

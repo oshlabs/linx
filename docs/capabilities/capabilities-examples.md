@@ -24,7 +24,7 @@ kernel Linx targets.
 ## Inspecting the constants table
 
 The 41-entry atom ↔ bit table lives in
-`Linx.Capabilities.Constants` (internal — `@moduledoc false`, but
+Linx.Capabilities.Constants (internal — `@moduledoc false`, but
 usable from `iex` for ad-hoc inspection):
 
 ```elixir

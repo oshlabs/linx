@@ -270,7 +270,7 @@ defmodule Linx.Netfilter.Expr do
   is tied to the rule — it lives and dies with it.
 
   `values` is the same shape as a `Linx.Netfilter.Set`'s elements
-  list. `key_type` is the same set of atoms `Set.new!/2` accepts.
+  list. `key_type` is the same set of atoms `Linx.Netfilter.Set.new!/2` accepts.
 
       Rule.build([
         Expr.payload(:tcp_dport),

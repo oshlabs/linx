@@ -160,8 +160,8 @@ on the same kernel tty buffer alternate-steal each other's bytes
 
 `attach/2` handles this internally: grabs the `prim_tty` state out
 of `user_drv` via `:sys.get_state(:user_drv)`, calls
-`:prim_tty.disable_reader/1` before the pump, and
-`:prim_tty.enable_reader/1` in the `try/after` so iex's reader
+:prim_tty.disable_reader/1 before the pump, and
+:prim_tty.enable_reader/1 in the `try/after` so iex's reader
 resumes cleanly on return. No caller action required.
 
 ### What `:controlling` does over SSH / `:remsh`
@@ -427,7 +427,7 @@ P.proceed(c)
 
 While `attach(:controlling, _)` is running, dragging the corner of
 your terminal emulator sends `SIGWINCH` to the BEAM. `attach/2`
-registers a `Linx.Tty.SigwinchHandler` on OTP's `:erl_signal_server`
+registers a Linx.Tty.SigwinchHandler on OTP's `:erl_signal_server`
 for the lifetime of the call, so each resize becomes a
 `{:linx_tty, :sigwinch}` message in the pump's mailbox — the pump
 re-reads `TIOCGWINSZ` on the local tty and forwards the new size

@@ -99,7 +99,7 @@ defmodule Linx.Tty do
   every other keystroke vanish.
 
   `attach/2` handles this by bracketing its pump with
-  `:prim_tty.disable_reader/1` / `:prim_tty.enable_reader/1`, reaching
+  :prim_tty.disable_reader/1 / :prim_tty.enable_reader/1, reaching
   into `user_drv`'s state via `:sys.get_state/1` to find the
   `prim_tty` state record. The competing reader process parks in an
   inner `receive` until attach returns and re-enables it. When the
@@ -110,7 +110,7 @@ defmodule Linx.Tty do
 
   `attach/2` also forwards live terminal resizes (drag the corner of
   your emulator while inside the attached shell) to the workload's
-  PTY. It does this by registering a `Linx.Tty.SigwinchHandler`
+  PTY. It does this by registering a Linx.Tty.SigwinchHandler
   instance on OTP's `:erl_signal_server` for the lifetime of the
   attach; each `SIGWINCH` becomes a `{:linx_tty, :sigwinch}` message
   in the pump's mailbox, which re-reads `TIOCGWINSZ` on the local tty
@@ -756,7 +756,7 @@ defmodule Linx.Tty do
         # Arm a SIGWINCH forwarder so the pump sees terminal-resize
         # events (drag the corner of the emulator while inside the
         # attached shell) and re-seeds the workload's PTY size on the
-        # fly. See `Linx.Tty.SigwinchHandler` and the module doc.
+        # fly. See Linx.Tty.SigwinchHandler and the module doc.
         arm_sigwinch(sigwinch_id)
 
         # Tell the workload's PTY about our terminal's current
@@ -861,7 +861,7 @@ defmodule Linx.Tty do
   # `:prim_tty.output_mode/1`, swaps in a `:prim_tty.reinit/2`'d
   # version with the new output mode, and shouts the previous mode
   # back to us through a one-shot ref. Same kind of OTP-internals
-  # coupling we already accept for `:prim_tty.disable_reader/1`.
+  # coupling we already accept for :prim_tty.disable_reader/1.
   # Scanning rather than hard-coding the field index makes us
   # resilient to ssh_cli / user_drv record-layout reshuffles across
   # OTP versions.
@@ -1013,7 +1013,7 @@ defmodule Linx.Tty do
   defp prim_tty_options_map?(%{input: _, output: _}), do: true
   defp prim_tty_options_map?(_), do: false
 
-  # Register a `Linx.Tty.SigwinchHandler` instance on
+  # Register a Linx.Tty.SigwinchHandler instance on
   # `:erl_signal_server` keyed by `{handler, id}` so multiple
   # concurrent attaches can coexist (each `id` is a unique ref made by
   # the caller). The signal disposition is set to `:handle` regardless

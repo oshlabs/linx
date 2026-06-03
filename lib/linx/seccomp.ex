@@ -73,7 +73,7 @@ defmodule Linx.Seccomp do
 
   ## Forward compatibility
 
-  `Linx.Seccomp.Syscalls.from_number/2` returns `:unknown` for a syscall
+  Linx.Seccomp.Syscalls.from_number/2 returns `:unknown` for a syscall
   number outside Linx's per-arch table rather than crashing, so decoding
   a filter that references a newer syscall degrades gracefully.
   Construction is strict the other way: an unknown syscall *atom* is
@@ -277,7 +277,7 @@ defmodule Linx.Seccomp do
       per-rule actions isn't a recognised verdict.
     * `{:error, {:unknown_syscall, atom}}` — a rule names a syscall
       atom that isn't in the per-arch table. See
-      `Linx.Seccomp.Syscalls` "Extending this table" for how to
+      Linx.Seccomp.Syscalls "Extending this table" for how to
       add one.
     * `{:error, {:duplicate_rule, atom}}` — the same syscall
       appears in more than one rule.
