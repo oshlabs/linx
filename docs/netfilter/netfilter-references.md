@@ -1,4 +1,4 @@
-# Linx.Netfilter references
+# References
 
 The kernel docs, man pages, source files, and external designs this
 subsystem encodes or learns from. Cite specific sections in the

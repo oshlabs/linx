@@ -1,4 +1,4 @@
-# Linx.Sysctl references
+# References
 
 The kernel docs and man pages this subsystem encodes. Cite specific
 sections in the source when interpretation is non-obvious.

@@ -1,11 +1,10 @@
-# Linx.Process
+# Overview
 
 `Linx.Process` spawns a Linux workload through the **checkpoint**: the window
 between `clone(2)` and `execve(2)` where the child is parked — fully created but
 not yet running — so every other subsystem can configure it before its first
 instruction.
 
-## Overview
 
 A plain `fork`+`exec` gives you no moment to act between "the process exists" and
 "the program is running". `Linx.Process` opens exactly that moment. It `clone(2)`s

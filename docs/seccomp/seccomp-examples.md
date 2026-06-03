@@ -1,4 +1,4 @@
-# Linx.Seccomp examples
+# Examples
 
 Hands-on examples of `Linx.Seccomp` — Linux syscall-filter
 primitives.

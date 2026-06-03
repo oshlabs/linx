@@ -1,4 +1,4 @@
-# Declarative reconciliation examples
+# Examples
 
 A tour of Linx's declarative-configuration surface: you describe the kernel
 state you *want*, and a reconciler diffs it against what the kernel actually has

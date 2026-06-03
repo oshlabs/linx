@@ -1,10 +1,9 @@
-# Linx.Sysctl
+# Overview
 
 `Linx.Sysctl` reads and writes the kernel's tunable parameters — the `/proc/sys/`
 knobs `sysctl(8)` exposes — on the host or, crucially, inside another process's
 namespaces.
 
-## Overview
 
 Sysctls are the kernel's ~1500 named scalar tunables, spanning networking, the
 VM, the filesystem layer, IPC, and kernel-wide policy. Each is a file under

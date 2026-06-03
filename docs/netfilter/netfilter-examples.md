@@ -1,4 +1,4 @@
-# Linx.Netfilter examples
+# Examples
 
 Hands-on examples of `Linx.Netfilter` — the modern firewall surface
 (nf_tables) via nfnetlink, plus live ruleset monitoring and NFLOG

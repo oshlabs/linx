@@ -1,10 +1,9 @@
-# Linx.Reconcile
+# Overview
 
 `Linx.Reconcile` is a thin, opt-in control loop that keeps one kernel subsystem
 converged on a desired state — re-observing and re-diffing on a timer, and
 reacting within milliseconds to a change event when the subsystem offers one.
 
-## Overview
 
 A single `reconcile` call — observe current state, diff against desired, apply
 the minimal patch — is correct exactly once. Real systems drift: a manual `ip`

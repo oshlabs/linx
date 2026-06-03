@@ -1,4 +1,4 @@
-# Linx.Sysctl examples
+# Examples
 
 Hands-on examples of `Linx.Sysctl` — the kernel-tunable-parameter
 surface, the `/proc/sys/` knobs that `sysctl(8)` reads and writes.

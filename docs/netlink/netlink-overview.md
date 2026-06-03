@@ -1,10 +1,9 @@
-# Linx.Netlink
+# Overview
 
 `Linx.Netlink` is Elixir's voice on the kernel's `AF_NETLINK` bus — the socket
 through which userspace asks the kernel to *do* things and *report* state, with
 the wire format encoded and decoded in pure Elixir.
 
-## Overview
 
 Netlink is the kernel's structured request/reply (and broadcast) channel for a
 whole family of subsystems: the networking stack via rtnetlink, the firewall via

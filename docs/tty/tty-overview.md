@@ -1,11 +1,10 @@
-# Linx.Tty
+# Overview
 
 `Linx.Tty` is the terminal surface for an interactive workload — the
 `termios`, `/dev/tty`, and PTY `ioctl` primitives plus the `attach/2` byte
 pump that wires a `stdio: :pty` workload to the caller's terminal, giving the
 BEAM a `docker attach` experience.
 
-## Overview
 
 Terminals are a coherent kernel concept: a line discipline, the controlling-
 terminal abstraction behind `/dev/tty`, the `termios(3)` struct, and the

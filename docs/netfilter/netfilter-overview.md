@@ -1,10 +1,9 @@
-# Linx.Netfilter
+# Overview
 
 `Linx.Netfilter` is the kernel's modern firewall — nf_tables — modelled as plain
 Elixir values, applied atomically, and (optionally) kept live by reconciling the
 value you want against the rules the kernel actually holds.
 
-## Overview
 
 nf_tables is a single coherent kernel surface — packet filtering, NAT,
 connection tracking, and packet-event streams — reached over the

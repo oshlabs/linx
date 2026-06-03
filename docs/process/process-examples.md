@@ -1,4 +1,4 @@
-# Linx.Process examples
+# Examples
 
 Hands-on examples of `Linx.Process` — the clone-with-namespaces and
 related process-lifecycle primitives.

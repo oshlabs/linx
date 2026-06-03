@@ -1,4 +1,4 @@
-# Linx examples
+# Examples
 
 Hands-on examples of using `Linx.Netlink` against the live Linux kernel.
 

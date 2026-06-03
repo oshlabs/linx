@@ -1,10 +1,9 @@
-# Linx.Cgroup
+# Overview
 
 `Linx.Cgroup` puts a Linux workload under a resource ceiling — memory, CPU,
 process count — and reads back what it actually consumed, using cgroup v2 and
 nothing but the filesystem the kernel already exposes.
 
-## Overview
 
 cgroup v2 is how Linux accounts for and limits what a tree of processes may
 consume. Its entire interface is a directory under `/sys/fs/cgroup`: each cgroup

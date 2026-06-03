@@ -1,11 +1,10 @@
-# Linx.Capabilities
+# Overview
 
 `Linx.Capabilities` reads and shrinks a workload's Linux **capabilities** —
 the fine-grained powers that replace the all-or-nothing "root vs not-root"
 distinction — so a process runs with exactly the privileges it needs and no
 more.
 
-## Overview
 
 Linux splits the historical omnipotence of root into ~41 discrete capabilities
 (`CAP_NET_ADMIN`, `CAP_SYS_ADMIN`, `CAP_NET_BIND_SERVICE`, …), each held in one

@@ -1,10 +1,9 @@
-# Linx.Mount
+# Overview
 
 `Linx.Mount` shapes the filesystem hierarchy a process sees — mounting,
 unmounting, bind-mounting, and pivoting the root — and reads the mount table
 back, in the BEAM's own mount namespace or inside another process's.
 
-## Overview
 
 A mount namespace is the set of mounts a process sees as its filesystem tree.
 `Linx.Mount` wraps the classic syscalls that build and reshape it — `mount(2)`,

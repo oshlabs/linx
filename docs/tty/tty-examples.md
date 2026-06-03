@@ -1,4 +1,4 @@
-# Linx.Tty examples
+# Examples
 
 Hands-on examples of `Linx.Tty` — the terminal/PTY primitives.
 

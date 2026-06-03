@@ -1,4 +1,4 @@
-# Linx.Mount examples
+# Examples
 
 Hands-on examples of `Linx.Mount` — the filesystem-mount primitives.
 

@@ -1,4 +1,4 @@
-# Linx.Capabilities examples
+# Examples
 
 Hands-on examples of `Linx.Capabilities` — Linux capability
 primitives.

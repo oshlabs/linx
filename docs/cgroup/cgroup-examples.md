@@ -1,4 +1,4 @@
-# Linx.Cgroup examples
+# Examples
 
 Hands-on examples of `Linx.Cgroup` — the cgroup v2 primitives.
 

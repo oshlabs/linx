@@ -1,10 +1,9 @@
-# Linx.User
+# Overview
 
 `Linx.User` configures a workload's identity inside a Linux **user
 namespace** — the uid/gid mappings that decide who the process *is* on the
 inside versus who it really is on the host.
 
-## Overview
 
 A user namespace gives a process its own uid/gid space: an id inside the
 namespace can map to a completely different id outside it. The headline trick

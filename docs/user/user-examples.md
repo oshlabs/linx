@@ -1,4 +1,4 @@
-# Linx.User examples
+# Examples
 
 Hands-on examples of `Linx.User` — the user-namespace configuration
 primitives.

@@ -1,10 +1,9 @@
-# Linx.Seccomp
+# Overview
 
 `Linx.Seccomp` builds and installs **seccomp** syscall filters — small kernel
 programs that gate every syscall a workload makes — so a process drops to a
 documented syscall envelope before its first instruction.
 
-## Overview
 
 A seccomp filter is a tiny cBPF program the kernel runs on every syscall entry;
 its return value decides whether the syscall is allowed, fails with an errno,
