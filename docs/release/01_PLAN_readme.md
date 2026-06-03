@@ -1,6 +1,6 @@
 # 01 — README (top-level)
 
-**Status:** done (commit 70f127f) · **Gates 0.1.0:** yes (publish blocker) · **Topic:** README / hexdocs landing page
+**Status:** done · **Gates 0.1.0:** yes (publish blocker) · **Topic:** README / hexdocs landing page
 
 ## Problem
 
