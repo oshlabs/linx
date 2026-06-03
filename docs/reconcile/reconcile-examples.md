@@ -299,10 +299,9 @@ without Linx becoming the runtime it refuses to be. That composite is the
 consumer's, built by composing `Linx.Process`, the single-shot reconciles, and
 OTP supervision directly.
 
-`tank/` is a worked example of exactly that: a nested app that consumes only
-Linx's public API to build a supervised container whose network is reconciled
-from the host at the spawn checkpoint. See `tank/README.md` and
-`tank/lib/tank/container.ex`.
+[Tank](https://github.com/oshlabs/tank) is a worked example of exactly that: a
+separate app that consumes only Linx's public API to build a supervised container
+whose network is reconciled from the host at the spawn checkpoint.
 
 ## See also
 

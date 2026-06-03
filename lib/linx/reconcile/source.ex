@@ -49,7 +49,7 @@ defmodule Linx.Reconcile.Source do
   shipping: if subsystems implement these callbacks by clean delegation, the
   loop is trivially worth it; if atomicity or ownership force contortions, we
   stop at the single-shot `reconcile` + Monitor primitives and let consumers
-  wrap them directly. The `tank/` PoC and the sysctl/rtnl adapters cleared it.
+  wrap them directly. An out-of-tree PoC and the sysctl/rtnl adapters cleared it.
   """
 
   @typedoc "Opaque namespace handle, in the shape the subsystem already accepts."

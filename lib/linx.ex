@@ -69,15 +69,6 @@ defmodule Linx do
   always-present Linux baseline Linx requires (`Linx.Process`, `Linx.Netlink`,
   `Linx.Mount`, `Linx.Tty`) omit it by design.
 
-  ## Errors
-
-  Kernel-level failures are structured `%Linx.X.Error{}` exceptions
-  (`Linx.Mount.Error`, `Linx.Netlink.Error`, …) — never raw errno tuples —
-  carrying a uniform `errno`/`code` core and implementing `Exception`. Input
-  mistakes are tagged tuples (`{:error, {:bad_*, _}}`); context-free lifecycle
-  conditions are bare atoms (`{:error, :no_process}`). See the README's *Errors*
-  section for the full contract.
-
   ## Declarative reconciliation
 
   Several subsystems expose the `pull` / `diff` / `push(mode: :reconcile)` /
