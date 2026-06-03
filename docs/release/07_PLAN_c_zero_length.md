@@ -1,6 +1,6 @@
 # 07 — C zero-length edge cases (+ load-bearing comment)
 
-**Status:** planned · **Gates 0.1.0:** yes (C correctness, cheap) · **Topic:** native code hardening
+**Status:** done · **Gates 0.1.0:** yes (C correctness, cheap) · **Topic:** native code hardening
 
 Small, localized C edits from the pre-release C review. All four sites are reachable today
 only via the public Elixir API (which validates inputs), so these are latent — not live —

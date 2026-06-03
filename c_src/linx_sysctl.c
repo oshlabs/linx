@@ -167,7 +167,13 @@ static char **list_to_cstr_array(ErlNifEnv *env, ERL_NIF_TERM list, int *out_n)
 	if (!enif_get_list_length(env, list, &length))
 		return NULL;
 
-	char **arr = enif_alloc(length * sizeof(char *));
+	/* Bound the length (the multiply below could overflow) and treat an
+	 * empty list as a valid zero-element array: enif_alloc(0) may return
+	 * NULL, which the caller would misread as failure. */
+	if (length > 4096)
+		return NULL;
+
+	char **arr = enif_alloc((length ? length : 1) * sizeof(char *));
 	if (!arr)
 		return NULL;
 
@@ -353,7 +359,7 @@ static void *read_worker(void *arg)
 {
 	struct read_job *j = arg;
 
-	int *fds = enif_alloc(j->n_ns * sizeof(int));
+	int *fds = enif_alloc((j->n_ns ? j->n_ns : 1) * sizeof(int));
 	if (!fds) {
 		j->r.err = ENOMEM;
 		j->r.stage = "open_ns";
@@ -453,7 +459,7 @@ static void *write_worker(void *arg)
 {
 	struct write_job *j = arg;
 
-	int *fds = enif_alloc(j->n_ns * sizeof(int));
+	int *fds = enif_alloc((j->n_ns ? j->n_ns : 1) * sizeof(int));
 	if (!fds) {
 		j->r.err = ENOMEM;
 		j->r.stage = "open_ns";
@@ -557,8 +563,14 @@ static void free_list_nodes(struct list_node *head)
  * (NUL-terminated at [len]). Appends entries to *head. Silently
  * skips unreadable directories and unreadable files (matches the
  * Elixir-side walker behaviour). */
-static void walk_dir(char *buf, size_t len, size_t cap, struct list_node **head)
+static void walk_dir(char *buf, size_t len, size_t cap, struct list_node **head,
+                     unsigned depth)
 {
+	/* /proc/sys is shallow; cap recursion so a pathological tree cannot
+	 * blow the worker thread stack. */
+	if (depth > 32)
+		return;
+
 	DIR *d = opendir(buf);
 	if (!d)
 		return;
@@ -584,7 +596,7 @@ static void walk_dir(char *buf, size_t len, size_t cap, struct list_node **head)
 		struct stat st;
 		if (stat(buf, &st) == 0) {
 			if (S_ISDIR(st.st_mode)) {
-				walk_dir(buf, new_len, cap, head);
+				walk_dir(buf, new_len, cap, head, depth + 1);
 			} else if (S_ISREG(st.st_mode)) {
 				char *value = NULL;
 				size_t value_len = 0;
@@ -635,7 +647,7 @@ static void *list_worker(void *arg)
 {
 	struct list_job *j = arg;
 
-	int *fds = enif_alloc(j->n_ns * sizeof(int));
+	int *fds = enif_alloc((j->n_ns ? j->n_ns : 1) * sizeof(int));
 	if (!fds) {
 		j->r.err = ENOMEM;
 		j->r.stage = "open_ns";
@@ -670,7 +682,7 @@ static void *list_worker(void *arg)
 	}
 	memcpy(buf, j->root, root_len + 1);
 
-	walk_dir(buf, root_len, sizeof(buf), &j->entries);
+	walk_dir(buf, root_len, sizeof(buf), &j->entries, 0);
 
 cleanup:
 	for (int i = 0; i < j->n_ns; i++)

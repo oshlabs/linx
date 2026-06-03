@@ -1135,6 +1135,8 @@ static int child_read_command(int p2c_r, int c2p_w)
 		/* The BPF binary lives inline in `buf` after our 4-byte
 		 * binary header. ei_decode_binary copies it out; we then
 		 * hand the copy to apply_seccomp and free after. */
+		if (bsize <= 0)
+			child_fail(c2p_w, EINVAL, STAGE_SECCOMP_INSTALL);
 		void *bpf = malloc((size_t)bsize);
 		if (!bpf)
 			child_fail(c2p_w, ENOMEM, STAGE_SECCOMP_INSTALL);
@@ -1899,7 +1901,9 @@ int main(void)
 		/* CLONE_NEW* flags chosen by the request, OR'd with SIGCHLD so
 		 * waitpid sees the child the way it does for fork(2). The
 		 * child runs on its own private stack -- 1 MiB is ample for
-		 * the work it does (no recursion, no large frames). */
+		 * the work it does (no recursion, no large frames). Static and load-bearing: the
+		 * agent clones once per process lifetime, so this buffer is never
+		 * reused; a second spawn would clobber it. Keep the agent single-shot. */
 		static char child_stack[CHILD_STACK_SIZE];
 		int flags = req.ns_flags | SIGCHLD;
 
