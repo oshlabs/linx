@@ -1,6 +1,6 @@
 # 05 — Per-directory README.md for docs/*/
 
-**Status:** planned · **Gates 0.1.0:** yes (public-facing) · **Topic:** subsystem overview / doc-group landing pages
+**Status:** done · **Gates 0.1.0:** yes (public-facing) · **Topic:** subsystem overview / doc-group landing pages
 
 The largest docs topic: a `README.md` in every `docs/<subsystem>/` that serves as the
 **high-level overview** and landing page for that subsystem's doc group on hexdocs.
