@@ -314,5 +314,5 @@ from the host at the spawn checkpoint. See `tank/README.md` and
   * `docs/cgroup/cgroup-examples.md` — "Reconciling limits declaratively".
   * `docs/process/process-examples.md` — "Supervising a workload" (how a crashed
     workload is restarted via OTP, not a reconcile loop).
-  * `docs/netfilter/netfilter-examples.md` and `docs/netfilter/netfilter-design.md` — the reference
+  * `docs/netfilter/netfilter-examples.md` — the reference
     triad every other subsystem rhymes with.

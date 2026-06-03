@@ -92,6 +92,11 @@ defmodule Linx.Netfilter do
   Both call the same validator-setter functions; both produce the
   same value.
 
+  The setters use `add_*` (`add_table` / `add_chain` / `add_rule`), not
+  the `create_*` of `Linx.Cgroup` or `Linx.Netlink.Rtnl`, deliberately:
+  `add_*` inserts into a *value*, while `create` materialises a kernel
+  object — different acts, different verbs.
+
   ## Composition with `Linx.Process`
 
   Same shape as every other Linx subsystem: configure the child's

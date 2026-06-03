@@ -120,7 +120,6 @@ defmodule Linx.MixProject do
         "docs/sysctl/sysctl-references.md",
         "docs/netfilter/netfilter-overview.md",
         "docs/netfilter/netfilter-examples.md",
-        "docs/netfilter/netfilter-design.md",
         "docs/netfilter/netfilter-references.md",
         "docs/reconcile/reconcile-overview.md",
         "docs/reconcile/reconcile-examples.md",
@@ -129,7 +128,7 @@ defmodule Linx.MixProject do
       source_ref: "v#{@version}",
       # Per-subsystem pages, each a unique basename (ex_doc resolves cross-doc
       # links by basename): <sub>-overview (the group landing), <sub>-examples
-      # (recipes), <sub>-references (citations); Netfilter adds netfilter-design.
+      # (recipes), and <sub>-references (citations).
       groups_for_extras: [
         Netlink: [
           "docs/netlink/netlink-overview.md",
@@ -179,7 +178,6 @@ defmodule Linx.MixProject do
         Netfilter: [
           "docs/netfilter/netfilter-overview.md",
           "docs/netfilter/netfilter-examples.md",
-          "docs/netfilter/netfilter-design.md",
           "docs/netfilter/netfilter-references.md"
         ],
         Reconcile: [
