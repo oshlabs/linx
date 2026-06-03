@@ -13,8 +13,8 @@ actually apply.
 ## Detecting capability support
 
 ```elixir
-iex> Linx.Capabilities.supported?()
-true
+Linx.Capabilities.supported?()
+# => true
 ```
 
 `supported?/0` returns true iff `/proc/self/status` contains a
@@ -28,17 +28,17 @@ The 41-entry atom ↔ bit table lives in
 usable from `iex` for ad-hoc inspection):
 
 ```elixir
-iex> Linx.Capabilities.Constants.all() |> MapSet.size()
-41
+Linx.Capabilities.Constants.all() |> MapSet.size()
+# => 41
 
-iex> Linx.Capabilities.Constants.to_bit(:cap_net_admin)
-12
+Linx.Capabilities.Constants.to_bit(:cap_net_admin)
+# => 12
 
-iex> Linx.Capabilities.Constants.from_bit(40)
-:cap_checkpoint_restore
+Linx.Capabilities.Constants.from_bit(40)
+# => :cap_checkpoint_restore
 
-iex> Linx.Capabilities.Constants.from_bit(50)
-:unknown
+Linx.Capabilities.Constants.from_bit(50)
+# => :unknown
 ```
 
 `:unknown` is the forward-compat marker for bits past the table —
@@ -53,11 +53,11 @@ The canonical representation everywhere in this subsystem is a
 toolbox:
 
 ```elixir
-iex> all = Linx.Capabilities.Constants.all()
-iex> keep = MapSet.new([:cap_net_bind_service, :cap_setuid])
-iex> drop = MapSet.difference(all, keep)
-iex> MapSet.size(drop)
-39
+all = Linx.Capabilities.Constants.all()
+keep = MapSet.new([:cap_net_bind_service, :cap_setuid])
+drop = MapSet.difference(all, keep)
+MapSet.size(drop)
+# => 39
 ```
 
 That `drop` set is exactly what gets passed to `drop_bounding/2`.
@@ -68,21 +68,21 @@ That `drop` set is exactly what gets passed to `drop_bounding/2`.
 Accepts a pid integer or `:self`:
 
 ```elixir
-iex> {:ok, state} = Linx.Capabilities.read(:self)
-{:ok, #Linx.Capabilities.State<eff=0 prm=0 inh=0 bnd=41 amb=0>}
+{:ok, state} = Linx.Capabilities.read(:self)
+# => {:ok, #Linx.Capabilities.State<eff=0 prm=0 inh=0 bnd=41 amb=0>}
 
-iex> state.bounding
+state.bounding
 #MapSet<[:cap_chown, :cap_dac_override, :cap_dac_read_search, ...]>
 
-iex> MapSet.member?(state.bounding, :cap_net_admin)
-true
+MapSet.member?(state.bounding, :cap_net_admin)
+# => true
 ```
 
 Reading any live process:
 
 ```elixir
-iex> {:ok, init_state} = Linx.Capabilities.read(1)
-{:ok, #Linx.Capabilities.State<eff=41 prm=41 inh=0 bnd=41 amb=0>}
+{:ok, init_state} = Linx.Capabilities.read(1)
+# => {:ok, #Linx.Capabilities.State<eff=41 prm=41 inh=0 bnd=41 amb=0>}
 ```
 
 `/proc/<pid>/status` is world-readable on every Linux distro, so
@@ -94,14 +94,14 @@ no special privileges are needed for read access.
 failure — pattern-match on `:errno` to handle specific cases:
 
 ```elixir
-iex> Linx.Capabilities.read(1_234_567_890)
-{:error,
- %Linx.Capabilities.Error{
-   path: "/proc/1234567890/status",
-   operation: :read,
-   errno: :enoent,
-   code: 2
- }}
+Linx.Capabilities.read(1_234_567_890)
+# => {:error,
+#  %Linx.Capabilities.Error{
+#    path: "/proc/1234567890/status",
+#    operation: :read,
+#    errno: :enoent,
+#    code: 2
+#  }}
 ```
 
 The common errnos:
@@ -131,7 +131,7 @@ the checkpoint), to confirm the kernel-default cap posture before
 proceeding:
 
 ```elixir
-{:ok, c} = Linx.Process.spawn(argv: ["/bin/bash"], stdio: :pty)
+{:ok, c} = Linx.Process.spawn(argv: ["/bin/sh"], stdio: :pty)
 {:ok, host_pid} = Linx.Process.host_pid(c)
 
 {:ok, state} = Linx.Capabilities.read(host_pid)

@@ -15,14 +15,14 @@ namespace (root in the simple case). Start with `./sudorun.sh iex
 `%Linx.Mount.Entry{}`:
 
 ```elixir
-iex> {:ok, mounts} = Linx.Mount.list()
-{:ok, [
+{:ok, mounts} = Linx.Mount.list()
+# => {:ok, [
   #Linx.Mount.Entry<ext4 on / (rw,relatime)>,
   #Linx.Mount.Entry<devtmpfs on /dev (rw,nosuid)>,
   #Linx.Mount.Entry<tmpfs on /dev/shm (rw,nosuid,nodev)>,
   #Linx.Mount.Entry<proc on /proc (rw,nosuid,nodev,noexec,relatime)>,
-  ...
-]}
+#   ...
+# ]}
 ```
 
 Each entry exposes the 10 fields the kernel records per
@@ -31,18 +31,18 @@ root, mount point, mount options, propagation, fstype, source,
 super options:
 
 ```elixir
-iex> root = Enum.find(mounts, & &1.mount_point == "/")
-iex> root
+root = Enum.find(mounts, & &1.mount_point == "/")
+root
 #Linx.Mount.Entry<ext4 on / (rw,relatime)>
 
-iex> root.fstype
-"ext4"
-iex> root.source
-"/dev/mapper/cryptroot"
-iex> root.propagation
-[{:shared, 1}]
-iex> root.mount_options
-"rw,relatime"
+root.fstype
+# => "ext4"
+root.source
+# => "/dev/mapper/cryptroot"
+root.propagation
+# => [{:shared, 1}]
+root.mount_options
+# => "rw,relatime"
 ```
 
 ### Reading another namespace's mounts
@@ -54,9 +54,9 @@ runs entirely in the BEAM's own namespace; only the mutating
 verbs that cross into another namespace need the throwaway-thread setns dance).
 
 ```elixir
-iex> {:ok, ct_mounts} = Linx.Mount.list({:pid, container_pid})
-iex> Enum.map(ct_mounts, & &1.mount_point)
-["/", "/proc", "/dev", "/sys", "/tmp", ...]
+{:ok, ct_mounts} = Linx.Mount.list({:pid, container_pid})
+Enum.map(ct_mounts, & &1.mount_point)
+# => ["/", "/proc", "/dev", "/sys", "/tmp", ...]
 ```
 
 `{:path, p}` works against any mountinfo-formatted file (useful
@@ -64,8 +64,8 @@ for testing parsers, replaying captures, or pointing at
 non-standard locations):
 
 ```elixir
-iex> Linx.Mount.list({:path, "/proc/self/mountinfo"})
-{:ok, [...]}
+Linx.Mount.list({:path, "/proc/self/mountinfo"})
+# => {:ok, [...]}
 ```
 
 Errors:
@@ -101,8 +101,8 @@ for backslash. `Linx.Mount` decodes them transparently:
 
 ```elixir
 # A mount at "/mnt/with spaces" (kernel mountinfo says "/mnt/with\\040spaces"):
-iex> entry.mount_point
-"/mnt/with spaces"
+entry.mount_point
+# => "/mnt/with spaces"
 ```
 
 ## Bind, remount, move
@@ -113,17 +113,17 @@ mutating patterns.
 ### `bind/3` — make a directory visible at another path
 
 ```elixir
-iex> File.mkdir_p!("/tmp/scratch/src")
-iex> File.mkdir_p!("/tmp/scratch/dst")
-iex> File.write!("/tmp/scratch/src/hello", "")
+File.mkdir_p!("/tmp/scratch/src")
+File.mkdir_p!("/tmp/scratch/dst")
+File.write!("/tmp/scratch/src/hello", "")
 
-iex> Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
-:ok
-iex> File.exists?("/tmp/scratch/dst/hello")
-true
+Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
+# => :ok
+File.exists?("/tmp/scratch/dst/hello")
+# => true
 
-iex> Linx.Mount.umount("/tmp/scratch/dst")
-:ok
+Linx.Mount.umount("/tmp/scratch/dst")
+# => :ok
 ```
 
 The bind shows up in mountinfo with the underlying filesystem
@@ -131,8 +131,8 @@ type (whatever `src` lives on) and a `root` field pointing at the
 original directory:
 
 ```elixir
-iex> {:ok, mounts} = Linx.Mount.list()
-iex> Enum.find(mounts, & &1.mount_point == "/tmp/scratch/dst")
+{:ok, mounts} = Linx.Mount.list()
+Enum.find(mounts, & &1.mount_point == "/tmp/scratch/dst")
 #Linx.Mount.Entry<ext4 on /tmp/scratch/dst (rw,relatime)>
 ```
 
@@ -140,8 +140,8 @@ iex> Enum.find(mounts, & &1.mount_point == "/tmp/scratch/dst")
 `source` are also bound under `target`:
 
 ```elixir
-iex> Linx.Mount.bind("/proc/self", "/tmp/scratch/proc-self", flags: [:rec])
-:ok
+Linx.Mount.bind("/proc/self", "/tmp/scratch/proc-self", flags: [:rec])
+# => :ok
 ```
 
 ### `remount/2` — change flags on an existing mount
@@ -152,17 +152,17 @@ without it the kernel tries to remount the underlying filesystem
 instead.
 
 ```elixir
-iex> Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
-:ok
-iex> Linx.Mount.remount("/tmp/scratch/dst", flags: [:bind, :ro])
-:ok
+Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
+# => :ok
+Linx.Mount.remount("/tmp/scratch/dst", flags: [:bind, :ro])
+# => :ok
 
-iex> File.write("/tmp/scratch/dst/foo", "")
-{:error, :erofs}
+File.write("/tmp/scratch/dst/foo", "")
+# => {:error, :erofs}
 
 # But the underlying source stays writable:
-iex> File.write("/tmp/scratch/src/foo", "")
-:ok
+File.write("/tmp/scratch/src/foo", "")
+# => :ok
 ```
 
 #### Note: `remount/2` is not for propagation changes
@@ -175,8 +175,8 @@ propagation flag:
 ```elixir
 # Change a mount's propagation to private (detach it from any
 # shared peer group it's in):
-iex> Linx.Mount.mount("", "/tmp/scratch", "", flags: [:private])
-:ok
+Linx.Mount.mount("", "/tmp/scratch", "", flags: [:private])
+# => :ok
 ```
 
 A dedicated `make_private/2` / `make_shared/2` / etc. helper API
@@ -187,13 +187,13 @@ in shell scripts.
 ### `move/2` — atomically relocate a mount
 
 ```elixir
-iex> Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
-:ok
-iex> Linx.Mount.move("/tmp/scratch/dst", "/tmp/scratch/moved")
-:ok
+Linx.Mount.bind("/tmp/scratch/src", "/tmp/scratch/dst")
+# => :ok
+Linx.Mount.move("/tmp/scratch/dst", "/tmp/scratch/moved")
+# => :ok
 
-iex> {:ok, mounts} = Linx.Mount.list()
-iex> Enum.find(mounts, & &1.mount_point == "/tmp/scratch/moved")
+{:ok, mounts} = Linx.Mount.list()
+Enum.find(mounts, & &1.mount_point == "/tmp/scratch/moved")
 #Linx.Mount.Entry<ext4 on /tmp/scratch/moved (rw,relatime)>
 ```
 
@@ -208,18 +208,18 @@ self-bind a directory), mark it private, then everything inside
 is in a fresh single-mount peer group:
 
 ```elixir
-iex> base = "/tmp/scratch-move"
-iex> File.mkdir_p!(base)
-iex> Linx.Mount.mount("none", base, "tmpfs")
-:ok
-iex> Linx.Mount.mount("", base, "", flags: [:private])
-:ok
+base = "/tmp/scratch-move"
+File.mkdir_p!(base)
+Linx.Mount.mount("none", base, "tmpfs")
+# => :ok
+Linx.Mount.mount("", base, "", flags: [:private])
+# => :ok
 
-iex> # now move/2 between paths inside `base` works freely
-iex> File.mkdir_p!("#{base}/src"); File.mkdir_p!("#{base}/dst")
-iex> Linx.Mount.bind("#{base}/src", "#{base}/dst")
-iex> Linx.Mount.move("#{base}/dst", "#{base}/moved")
-:ok
+# now move/2 between paths inside `base` works freely
+File.mkdir_p!("#{base}/src"); File.mkdir_p!("#{base}/dst")
+Linx.Mount.bind("#{base}/src", "#{base}/dst")
+Linx.Mount.move("#{base}/dst", "#{base}/moved")
+# => :ok
 ```
 
 ## Mounting into another namespace
@@ -247,19 +247,19 @@ host's `/proc` because the mount namespace was a *copy* of the
 host's mount table at spawn time. The fix:
 
 ```elixir
-iex> {:ok, c} = Linx.Process.spawn(
-...>   argv: ["/bin/bash"],
-...>   namespaces: [:mount, :pid, :uts, :ipc, :user],
-...>   stdio: :pty
-...> )
-iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+{:ok, c} = Linx.Process.spawn(
+  argv: ["/bin/sh"],
+  namespaces: [:mount, :pid, :uts, :ipc, :user],
+  stdio: :pty
+)
+host_pid = receive do {:linx_process, :ready, p} -> p end
 
 # Mount a fresh /proc inside the child's own mount namespace.
 # Now `ps` inside the container shows only container processes.
-iex> :ok = Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+:ok = Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
 
-iex> :ok = Linx.Process.proceed(c)
-iex> :ok = Linx.Tty.attach(:controlling, c)
+:ok = Linx.Process.proceed(c)
+:ok = Linx.Tty.attach(:controlling, c)
 ```
 
 ### Lifecycle-agnostic: hot-mount into a running container
@@ -271,7 +271,7 @@ a workload's life:
 
 ```elixir
 # Bind a host data volume into a running container, on demand.
-iex> :ok = Linx.Mount.bind("/data/cache", "/cache", in: {:pid, container_pid})
+:ok = Linx.Mount.bind("/data/cache", "/cache", in: {:pid, container_pid})
 ```
 
 Same pattern works for `umount/2`, `bind/3`, `remount/2`, and
@@ -285,13 +285,13 @@ already reflects the target's mount table. Useful for inspecting
 or debugging a container's mounts without touching them:
 
 ```elixir
-iex> Linx.Mount.list({:pid, container_pid})
-{:ok, [
+Linx.Mount.list({:pid, container_pid})
+# => {:ok, [
   #Linx.Mount.Entry<ext4 on / (rw,relatime)>,
   #Linx.Mount.Entry<proc on /proc (rw,relatime)>,
   #Linx.Mount.Entry<tmpfs on /tmp (rw,nosuid)>,
-  ...
-]}
+#   ...
+# ]}
 ```
 
 ### Error stages for cross-namespace failures
@@ -313,14 +313,14 @@ beyond the target syscall — they surface in
     `EAGAIN` from thread-creation pressure.
 
 ```elixir
-iex> Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, 9_999_999})
-{:error,
- %Linx.Mount.Error{
-   path: "/proc/9999999/ns/mnt",
-   operation: :open_ns,
-   errno: :enoent,
-   code: 2
- }}
+Linx.Mount.mount("proc", "/proc", "proc", in: {:pid, 9_999_999})
+# => {:error,
+#  %Linx.Mount.Error{
+#    path: "/proc/9999999/ns/mnt",
+#    operation: :open_ns,
+#    errno: :enoent,
+#    code: 2
+#  }}
 ```
 
 The `:path` field on cross-namespace failures is the namespace
@@ -369,35 +369,35 @@ ritual to satisfy its constraints. Here's the headline pattern,
 running entirely inside a freshly-spawned child via `:in`:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Mount
+alias Linx.Process, as: P
+alias Linx.Mount
 
-iex> rootfs = "/run/myorg/web-42"
-iex> File.mkdir_p!(rootfs)
-iex> File.mkdir_p!(Path.join(rootfs, "old_root"))
+rootfs = "/run/myorg/web-42"
+File.mkdir_p!(rootfs)
+File.mkdir_p!(Path.join(rootfs, "old_root"))
 # ... populate rootfs with bin/, lib/, etc/, ... before pivoting
 
-iex> {:ok, c} = P.spawn(argv: ["/init"], namespaces: [:mount, :pid, :uts, :ipc])
-iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+{:ok, c} = P.spawn(argv: ["/init"], namespaces: [:mount, :pid, :uts, :ipc])
+host_pid = receive do {:linx_process, :ready, p} -> p end
 
 # Detach the child's mount subtree from the host's shared peer
 # groups -- pivot_root rejects shared propagation on ancestors.
 # `mount --make-rprivate /` is the runc/docker idiom.
-iex> :ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
+:ok = Mount.mount("", "/", "", flags: [:private, :rec], in: {:pid, host_pid})
 
 # Make new_root a mount point (pivot_root requires it). Doing the
 # bind inside the child's namespace means it has no peer group
 # with anything on the host.
-iex> :ok = Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
+:ok = Mount.bind(rootfs, rootfs, in: {:pid, host_pid})
 
 # The pivot itself.
-iex> :ok = Mount.pivot_root(rootfs, Path.join(rootfs, "old_root"), in: {:pid, host_pid})
+:ok = Mount.pivot_root(rootfs, Path.join(rootfs, "old_root"), in: {:pid, host_pid})
 
 # Final cleanup: discard the old root tree entirely.
-iex> :ok = Mount.umount("/old_root", flags: [:detach], in: {:pid, host_pid})
+:ok = Mount.umount("/old_root", flags: [:detach], in: {:pid, host_pid})
 
 # Release the workload -- it execs /init from inside the new rootfs.
-iex> :ok = P.proceed(c)
+:ok = P.proceed(c)
 ```
 
 ### Kernel constraints
@@ -434,14 +434,14 @@ at:
     namespace path.
 
 ```elixir
-iex> Linx.Mount.pivot_root("/nope", "/nope/old")
-{:error,
- %Linx.Mount.Error{
-   path: "/nope",
-   operation: :chdir,
-   errno: :enoent,
-   code: 2
- }}
+Linx.Mount.pivot_root("/nope", "/nope/old")
+# => {:error,
+#  %Linx.Mount.Error{
+#    path: "/nope",
+#    operation: :chdir,
+#    errno: :enoent,
+#    code: 2
+#  }}
 ```
 
 ### After pivot: what the workload sees

@@ -10,8 +10,8 @@ that *changes* the cgroup hierarchy — `create/1`, `add_process/2`,
 ## Detecting cgroup v2
 
 ```elixir
-iex> Linx.Cgroup.supported?()
-true
+Linx.Cgroup.supported?()
+# => true
 ```
 
 `supported?/0` returns true iff `/sys/fs/cgroup/cgroup.controllers`
@@ -21,12 +21,12 @@ Returns false on cgroup-v1-only hosts (Linx targets v2 only).
 ## Lifecycle: create, destroy, add_process
 
 ```elixir
-iex> alias Linx.Cgroup
-iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-{:ok, "/sys/fs/cgroup/myorg/web-42"}
+alias Linx.Cgroup
+{:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+# => {:ok, "/sys/fs/cgroup/myorg/web-42"}
 
-iex> :ok = Cgroup.add_process(cg, 41234)   # move a pid in
-iex> :ok = Cgroup.destroy(cg)              # remove the cgroup
+:ok = Cgroup.add_process(cg, 41234)   # move a pid in
+:ok = Cgroup.destroy(cg)              # remove the cgroup
 ```
 
 The path *is* the handle — `create/1` returns `{:ok, path}`, and
@@ -36,26 +36,26 @@ GenServer wrapping a cgroup; cgroupfs already provides the identity.
 `create/1` is **idempotent against `EEXIST`**:
 
 ```elixir
-iex> Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-{:ok, "/sys/fs/cgroup/myorg/web-42"}
-iex> Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-{:ok, "/sys/fs/cgroup/myorg/web-42"}
+Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+# => {:ok, "/sys/fs/cgroup/myorg/web-42"}
+Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+# => {:ok, "/sys/fs/cgroup/myorg/web-42"}
 ```
 
 `destroy/1` only succeeds when the cgroup is **empty** — the kernel
 returns `EBUSY` while any process is still in it:
 
 ```elixir
-iex> Cgroup.add_process(cg, 41234)
-:ok
-iex> Cgroup.destroy(cg)
-{:error,
- %Linx.Cgroup.Error{
-   path: "/sys/fs/cgroup/myorg/web-42",
-   operation: :destroy,
-   errno: :ebusy,
-   code: 16
- }}
+Cgroup.add_process(cg, 41234)
+# => :ok
+Cgroup.destroy(cg)
+# => {:error,
+#  %Linx.Cgroup.Error{
+#    path: "/sys/fs/cgroup/myorg/web-42",
+#    operation: :destroy,
+#    errno: :ebusy,
+#    code: 16
+#  }}
 ```
 
 Wait for the workload to exit (or move it out) before destroying.
@@ -66,15 +66,15 @@ For any cgroup interface file that doesn't have a typed setter yet,
 fall back to `read/2` and `write/3`:
 
 ```elixir
-iex> Cgroup.write(cg, "memory.max", 256 * 1024 * 1024)
-:ok
-iex> Cgroup.read(cg, "memory.max")
-{:ok, "268435456"}
+Cgroup.write(cg, "memory.max", 256 * 1024 * 1024)
+# => :ok
+Cgroup.read(cg, "memory.max")
+# => {:ok, "268435456"}
 
-iex> Cgroup.write(cg, "memory.max", :max)         # special value
-:ok
-iex> Cgroup.read(cg, "memory.max")
-{:ok, "max"}
+Cgroup.write(cg, "memory.max", :max)         # special value
+# => :ok
+Cgroup.read(cg, "memory.max")
+# => {:ok, "max"}
 ```
 
 `read/2` trims the trailing newline cgroupfs interface files always
@@ -89,21 +89,21 @@ The motivating use case: place a workload into a cgroup at the
 execs already constrained.
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Cgroup
+alias Linx.Process, as: P
+alias Linx.Cgroup
 
-iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "30"])
-iex> host_pid = receive do {:linx_process, :ready, p} -> p end
-41234
+{:ok, c} = P.spawn(argv: ["/bin/sleep", "30"])
+host_pid = receive do {:linx_process, :ready, p} -> p end
+# => 41234
 
 # Set up the cgroup while the workload is parked.
-iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-iex> :ok = Cgroup.write(cg, "memory.max", 256 * 1024 * 1024)
-iex> :ok = Cgroup.add_process(cg, host_pid)
+{:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+:ok = Cgroup.write(cg, "memory.max", 256 * 1024 * 1024)
+:ok = Cgroup.add_process(cg, host_pid)
 
 # Release the workload -- it execs constrained.
-iex> P.proceed(c)
-:ok
+P.proceed(c)
+# => :ok
 ```
 
 `Linx.Process` itself knows nothing about cgroups; the checkpoint is
@@ -118,24 +118,24 @@ raw `{:error, :enoent}` tuple. Pattern-match on `:errno` and
 `:operation` for specific cases:
 
 ```elixir
-iex> case Linx.Cgroup.destroy(cg) do
-...>   :ok ->
-...>     :destroyed
-...>
-...>   {:error, %Linx.Cgroup.Error{errno: :ebusy}} ->
-...>     :still_has_processes
-...>
-...>   {:error, %Linx.Cgroup.Error{errno: :enoent}} ->
-...>     :already_gone
-...> end
+case Linx.Cgroup.destroy(cg) do
+  :ok ->
+    :destroyed
+
+  {:error, %Linx.Cgroup.Error{errno: :ebusy}} ->
+    :still_has_processes
+
+  {:error, %Linx.Cgroup.Error{errno: :enoent}} ->
+    :already_gone
+end
 ```
 
 The `Exception` impl makes `raise` and `Exception.message/1` work:
 
 ```elixir
-iex> err = Linx.Cgroup.Error.from_posix(:eexist, "/sys/fs/cgroup/x", :create)
-iex> Exception.message(err)
-"cgroup create failed on /sys/fs/cgroup/x: eexist (errno 17)"
+err = Linx.Cgroup.Error.from_posix(:eexist, "/sys/fs/cgroup/x", :create)
+Exception.message(err)
+# => "cgroup create failed on /sys/fs/cgroup/x: eexist (errno 17)"
 ```
 
 The integer `:code` is looked up from a small POSIX table; an
@@ -150,12 +150,12 @@ scheduling but stay resident — memory, open fds, network
 connections, everything is preserved.
 
 ```elixir
-iex> {:ok, cg} = Linx.Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-iex> :ok = Linx.Cgroup.freeze(cg)
-iex> {:ok, "1"} = Linx.Cgroup.read(cg, "cgroup.freeze")
+{:ok, cg} = Linx.Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+:ok = Linx.Cgroup.freeze(cg)
+{:ok, "1"} = Linx.Cgroup.read(cg, "cgroup.freeze")
 
-iex> :ok = Linx.Cgroup.thaw(cg)
-iex> {:ok, "0"} = Linx.Cgroup.read(cg, "cgroup.freeze")
+:ok = Linx.Cgroup.thaw(cg)
+{:ok, "0"} = Linx.Cgroup.read(cg, "cgroup.freeze")
 ```
 
 Always available on cgroup v2 — no controller needs to be enabled,
@@ -178,26 +178,26 @@ mapping:
 
 ```elixir
 # 256 MiB memory limit
-iex> Linx.Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
-:ok
-iex> Linx.Cgroup.read(cg, "memory.max")
-{:ok, "268435456"}
+Linx.Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
+# => :ok
+Linx.Cgroup.read(cg, "memory.max")
+# => {:ok, "268435456"}
 
 # Cap process count at 100
-iex> Linx.Cgroup.set_pids_max(cg, 100)
-:ok
+Linx.Cgroup.set_pids_max(cg, 100)
+# => :ok
 
 # Half a CPU: 50 ms of compute per 100 ms wall time
-iex> Linx.Cgroup.set_cpu_max(cg, {50_000, 100_000})
-:ok
-iex> Linx.Cgroup.read(cg, "cpu.max")
-{:ok, "50000 100000"}
+Linx.Cgroup.set_cpu_max(cg, {50_000, 100_000})
+# => :ok
+Linx.Cgroup.read(cg, "cpu.max")
+# => {:ok, "50000 100000"}
 
 # Clear any limit
-iex> Linx.Cgroup.set_memory_max(cg, :max)
-:ok
-iex> Linx.Cgroup.read(cg, "memory.max")
-{:ok, "max"}
+Linx.Cgroup.set_memory_max(cg, :max)
+# => :ok
+Linx.Cgroup.read(cg, "memory.max")
+# => {:ok, "max"}
 ```
 
 The typed setters are thin wrappers over `write/3` with input
@@ -221,22 +221,22 @@ parent's subtree control on.
 Combining placement at the checkpoint and limits:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Cgroup
+alias Linx.Process, as: P
+alias Linx.Cgroup
 
-iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "60"])
-iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+{:ok, c} = P.spawn(argv: ["/bin/sleep", "60"])
+host_pid = receive do {:linx_process, :ready, p} -> p end
 
 # Build the cgroup and apply limits while the workload is parked.
-iex> {:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-iex> :ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
-iex> :ok = Cgroup.set_pids_max(cg, 100)
-iex> :ok = Cgroup.set_cpu_max(cg, {50_000, 100_000})
-iex> :ok = Cgroup.add_process(cg, host_pid)
+{:ok, cg} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+:ok = Cgroup.set_memory_max(cg, 256 * 1024 * 1024)
+:ok = Cgroup.set_pids_max(cg, 100)
+:ok = Cgroup.set_cpu_max(cg, {50_000, 100_000})
+:ok = Cgroup.add_process(cg, host_pid)
 
 # Release -- the workload execs with the limits already in place.
-iex> P.proceed(c)
-:ok
+P.proceed(c)
+# => :ok
 ```
 
 If the workload tries to allocate past `memory.max`, the kernel
@@ -292,15 +292,15 @@ knobs that only move when something writes them.
 `Linx.Cgroup.Stats` struct:
 
 ```elixir
-iex> {:ok, s} = Linx.Cgroup.stats(cg)
-{:ok, #Linx.Cgroup.Stats<cpu=12.3s mem=42MiB pids=3>}
+{:ok, s} = Linx.Cgroup.stats(cg)
+# => {:ok, #Linx.Cgroup.Stats<cpu=12.3s mem=42MiB pids=3>}
 
-iex> s.cpu_usec
-12_345_678
-iex> s.memory_current
-44_040_192
-iex> s.pids_current
-3
+s.cpu_usec
+# => 12_345_678
+s.memory_current
+# => 44_040_192
+s.pids_current
+# => 3
 ```
 
 The struct's `Inspect` impl renders compactly, omitting any field
@@ -308,12 +308,12 @@ that's `nil`. Pattern-match on individual fields for programmatic
 access:
 
 ```elixir
-iex> case Linx.Cgroup.stats(cg) do
-...>   {:ok, %Stats{memory_current: m}} when is_integer(m) and m > 256 * 1024 * 1024 ->
-...>     :over_quarter_gig
-...>   _ ->
-...>     :under
-...> end
+case Linx.Cgroup.stats(cg) do
+  {:ok, %Stats{memory_current: m}} when is_integer(m) and m > 256 * 1024 * 1024 ->
+    :over_quarter_gig
+  _ ->
+    :under
+end
 ```
 
 ### What's populated
@@ -332,15 +332,15 @@ file missing) or the kernel is too old to expose it.
 
 ```elixir
 # A cgroup without the pids controller delegated:
-iex> {:ok, s} = Linx.Cgroup.stats(cg)
-iex> s.pids_current
-nil
+{:ok, s} = Linx.Cgroup.stats(cg)
+s.pids_current
+# => nil
 ```
 
 The `Inspect` rendering reflects what's actually populated:
 
 ```elixir
-iex> %Linx.Cgroup.Stats{cpu_usec: 100, pids_current: 3}
+%Linx.Cgroup.Stats{cpu_usec: 100, pids_current: 3}
 #Linx.Cgroup.Stats<cpu=100µs pids=3>
 ```
 
@@ -349,14 +349,14 @@ exist or isn't readable — otherwise it returns `{:ok, %Stats{}}`
 with every field best-effort filled:
 
 ```elixir
-iex> Linx.Cgroup.stats("/sys/fs/cgroup/nope")
-{:error,
- %Linx.Cgroup.Error{
-   path: "/sys/fs/cgroup/nope",
-   operation: :stats,
-   errno: :enoent,
-   code: 2
- }}
+Linx.Cgroup.stats("/sys/fs/cgroup/nope")
+# => {:error,
+#  %Linx.Cgroup.Error{
+#    path: "/sys/fs/cgroup/nope",
+#    operation: :stats,
+#    errno: :enoent,
+#    code: 2
+#  }}
 ```
 
 ## Enabling controllers (delegation)
@@ -367,33 +367,33 @@ parent has them in its `cgroup.subtree_control`. `enable_controllers/2`
 is the shorthand for setting that up.
 
 ```elixir
-iex> alias Linx.Cgroup
-iex> {:ok, parent} = Cgroup.create("/sys/fs/cgroup/myorg")
-iex> :ok = Cgroup.enable_controllers(parent, [:memory, :pids, :cpu])
+alias Linx.Cgroup
+{:ok, parent} = Cgroup.create("/sys/fs/cgroup/myorg")
+:ok = Cgroup.enable_controllers(parent, [:memory, :pids, :cpu])
 
-iex> {:ok, child} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
-iex> :ok = Cgroup.set_memory_max(child, 256 * 1024 * 1024)
+{:ok, child} = Cgroup.create("/sys/fs/cgroup/myorg/web-42")
+:ok = Cgroup.set_memory_max(child, 256 * 1024 * 1024)
 ```
 
 Each controller is written individually as `"+<name>"` so a
 rejected entry doesn't lose the ones that already landed:
 
 ```elixir
-iex> Cgroup.enable_controllers(parent, [:memory, :nosuch_controller])
-{:partial,
- [
-   {:nosuch_controller,
-    %Linx.Cgroup.Error{
-      operation: :write,
-      path: "/sys/fs/cgroup/myorg/cgroup.subtree_control",
-      errno: :einval,
-      code: 22
-    }}
- ]}
+Cgroup.enable_controllers(parent, [:memory, :nosuch_controller])
+# => {:partial,
+#  [
+#    {:nosuch_controller,
+#     %Linx.Cgroup.Error{
+#       operation: :write,
+#       path: "/sys/fs/cgroup/myorg/cgroup.subtree_control",
+#       errno: :einval,
+#       code: 22
+#     }}
+#  ]}
 
 # :memory still landed:
-iex> Cgroup.read(parent, "cgroup.subtree_control")
-{:ok, "memory"}
+Cgroup.read(parent, "cgroup.subtree_control")
+# => {:ok, "memory"}
 ```
 
 The partial-failure shape — `{:partial, [{name, %Error{}}, …]}` —
@@ -423,8 +423,8 @@ it's listed in `cgroup.controllers` (which inherits from
 the parent's `subtree_control` recursively). Read it to find out:
 
 ```elixir
-iex> Cgroup.read(parent, "cgroup.controllers")
-{:ok, "cpuset cpu io memory hugetlb pids rdma misc dmem"}
+Cgroup.read(parent, "cgroup.controllers")
+# => {:ok, "cpuset cpu io memory hugetlb pids rdma misc dmem"}
 ```
 
 If a controller you want isn't there, the kernel doesn't have it

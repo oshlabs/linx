@@ -10,14 +10,14 @@ unprivileged.
 ## Quick start
 
 ```elixir
-iex> alias Linx.Process, as: P
+alias Linx.Process, as: P
 
 # Spawn a child, no namespaces -- equivalent to a fork+exec.
-iex> {:ok, child} = P.spawn(argv: ["/bin/echo", "hello"])
-{:ok, #PID<0.123.0>}
+{:ok, child} = P.spawn(argv: ["/bin/echo", "hello"])
+# => {:ok, #PID<0.123.0>}
 
-iex> flush()
-{:linx_process, :ready, 41234}     # checkpoint: the child's host pid
+flush()
+# => {:linx_process, :ready, 41234}     # checkpoint: the child's host pid
 ```
 
 Every spawn returns the GenServer pid that owns the child. The GenServer
@@ -31,20 +31,20 @@ host side can do setup before the workload runs. `proceed/1` lets it
 proceed.
 
 ```elixir
-iex> {:ok, child} = P.spawn(argv: ["/bin/echo", "hello"])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-:ok
+{:ok, child} = P.spawn(argv: ["/bin/echo", "hello"])
+receive do {:linx_process, :ready, _} -> :ok end
+# => :ok
 
 # ... do host-side work here, e.g. move a netlink interface into the
 # child's netns, write cgroup state, etc. (See "Composing with
 # Linx.Netlink" below.)
 
-iex> P.proceed(child)
-:ok
+P.proceed(child)
+# => :ok
 
-iex> flush()
-{:linx_process, :running}
-{:linx_process, :exited, 0}
+flush()
+# => {:linx_process, :running}
+# {:linx_process, :exited, 0}
 ```
 
 Lifecycle events the owner receives over a session:
@@ -65,11 +65,11 @@ The `:namespaces` option chooses which kinds of namespace the child gets
 fresh. Each maps to a `CLONE_NEW*` flag.
 
 ```elixir
-iex> {:ok, child} = P.spawn(
-...>   argv: ["/bin/sleep", "30"],
-...>   namespaces: [:net, :uts, :ipc]
-...> )
-{:ok, #PID<0.124.0>}
+{:ok, child} = P.spawn(
+  argv: ["/bin/sleep", "30"],
+  namespaces: [:net, :uts, :ipc]
+)
+# => {:ok, #PID<0.124.0>}
 ```
 
 Available namespace atoms: `:net`, `:mount`, `:pid`, `:uts`, `:ipc`,
@@ -87,65 +87,65 @@ The motivating use case: spawn a child into a fresh netns, set the netns
 up from the host while the child waits at the checkpoint, then proceed/1.
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Netlink.{Rtnl, Socket}
-iex> alias Linx.Netlink.Rtnl.{Address, Link, Route}
+alias Linx.Process, as: P
+alias Linx.Netlink.{Rtnl, Socket}
+alias Linx.Netlink.Rtnl.{Address, Link, Route}
 
 # Spawn with a fresh netns; the child blocks at the checkpoint.
-iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
-iex> receive do {:linx_process, :ready, host_pid} -> host_pid end
-41234
+{:ok, child} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
+receive do {:linx_process, :ready, host_pid} -> host_pid end
+# => 41234
 
 # Host-side: create a macvlan and move it into the child's netns as eth0.
-iex> {:ok, host} = Rtnl.open()
-iex> :ok = Link.create_macvlan(host, "ct0", "eth0", :bridge)
-iex> :ok = Link.move_to_netns(host, "ct0", 41234)
+{:ok, host} = Rtnl.open()
+:ok = Link.create_macvlan(host, "ct0", "eth0", :bridge)
+:ok = Link.move_to_netns(host, "ct0", 41234)
 
 # Inside the child's netns: configure eth0.
-iex> {:ok, ns} = Rtnl.open({:pid, 41234})
-iex> :ok = Link.set_up(ns, "lo")
-iex> :ok = Address.add(ns, "ct0", "10.0.0.5", 24)
-iex> :ok = Link.set_up(ns, "ct0")
-iex> :ok = Route.add_default(ns, "10.0.0.1")
+{:ok, ns} = Rtnl.open({:pid, 41234})
+:ok = Link.set_up(ns, "lo")
+:ok = Address.add(ns, "ct0", "10.0.0.5", 24)
+:ok = Link.set_up(ns, "ct0")
+:ok = Route.add_default(ns, "10.0.0.1")
 
 # Advance the child past the checkpoint — it now exec's the workload
 # with a fully configured network already in place.
-iex> P.proceed(child)
-:ok
+P.proceed(child)
+# => :ok
 
-iex> flush()
-{:linx_process, :running}
+flush()
+# => {:linx_process, :running}
 ```
 
 ## Signals and synchronous waits
 
 ```elixir
 # Send SIGTERM (15) to a running workload.
-iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(child)
-iex> receive do {:linx_process, :running} -> :ok end
-iex> P.signal(child, 15)
-:ok
-iex> receive do {:linx_process, :signaled, n} -> n end
-15
+{:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
+receive do {:linx_process, :ready, _} -> :ok end
+P.proceed(child)
+receive do {:linx_process, :running} -> :ok end
+P.signal(child, 15)
+# => :ok
+receive do {:linx_process, :signaled, n} -> n end
+# => 15
 ```
 
 Signals sent before the workload has `execve`'d are *buffered* and
 flushed in order at the moment of `:running`:
 
 ```elixir
-iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
-iex> receive do {:linx_process, :ready, _} -> :ok end
+{:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
+receive do {:linx_process, :ready, _} -> :ok end
 
 # Buffered -- the workload doesn't exist yet.
-iex> P.signal(child, 15)
-:ok
+P.signal(child, 15)
+# => :ok
 
-iex> P.proceed(child)
-iex> flush()
-{:linx_process, :running}
-{:linx_process, :signaled, 15}      # the buffered SIGTERM landed
+P.proceed(child)
+flush()
+# => {:linx_process, :running}
+# {:linx_process, :signaled, 15}      # the buffered SIGTERM landed
 ```
 
 `wait/1` is the synchronous way to learn the terminal outcome (or
@@ -153,23 +153,23 @@ block until it arrives). It can be called before or after the terminal
 event has been delivered as a message:
 
 ```elixir
-iex> {:ok, child} = P.spawn(argv: ["/bin/true"])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(child)
-iex> P.wait(child)
-{:ok, {:exited, 0}}
+{:ok, child} = P.spawn(argv: ["/bin/true"])
+receive do {:linx_process, :ready, _} -> :ok end
+P.proceed(child)
+P.wait(child)
+# => {:ok, {:exited, 0}}
 
 # wait/2 with a timeout returns {:error, :timeout} if the workload is
 # still alive after `timeout` ms -- the session is *not* affected.
-iex> {:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(child)
-iex> P.wait(child, 100)
-{:error, :timeout}
+{:ok, child} = P.spawn(argv: ["/bin/sleep", "60"])
+receive do {:linx_process, :ready, _} -> :ok end
+P.proceed(child)
+P.wait(child, 100)
+# => {:error, :timeout}
 
-iex> P.signal(child, 9)                       # clean up
-iex> P.wait(child)
-{:ok, {:signaled, 9}}
+P.signal(child, 9)                       # clean up
+P.wait(child)
+# => {:ok, {:signaled, 9}}
 ```
 
 ## Getting the workload's host pid
@@ -180,10 +180,10 @@ you need for the cross-namespace primitives in `Linx.Mount`
 This holds whether or not `:pid` is in the namespaces list:
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: [...], namespaces: [:user, :pid])
-iex> host_pid = receive do {:linx_process, :ready, p} -> p end
+{:ok, c} = P.spawn(argv: [...], namespaces: [:user, :pid])
+host_pid = receive do {:linx_process, :ready, p} -> p end
 
-iex> :ok = Linx.User.setup_maps(host_pid, uid: [...], gid: [...])
+:ok = Linx.User.setup_maps(host_pid, uid: [...], gid: [...])
 ```
 
 If you hold the session but didn't capture the `:ready` message,
@@ -203,19 +203,19 @@ Where `proceed/1` releases the cloned child past the checkpoint so it
 child never runs.
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
-iex> receive do {:linx_process, :ready, host_pid} -> host_pid end
+{:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
+receive do {:linx_process, :ready, host_pid} -> host_pid end
 
 # ... host-side setup runs here. Suppose it fails or we decide to
 # cancel: instead of proceed/1, call abort/1.
-iex> P.abort(c)
-:ok
+P.abort(c)
+# => :ok
 
-iex> flush()
-{:linx_process, :aborted}
+flush()
+# => {:linx_process, :aborted}
 
-iex> P.wait(c)
-{:ok, :aborted}
+P.wait(c)
+# => {:ok, :aborted}
 ```
 
 `abort/1` emits a distinct terminal event `{:linx_process, :aborted}`
@@ -268,23 +268,23 @@ let you express intent before the agent is ready to act on it.
 
 ```elixir
 # Spawn a long-running container with a fresh netns.
-iex> {:ok, ct} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
-iex> receive do {:linx_process, :ready, target_pid} -> target_pid end
-41234
-iex> P.proceed(ct)
-iex> receive do {:linx_process, :running} -> :ok end
+{:ok, ct} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net])
+receive do {:linx_process, :ready, target_pid} -> target_pid end
+# => 41234
+P.proceed(ct)
+receive do {:linx_process, :running} -> :ok end
 
 # Run a probe inside that container's namespaces.
-iex> {:ok, probe} = P.enter(41234, argv: ["/bin/sh", "-c", "ip -o link | wc -l"])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(probe)
-iex> P.wait(probe)
-{:ok, {:exited, 0}}   # the shell printed "1\n" -- only `lo` in there
+{:ok, probe} = P.enter(41234, argv: ["/bin/sh", "-c", "ip -o link | wc -l"])
+receive do {:linx_process, :ready, _} -> :ok end
+P.proceed(probe)
+P.wait(probe)
+# => {:ok, {:exited, 0}}   # the shell printed "1\n" -- only `lo` in there
 
 # Clean up the container.
-iex> P.signal(ct, 9)
-iex> P.wait(ct)
-{:ok, {:signaled, 9}}
+P.signal(ct, 9)
+P.wait(ct)
+# => {:ok, {:signaled, 9}}
 ```
 
 By default `enter/2` joins *every* namespace the target has — every
@@ -293,7 +293,7 @@ file under `/proc/<target>/ns/`. Pass `:namespaces` to narrow it:
 ```elixir
 # Join only the target's net namespace; mount/pid/etc. stay the
 # caller's (so /sbin/ip is still resolvable from the host's rootfs).
-iex> P.enter(target_pid, namespaces: [:net], argv: ["/bin/sh", "-c", "..."])
+P.enter(target_pid, namespaces: [:net], argv: ["/bin/sh", "-c", "..."])
 ```
 
 Pre-exec failures from enter carry namespace-specific stage atoms —
@@ -301,27 +301,27 @@ Pre-exec failures from enter carry namespace-specific stage atoms —
 visible in `{:linx_process, :error, errno, stage}`:
 
 ```elixir
-iex> P.enter(99999999, argv: ["/bin/true"])    # bogus target pid
-iex> flush()
-{:linx_process, :error, 2, :open_ns_user}      # ENOENT opening /proc/.../ns/user
+P.enter(99999999, argv: ["/bin/true"])    # bogus target pid
+flush()
+# => {:linx_process, :error, 2, :open_ns_user}      # ENOENT opening /proc/.../ns/user
 ```
 
 ## Error paths
 
 ```elixir
 # Bad argv (no such binary) — execve fails after proceed/1.
-iex> {:ok, child} = P.spawn(argv: ["/this/does/not/exist"])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(child)
-iex> flush()
-{:linx_process, :error, 2, :execve}     # ENOENT = 2
+{:ok, child} = P.spawn(argv: ["/this/does/not/exist"])
+receive do {:linx_process, :ready, _} -> :ok end
+P.proceed(child)
+flush()
+# => {:linx_process, :error, 2, :execve}     # ENOENT = 2
 
 # Input validation rejects bad opts before any system call.
-iex> P.spawn([])
-{:error, :argv_required}
+P.spawn([])
+# => {:error, :argv_required}
 
-iex> P.spawn(argv: ["/bin/true"], namespaces: [:typo])
-{:error, {:bad_namespaces, [:typo]}}
+P.spawn(argv: ["/bin/true"], namespaces: [:typo])
+# => {:error, {:bad_namespaces, [:typo]}}
 ```
 
 ## Stdio plumbing
@@ -333,10 +333,10 @@ to all three fds or via a per-fd keyword list.
 ### `:devnull` — silence the workload
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/bin/echo", "this won't be seen"], stdio: :devnull)
-iex> P.proceed(c)
-iex> P.wait(c)
-{:ok, {:exited, 0}}
+{:ok, c} = P.spawn(argv: ["/bin/echo", "this won't be seen"], stdio: :devnull)
+P.proceed(c)
+P.wait(c)
+# => {:ok, {:exited, 0}}
 ```
 
 ### `{:connect_unix, path}` — pipe a single fd to an AF_UNIX listener
@@ -346,19 +346,19 @@ The caller opens the listener *before* `spawn/1`; the workload
 GenServer, a file, anywhere.
 
 ```elixir
-iex> path = "/tmp/linx-demo.sock"
-iex> {:ok, listener} = :gen_tcp.listen(0, [{:ifaddr, {:local, path}}, :binary, {:active, false}])
+path = "/tmp/linx-demo.sock"
+{:ok, listener} = :gen_tcp.listen(0, [{:ifaddr, {:local, path}}, :binary, {:active, false}])
 
-iex> {:ok, c} = P.spawn(
-...>   argv: ["/bin/echo", "hello from a workload"],
-...>   stdio: [stdout: {:connect_unix, path}]
-...> )
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(c)
+{:ok, c} = P.spawn(
+  argv: ["/bin/echo", "hello from a workload"],
+  stdio: [stdout: {:connect_unix, path}]
+)
+receive do {:linx_process, :ready, _} -> :ok end
+P.proceed(c)
 
-iex> {:ok, sock} = :gen_tcp.accept(listener, 2_000)
-iex> :gen_tcp.recv(sock, 0, 2_000)
-{:ok, "hello from a workload\n"}
+{:ok, sock} = :gen_tcp.accept(listener, 2_000)
+:gen_tcp.recv(sock, 0, 2_000)
+# => {:ok, "hello from a workload\n"}
 ```
 
 ### `:pty` — a PTY shared across all three fds
@@ -369,31 +369,31 @@ bytes between the master end and the BEAM through the existing
 control channel. Reads arrive as owner events:
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/bin/echo", "hi"], stdio: :pty)
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(c)
+{:ok, c} = P.spawn(argv: ["/bin/echo", "hi"], stdio: :pty)
+receive do {:linx_process, :ready, _} -> :ok end
+P.proceed(c)
 
-iex> receive do {:linx_process, :pty_out, b} -> b end
-"hi\r\n"          # PTY-cooked output translates LF to CRLF
+receive do {:linx_process, :pty_out, b} -> b end
+# => "hi\r\n"          # PTY-cooked output translates LF to CRLF
 
-iex> P.wait(c)
-{:ok, {:exited, 0}}
+P.wait(c)
+# => {:ok, {:exited, 0}}
 ```
 
 Writes go through `pty_write/2`:
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.proceed(c)
-iex> P.pty_write(c, "hello\n")
-:ok
-iex> receive do {:linx_process, :pty_out, b} -> b end
-"hello\r\nhello\r\n"   # cat echoes (PTY echoes the input, then cat writes it)
+{:ok, c} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
+receive do {:linx_process, :ready, _} -> :ok end
+P.proceed(c)
+P.pty_write(c, "hello\n")
+# => :ok
+receive do {:linx_process, :pty_out, b} -> b end
+# => "hello\r\nhello\r\n"   # cat echoes (PTY echoes the input, then cat writes it)
 
-iex> P.signal(c, 9)
-iex> P.wait(c)
-{:ok, {:signaled, 9}}
+P.signal(c, 9)
+P.wait(c)
+# => {:ok, {:signaled, 9}}
 ```
 
 ### Setting the PTY's window size
@@ -405,21 +405,21 @@ workload sees the right size from the moment it `execve`s) or
 post-running (so a runtime update reaches the workload via `SIGWINCH`):
 
 ```elixir
-iex> {:ok, c} = P.spawn(argv: ["/bin/sh", "-c", "stty size"], stdio: :pty)
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> P.pty_set_winsize(c, {24, 80, 0, 0})           # rows, cols, xpix, ypix
-:ok
-iex> P.proceed(c)
-iex> receive do {:linx_process, :pty_out, b} -> b end
-"24 80\r\n"
+{:ok, c} = P.spawn(argv: ["/bin/sh", "-c", "stty size"], stdio: :pty)
+receive do {:linx_process, :ready, _} -> :ok end
+P.pty_set_winsize(c, {24, 80, 0, 0})           # rows, cols, xpix, ypix
+# => :ok
+P.proceed(c)
+receive do {:linx_process, :pty_out, b} -> b end
+# => "24 80\r\n"
 ```
 
 A struct (or any map) with `:rows`/`:cols`/`:xpixel`/`:ypixel` fields
 also works — `Linx.Tty.WindowSize` is the canonical such struct:
 
 ```elixir
-iex> P.pty_set_winsize(c, %{rows: 42, cols: 132, xpixel: 0, ypixel: 0})
-:ok
+P.pty_set_winsize(c, %{rows: 42, cols: 132, xpixel: 0, ypixel: 0})
+# => :ok
 ```
 
 This is the primitive the `Linx.Tty` subsystem composes

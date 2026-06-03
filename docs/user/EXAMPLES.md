@@ -13,8 +13,8 @@ unprivileged callers.
 ## Detecting user-namespace support
 
 ```elixir
-iex> Linx.User.supported?()
-true
+Linx.User.supported?()
+# => true
 ```
 
 `supported?/0` returns true iff `/proc/self/uid_map` exists — true
@@ -28,29 +28,29 @@ namespace, write maps from the host while the child is parked at
 the checkpoint, then proceed.
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.User
+alias Linx.Process, as: P
+alias Linx.User
 
-iex> {:ok, c} =
-...>   P.spawn(
-...>     argv: ["/bin/bash"],
-...>     namespaces: [:user, :mount, :pid, :uts, :ipc],
-...>     stdio: :pty
-...>   )
+{:ok, c} =
+  P.spawn(
+    argv: ["/bin/sh"],
+    namespaces: [:user, :mount, :pid, :uts, :ipc],
+    stdio: :pty
+  )
 
 # The :ready event's pid is the child's *own* view of itself --
 # = 1 inside a fresh :pid namespace. For procfs writes we need
 # the host's view: that's P.host_pid/1.
-iex> receive do {:linx_process, :ready, _child_view} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+receive do {:linx_process, :ready, _child_view} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # "root inside ↔ me outside" -- the canonical rootless mapping.
-iex> :ok = User.deny_setgroups(host_pid)
-iex> :ok = User.set_uid_map(host_pid, [{0, my_host_uid, 1}])
-iex> :ok = User.set_gid_map(host_pid, [{0, my_host_gid, 1}])
+:ok = User.deny_setgroups(host_pid)
+:ok = User.set_uid_map(host_pid, [{0, my_host_uid, 1}])
+:ok = User.set_gid_map(host_pid, [{0, my_host_gid, 1}])
 
-iex> :ok = P.proceed(c)
-iex> :ok = Linx.Tty.attach(:controlling, c)
+:ok = P.proceed(c)
+:ok = Linx.Tty.attach(:controlling, c)
 ```
 
 Inside the attached bash:
@@ -108,33 +108,33 @@ Two distinct error shapes — caller mistakes vs kernel rejections:
 
 ```elixir
 # Caller-side input mistake -- caught before any /proc write:
-iex> User.set_uid_map(host_pid, [])
-{:error, {:bad_map, :empty}}
+User.set_uid_map(host_pid, [])
+# => {:error, {:bad_map, :empty}}
 
-iex> User.set_uid_map(host_pid, [{0, 1000}])
-{:error, {:bad_map, {:bad_entry, {0, 1000}}}}
+User.set_uid_map(host_pid, [{0, 1000}])
+# => {:error, {:bad_map, {:bad_entry, {0, 1000}}}}
 
-iex> User.set_uid_map(host_pid, [{-1, 1000, 1}])
-{:error, {:bad_map, {:bad_entry, {-1, 1000, 1}}}}
+User.set_uid_map(host_pid, [{-1, 1000, 1}])
+# => {:error, {:bad_map, {:bad_entry, {-1, 1000, 1}}}}
 
 # Kernel rejection -- structured Linx.User.Error:
-iex> User.set_uid_map(host_pid, [{0, 1000, 1}])  # second call
-{:error,
- %Linx.User.Error{
-   path: "/proc/.../uid_map",
-   operation: :set_uid_map,
-   errno: :eperm,
-   code: 1
- }}
+User.set_uid_map(host_pid, [{0, 1000, 1}])  # second call
+# => {:error,
+#  %Linx.User.Error{
+#    path: "/proc/.../uid_map",
+#    operation: :set_uid_map,
+#    errno: :eperm,
+#    code: 1
+#  }}
 
-iex> User.set_uid_map(9_999_999, [{0, 1000, 1}])  # dead pid
-{:error,
- %Linx.User.Error{
-   path: "/proc/9999999/uid_map",
-   operation: :set_uid_map,
-   errno: :enoent,
-   code: 2
- }}
+User.set_uid_map(9_999_999, [{0, 1000, 1}])  # dead pid
+# => {:error,
+#  %Linx.User.Error{
+#    path: "/proc/9999999/uid_map",
+#    operation: :set_uid_map,
+#    errno: :enoent,
+#    code: 2
+#  }}
 ```
 
 Pattern-match on `:errno` and `:operation` to handle specific
@@ -165,9 +165,9 @@ The `Exception` impl makes `raise` and `Exception.message/1` work
 on `%Linx.User.Error{}` too:
 
 ```elixir
-iex> err = Linx.User.Error.from_posix(:eperm, "/proc/1/uid_map", :set_uid_map)
-iex> Exception.message(err)
-"user set_uid_map failed on /proc/1/uid_map: eperm (errno 1)"
+err = Linx.User.Error.from_posix(:eperm, "/proc/1/uid_map", :set_uid_map)
+Exception.message(err)
+# => "user set_uid_map failed on /proc/1/uid_map: eperm (errno 1)"
 ```
 
 ## Reading uid/gid maps
@@ -176,21 +176,21 @@ iex> Exception.message(err)
 into a list of `%Linx.User.Map{}` structs:
 
 ```elixir
-iex> Linx.User.read_uid_map(host_pid)
-{:ok, [#Linx.User.Map<0 -> 1000>]}
+Linx.User.read_uid_map(host_pid)
+# => {:ok, [#Linx.User.Map<0 -> 1000>]}
 
 # Multi-range identity (the runc-style rootless layout):
-iex> Linx.User.read_uid_map(host_pid)
-{:ok, [
+Linx.User.read_uid_map(host_pid)
+# => {:ok, [
   #Linx.User.Map<0 -> 0>,
   #Linx.User.Map<1..65535 -> 100000..165535>
-]}
+# ]}
 
 # A user ns whose maps haven't been written yet -- the file
 # exists but is empty; the kernel defaults the workload's
 # identity to "nobody".
-iex> Linx.User.read_uid_map(host_pid)
-{:ok, []}
+Linx.User.read_uid_map(host_pid)
+# => {:ok, []}
 ```
 
 The `Inspect` impl picks its format by length:
@@ -217,14 +217,14 @@ Same shape as the write verbs — `%Linx.User.Error{operation:
 :read_uid_map | :read_gid_map}` for kernel-level failures:
 
 ```elixir
-iex> Linx.User.read_uid_map(9_999_999)
-{:error,
- %Linx.User.Error{
-   path: "/proc/9999999/uid_map",
-   operation: :read_uid_map,
-   errno: :enoent,
-   code: 2
- }}
+Linx.User.read_uid_map(9_999_999)
+# => {:error,
+#  %Linx.User.Error{
+#    path: "/proc/9999999/uid_map",
+#    operation: :read_uid_map,
+#    errno: :enoent,
+#    code: 2
+#  }}
 ```
 
 The parser silently drops malformed lines (forward-compatible
@@ -288,26 +288,26 @@ Combining everything across `Linx.Process` + `Linx.Mount` +
 `ps` shows container processes:
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.{Mount, User, Tty}
+alias Linx.Process, as: P
+alias Linx.{Mount, User, Tty}
 
-iex> {:ok, c} =
-...>   P.spawn(
-...>     argv: ["/bin/bash"],
-...>     namespaces: [:user, :mount, :pid, :uts, :ipc],
-...>     stdio: :pty
-...>   )
+{:ok, c} =
+  P.spawn(
+    argv: ["/bin/sh"],
+    namespaces: [:user, :mount, :pid, :uts, :ipc],
+    stdio: :pty
+  )
 
 # With :pid in the namespaces list, the :ready event's pid is
 # the child's *own* view (= 1). For procfs writes we need the
 # host's view of the child -- P.host_pid/1 returns that.
-iex> receive do {:linx_process, :ready, _child_view} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
+receive do {:linx_process, :ready, _child_view} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
 
 # Set up the rootless mapping at the checkpoint.
-iex> my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
-iex> my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integer()
-iex> :ok = User.setup_maps(host_pid, uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
+my_uid = System.cmd("id", ["-u"]) |> elem(0) |> String.trim() |> String.to_integer()
+my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integer()
+:ok = User.setup_maps(host_pid, uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}])
 
 # Give the container its own /proc (also at the checkpoint).
 #
@@ -318,13 +318,13 @@ iex> :ok = User.setup_maps(host_pid, uid: [{0, my_uid, 1}], gid: [{0, my_gid, 1}
 # in that case is to have the workload itself do the /proc
 # remount after its execve (where it has full caps in its own
 # user ns); see docs/mount/EXAMPLES.md for the rootless caveat.
-iex> :ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
+:ok = Mount.mount("proc", "/proc", "proc", in: {:pid, host_pid})
 
 # Release -- the workload execs already inside its own user ns
 # with the right identity, and with a /proc that only shows
 # container processes.
-iex> :ok = P.proceed(c)
-iex> Tty.attach(:controlling, c)
+:ok = P.proceed(c)
+Tty.attach(:controlling, c)
 ```
 
 Inside the attached bash:

@@ -17,8 +17,8 @@ root.
 ## Detecting seccomp support
 
 ```elixir
-iex> Linx.Seccomp.supported?()
-true
+Linx.Seccomp.supported?()
+# => true
 ```
 
 `supported?/0` returns `true` iff `/proc/self/status` contains a
@@ -28,12 +28,12 @@ kernel Linx targets.
 ## Inspecting the running architecture
 
 ```elixir
-iex> Linx.Seccomp.arch()
-:x86_64
+Linx.Seccomp.arch()
+# => :x86_64
 
 # On aarch64:
-iex> Linx.Seccomp.arch()
-:aarch64
+Linx.Seccomp.arch()
+# => :aarch64
 ```
 
 The arch atom drives which syscall table is used when building
@@ -43,16 +43,16 @@ arches return `:unsupported`.
 ## Querying the syscall table
 
 ```elixir
-iex> Linx.Seccomp.Syscalls.to_number(:read, :x86_64)
-0
-iex> Linx.Seccomp.Syscalls.to_number(:read, :aarch64)
-63
-iex> Linx.Seccomp.Syscalls.from_number(317, :x86_64)
-:seccomp
-iex> Linx.Seccomp.Syscalls.from_number(99999, :x86_64)
-:unknown
-iex> MapSet.size(Linx.Seccomp.Syscalls.all(:x86_64))
-239
+Linx.Seccomp.Syscalls.to_number(:read, :x86_64)
+# => 0
+Linx.Seccomp.Syscalls.to_number(:read, :aarch64)
+# => 63
+Linx.Seccomp.Syscalls.from_number(317, :x86_64)
+# => :seccomp
+Linx.Seccomp.Syscalls.from_number(99999, :x86_64)
+# => :unknown
+MapSet.size(Linx.Seccomp.Syscalls.all(:x86_64))
+# => 239
 ```
 
 `Linx.Seccomp.Syscalls` is `@moduledoc false` and the inverse is
@@ -138,17 +138,17 @@ Build errors are caller-actionable atoms — what the failing
 expression returned, and what to fix:
 
 ```elixir
-iex> Linx.Seccomp.allow_list([:not_a_real_syscall])
-{:error, {:unknown_syscall, :not_a_real_syscall}}
+Linx.Seccomp.allow_list([:not_a_real_syscall])
+# => {:error, {:unknown_syscall, :not_a_real_syscall}}
 
-iex> Linx.Seccomp.allow_list([:read], default: :not_an_action)
-{:error, {:bad_action, :not_an_action}}
+Linx.Seccomp.allow_list([:read], default: :not_an_action)
+# => {:error, {:bad_action, :not_an_action}}
 
-iex> Linx.Seccomp.allow_list([:read, :read])
-{:error, {:duplicate_rule, :read}}
+Linx.Seccomp.allow_list([:read, :read])
+# => {:error, {:duplicate_rule, :read}}
 
-iex> Linx.Seccomp.from_rules({[:not_a_rule], :allow})
-{:error, {:bad_rule, :not_a_rule}}
+Linx.Seccomp.from_rules({[:not_a_rule], :allow})
+# => {:error, {:bad_rule, :not_a_rule}}
 ```
 
 The `%Linx.Seccomp.Error{}` struct is reserved for kernel-side
@@ -223,7 +223,7 @@ If the workload tries a syscall its filter denies with
 dies. The session emits a `:signaled` terminal:
 
 ```elixir
-{:ok, c} = Linx.Process.spawn(argv: ["/bin/bash"],
+{:ok, c} = Linx.Process.spawn(argv: ["/bin/sh"],
                               no_new_privs: true,
                               stdio: :pty)
 receive do {:linx_process, :ready, _} -> :ok end

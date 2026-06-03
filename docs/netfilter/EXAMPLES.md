@@ -16,8 +16,8 @@ itself is unprivileged.
 ## Detecting nfnetlink support
 
 ```elixir
-iex> Linx.Netfilter.supported?()
-true
+Linx.Netfilter.supported?()
+# => true
 ```
 
 `supported?/0` returns true iff a `NETLINK_NETFILTER` socket can
@@ -29,20 +29,20 @@ the actual verb call (`{:error, %Linx.Netfilter.Error{errno: :eperm}}`).
 ## Opening the transport socket
 
 ```elixir
-iex> {:ok, sock} = Linx.Netlink.Nfnl.open()
-iex> sock.protocol
-12  # NETLINK_NETFILTER
-iex> sock.netns
-:host
-iex> :ok = Linx.Netlink.Socket.close(sock)
+{:ok, sock} = Linx.Netlink.Nfnl.open()
+sock.protocol
+# => 12  # NETLINK_NETFILTER
+sock.netns
+# => :host
+:ok = Linx.Netlink.Socket.close(sock)
 ```
 
 For another netns (typically a `Linx.Process`-spawned workload):
 
 ```elixir
-iex> {:ok, sock} = Linx.Netlink.Nfnl.open({:pid, host_pid})
-iex> sock.netns
-{:pid, 12345}
+{:ok, sock} = Linx.Netlink.Nfnl.open({:pid, host_pid})
+sock.netns
+# => {:pid, 12345}
 ```
 
 The socket is pinned to that netns for its lifetime — operations
@@ -57,9 +57,9 @@ exactly-once-from-snapshot monitoring (the Monitor buckets multicast events
 by gen id).
 
 ```elixir
-iex> {:ok, sock} = Linx.Netlink.Nfnl.open()
-iex> Linx.Netlink.Nfnl.Codec.get_gen(sock)
-{:ok, %{id: 1247, proc_pid: 4583, proc_name: "nft"}}
+{:ok, sock} = Linx.Netlink.Nfnl.open()
+Linx.Netlink.Nfnl.Codec.get_gen(sock)
+# => {:ok, %{id: 1247, proc_pid: 4583, proc_name: "nft"}}
 ```
 
 `:id` is the generation counter; `:proc_pid` + `:proc_name`
@@ -103,18 +103,18 @@ construction; the plain form composes through `with` blocks.
 Validators reject malformed input at construction:
 
 ```elixir
-iex> Linx.Netfilter.Chain.new("c", type: :nat, hook: :prerouting, priority: 0)
-...> |> elem(1)
-...> |> Linx.Netfilter.Chain.validate_for_family(:arp)
-{:error, {:bad_chain, {:type_not_valid_for_family, %{type: :nat, family: :arp}}}}
+Linx.Netfilter.Chain.new("c", type: :nat, hook: :prerouting, priority: 0)
+|> elem(1)
+|> Linx.Netfilter.Chain.validate_for_family(:arp)
+# => {:error, {:bad_chain, {:type_not_valid_for_family, %{type: :nat, family: :arp}}}}
 
-iex> Linx.Netfilter.Vmap.new("dispatch",
-...>   key_type: :inet_service,
-...>   elements: [{22, :not_a_verdict}])
-{:error, {:bad_map, {:bad_element, _, {:bad_verdict, :not_a_verdict}}}}
+Linx.Netfilter.Vmap.new("dispatch",
+  key_type: :inet_service,
+  elements: [{22, :not_a_verdict}])
+# => {:error, {:bad_map, {:bad_element, _, {:bad_verdict, :not_a_verdict}}}}
 
-iex> Linx.Netfilter.Chain.new("c", type: :filter, hook: :ingress, priority: 0)
-{:error, {:bad_chain, {:device_required_for_hook, :ingress}}}
+Linx.Netfilter.Chain.new("c", type: :filter, hook: :ingress, priority: 0)
+# => {:error, {:bad_chain, {:device_required_for_hook, :ingress}}}
 ```
 
 Family-aware checks (chain-type/family, chain-hook/family,

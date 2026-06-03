@@ -14,8 +14,8 @@ namespace still need real root.
 ## Detecting sysctl support
 
 ```elixir
-iex> Linx.Sysctl.supported?()
-true
+Linx.Sysctl.supported?()
+# => true
 ```
 
 `supported?/0` returns true iff `/proc/sys/kernel/ostype` exists.
@@ -30,28 +30,28 @@ rest of Linx).
 newline:
 
 ```elixir
-iex> Linx.Sysctl.read("kernel.ostype")
-{:ok, "Linux"}
+Linx.Sysctl.read("kernel.ostype")
+# => {:ok, "Linux"}
 
-iex> Linx.Sysctl.read("net.ipv4.ip_forward")
-{:ok, "0"}
+Linx.Sysctl.read("net.ipv4.ip_forward")
+# => {:ok, "0"}
 
-iex> Linx.Sysctl.read("kernel.hostname")
-{:ok, "fry"}
+Linx.Sysctl.read("kernel.hostname")
+# => {:ok, "fry"}
 ```
 
 For the common integer case, `read_int/1` parses for you:
 
 ```elixir
-iex> Linx.Sysctl.read_int("net.ipv4.ip_forward")
-{:ok, 0}
+Linx.Sysctl.read_int("net.ipv4.ip_forward")
+# => {:ok, 0}
 
-iex> Linx.Sysctl.read_int("vm.swappiness")
-{:ok, 60}
+Linx.Sysctl.read_int("vm.swappiness")
+# => {:ok, 60}
 
 # Non-integer contents come back as {:bad_value, ...}:
-iex> Linx.Sysctl.read_int("kernel.hostname")
-{:error, {:bad_value, {:not_an_integer, "fry"}}}
+Linx.Sysctl.read_int("kernel.hostname")
+# => {:error, {:bad_value, {:not_an_integer, "fry"}}}
 ```
 
 For the tuple-shaped knobs (`kernel.printk`, `net.ipv4.tcp_rmem`,
@@ -59,11 +59,11 @@ For the tuple-shaped knobs (`kernel.printk`, `net.ipv4.tcp_rmem`,
 parses each token:
 
 ```elixir
-iex> Linx.Sysctl.read_ints("kernel.printk")
-{:ok, [4, 4, 1, 7]}
+Linx.Sysctl.read_ints("kernel.printk")
+# => {:ok, [4, 4, 1, 7]}
 
-iex> Linx.Sysctl.read_ints("net.ipv4.tcp_rmem")
-{:ok, [4096, 131072, 6291456]}
+Linx.Sysctl.read_ints("net.ipv4.tcp_rmem")
+# => {:ok, [4096, 131072, 6291456]}
 ```
 
 ## Writing a sysctl
@@ -72,14 +72,14 @@ iex> Linx.Sysctl.read_ints("net.ipv4.tcp_rmem")
 to most knobs need root.
 
 ```elixir
-iex> Linx.Sysctl.write("net.ipv4.ip_forward", 1)
-:ok
+Linx.Sysctl.write("net.ipv4.ip_forward", 1)
+# => :ok
 
-iex> Linx.Sysctl.write("kernel.hostname", "ct0")
-:ok
+Linx.Sysctl.write("kernel.hostname", "ct0")
+# => :ok
 
-iex> Linx.Sysctl.write("kernel.printk", [4, 4, 1, 7])
-:ok
+Linx.Sysctl.write("kernel.printk", [4, 4, 1, 7])
+# => :ok
 ```
 
 Common patterns:
@@ -104,20 +104,20 @@ rejections, mirroring `Linx.User`'s `:bad_map` / `%Error{}` split.
 ### Caller mistakes — caught before any procfs I/O
 
 ```elixir
-iex> Linx.Sysctl.read("")
-{:error, {:bad_key, ""}}
+Linx.Sysctl.read("")
+# => {:error, {:bad_key, ""}}
 
-iex> Linx.Sysctl.read("net..ip_forward")
-{:error, {:bad_key, "net..ip_forward"}}
+Linx.Sysctl.read("net..ip_forward")
+# => {:error, {:bad_key, "net..ip_forward"}}
 
-iex> Linx.Sysctl.read("net.ipv4.../etc/passwd")
-{:error, {:bad_key, "net.ipv4.../etc/passwd"}}
+Linx.Sysctl.read("net.ipv4.../etc/passwd")
+# => {:error, {:bad_key, "net.ipv4.../etc/passwd"}}
 
-iex> Linx.Sysctl.write("kernel.hostname", "ct0\nct1")
-{:error, {:bad_value, {:contains, :newline}}}
+Linx.Sysctl.write("kernel.hostname", "ct0\nct1")
+# => {:error, {:bad_value, {:contains, :newline}}}
 
-iex> Linx.Sysctl.write("kernel.printk", [4, 4, "1", 7])
-{:error, {:bad_value, {:not_all_integers, [4, 4, "1", 7]}}}
+Linx.Sysctl.write("kernel.printk", [4, 4, "1", 7])
+# => {:error, {:bad_value, {:not_all_integers, [4, 4, "1", 7]}}}
 ```
 
 Keys must be dot-form `[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*` — no
@@ -129,25 +129,25 @@ and would silently truncate, so we reject loud-and-early.
 ### Kernel rejections — `%Linx.Sysctl.Error{}`
 
 ```elixir
-iex> Linx.Sysctl.read("linx.this.does.not.exist")
-{:error,
- %Linx.Sysctl.Error{
-   key: "linx.this.does.not.exist",
-   path: "/proc/sys/linx/this/does/not/exist",
-   operation: :read,
-   errno: :enoent,
-   code: 2
- }}
+Linx.Sysctl.read("linx.this.does.not.exist")
+# => {:error,
+#  %Linx.Sysctl.Error{
+#    key: "linx.this.does.not.exist",
+#    path: "/proc/sys/linx/this/does/not/exist",
+#    operation: :read,
+#    errno: :enoent,
+#    code: 2
+#  }}
 
-iex> Linx.Sysctl.write("net.ipv4.ip_forward", 1)  # unprivileged
-{:error,
- %Linx.Sysctl.Error{
-   key: "net.ipv4.ip_forward",
-   path: "/proc/sys/net/ipv4/ip_forward",
-   operation: :write,
-   errno: :eacces,
-   code: 13
- }}
+Linx.Sysctl.write("net.ipv4.ip_forward", 1)  # unprivileged
+# => {:error,
+#  %Linx.Sysctl.Error{
+#    key: "net.ipv4.ip_forward",
+#    path: "/proc/sys/net/ipv4/ip_forward",
+#    operation: :write,
+#    errno: :eacces,
+#    code: 13
+#  }}
 ```
 
 Pattern-match on `:errno` and `:operation` to handle specific
@@ -176,9 +176,9 @@ The `Exception` impl makes `raise` and `Exception.message/1` work
 on `%Linx.Sysctl.Error{}` too:
 
 ```elixir
-iex> err = Linx.Sysctl.Error.from_posix(:eacces, "net.ipv4.ip_forward", "/proc/sys/net/ipv4/ip_forward", :write)
-iex> Exception.message(err)
-"sysctl write \"net.ipv4.ip_forward\" failed on /proc/sys/net/ipv4/ip_forward: eacces (errno 13)"
+err = Linx.Sysctl.Error.from_posix(:eacces, "net.ipv4.ip_forward", "/proc/sys/net/ipv4/ip_forward", :write)
+Exception.message(err)
+# => "sysctl write \"net.ipv4.ip_forward\" failed on /proc/sys/net/ipv4/ip_forward: eacces (errno 13)"
 ```
 
 ## Walking the sysctl tree
@@ -188,18 +188,18 @@ iex> Exception.message(err)
 Linux host this is ~1500 entries:
 
 ```elixir
-iex> {:ok, all} = Linx.Sysctl.list()
-iex> length(all)
-1487
+{:ok, all} = Linx.Sysctl.list()
+length(all)
+# => 1487
 
-iex> Enum.take(all, 3)
-[
+Enum.take(all, 3)
+# => [
   #Linx.Sysctl.Entry<abi.vsyscall32 = "1">,
   #Linx.Sysctl.Entry<crypto.fips_enabled = "0">,
   #Linx.Sysctl.Entry<debug.exception-trace = "1">
-]
+# ]
 
-iex> Enum.find(all, & &1.key == "kernel.ostype")
+Enum.find(all, & &1.key == "kernel.ostype")
 #Linx.Sysctl.Entry<kernel.ostype = "Linux">
 ```
 
@@ -214,17 +214,17 @@ keys individually with `read/1`).
 down to a specific namespace's knobs:
 
 ```elixir
-iex> {:ok, net} = Linx.Sysctl.list("net.ipv4")
-iex> length(net)
-156
+{:ok, net} = Linx.Sysctl.list("net.ipv4")
+length(net)
+# => 156
 
-iex> Enum.take(net, 4)
-[
+Enum.take(net, 4)
+# => [
   #Linx.Sysctl.Entry<net.ipv4.cipso_cache_bucket_size = "10">,
   #Linx.Sysctl.Entry<net.ipv4.cipso_cache_enable = "1">,
   #Linx.Sysctl.Entry<net.ipv4.cipso_rbm_optfmt = "0">,
   #Linx.Sysctl.Entry<net.ipv4.cipso_rbm_strictvalid = "1">
-]
+# ]
 ```
 
 `list/1` is convenient for "is this knob present on this kernel?"
@@ -233,18 +233,18 @@ directory or a file — if you pass a leaf key, you get back a
 single-element list:
 
 ```elixir
-iex> Linx.Sysctl.list("kernel.ostype")
-{:ok, [#Linx.Sysctl.Entry<kernel.ostype = "Linux">]}
+Linx.Sysctl.list("kernel.ostype")
+# => {:ok, [#Linx.Sysctl.Entry<kernel.ostype = "Linux">]}
 
-iex> Linx.Sysctl.list("linx.does.not.exist")
-{:error,
- %Linx.Sysctl.Error{
-   key: "linx.does.not.exist",
-   path: "/proc/sys/linx/does/not/exist",
-   operation: :list,
-   errno: :enoent,
-   code: 2
- }}
+Linx.Sysctl.list("linx.does.not.exist")
+# => {:error,
+#  %Linx.Sysctl.Error{
+#    key: "linx.does.not.exist",
+#    path: "/proc/sys/linx/does/not/exist",
+#    operation: :list,
+#    errno: :enoent,
+#    code: 2
+#  }}
 ```
 
 ### The `Entry` value type
@@ -253,11 +253,11 @@ Each `%Linx.Sysctl.Entry{}` carries the dot-form `:key` and the
 trimmed-binary `:value`. Both fields are `@enforce_keys`-required:
 
 ```elixir
-iex> [first | _] = elem(Linx.Sysctl.list("net.ipv4"), 1)
-iex> first.key
-"net.ipv4.cipso_cache_bucket_size"
-iex> first.value
-"10"
+[first | _] = elem(Linx.Sysctl.list("net.ipv4"), 1)
+first.key
+# => "net.ipv4.cipso_cache_bucket_size"
+first.value
+# => "10"
 ```
 
 The `Inspect` impl truncates values over 60 bytes for legibility
@@ -301,29 +301,29 @@ to the host path.
 ### Reading the value the container sees
 
 ```elixir
-iex> alias Linx.Process, as: P
-iex> alias Linx.Sysctl
+alias Linx.Process, as: P
+alias Linx.Sysctl
 
-iex> {:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net, :uts])
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = P.host_pid(c)
-iex> P.proceed(c)
+{:ok, c} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net, :uts])
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = P.host_pid(c)
+P.proceed(c)
 
 # Each side reads its own namespace's value, independently:
-iex> Sysctl.read_int("net.ipv4.ip_forward")
-{:ok, 0}                                              # host
+Sysctl.read_int("net.ipv4.ip_forward")
+# => {:ok, 0}                                              # host
 
-iex> Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
-{:ok, 0}                                              # container
+Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
+# => {:ok, 0}                                              # container
 
-iex> Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
-:ok
+Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+# => :ok
 
-iex> Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
-{:ok, 1}                                              # container now 1...
+Sysctl.read_int("net.ipv4.ip_forward", in: {:pid, host_pid})
+# => {:ok, 1}                                              # container now 1...
 
-iex> Sysctl.read_int("net.ipv4.ip_forward")
-{:ok, 0}                                              # ...but host unchanged
+Sysctl.read_int("net.ipv4.ip_forward")
+# => {:ok, 0}                                              # ...but host unchanged
 ```
 
 The setns-on-a-throwaway-pthread dance ensures the BEAM's own
@@ -333,14 +333,14 @@ performs the I/O is destroyed as soon as it returns.
 ### Setting the container's hostname
 
 ```elixir
-iex> Sysctl.write("kernel.hostname", "web-01", in: {:pid, host_pid})
-:ok
+Sysctl.write("kernel.hostname", "web-01", in: {:pid, host_pid})
+# => :ok
 
-iex> Sysctl.read("kernel.hostname", in: {:pid, host_pid})
-{:ok, "web-01"}
+Sysctl.read("kernel.hostname", in: {:pid, host_pid})
+# => {:ok, "web-01"}
 
-iex> Sysctl.read("kernel.hostname")
-{:ok, "fry"}                                         # host's hostname is untouched
+Sysctl.read("kernel.hostname")
+# => {:ok, "fry"}                                         # host's hostname is untouched
 ```
 
 `kernel.hostname` is per-UTS-namespace; same idea for
@@ -355,16 +355,16 @@ cross-namespace:
 ```elixir
 # All net.ipv4.* knobs the container sees -- some, like
 # ip_forward, can differ from the host's values.
-iex> {:ok, net} = Sysctl.list("net.ipv4", in: {:pid, host_pid})
-iex> length(net)
-156
+{:ok, net} = Sysctl.list("net.ipv4", in: {:pid, host_pid})
+length(net)
+# => 156
 
-iex> Enum.find(net, & &1.key == "net.ipv4.ip_forward")
+Enum.find(net, & &1.key == "net.ipv4.ip_forward")
 #Linx.Sysctl.Entry<net.ipv4.ip_forward = "1">
 
 # A leaf prefix returns a single-element list, same as the host path.
-iex> Sysctl.list("kernel.hostname", in: {:pid, host_pid})
-{:ok, [#Linx.Sysctl.Entry<kernel.hostname = "web-01">]}
+Sysctl.list("kernel.hostname", in: {:pid, host_pid})
+# => {:ok, [#Linx.Sysctl.Entry<kernel.hostname = "web-01">]}
 ```
 
 ### Composing at the `Linx.Process` checkpoint
@@ -375,27 +375,27 @@ before its first instruction" window) and against a fully-running
 container post-`proceed/1`.
 
 ```elixir
-iex> alias Linx.{Process, Sysctl}
-iex> alias Linx.Netlink.Rtnl
+alias Linx.{Process, Sysctl}
+alias Linx.Netlink.Rtnl
 
-iex> {:ok, c} =
-...>   Process.spawn(
-...>     argv: ["/usr/sbin/nginx"],
-...>     namespaces: [:net, :uts]
-...>   )
-iex> receive do {:linx_process, :ready, _} -> :ok end
-iex> {:ok, host_pid} = Process.host_pid(c)
+{:ok, c} =
+  Process.spawn(
+    argv: ["/usr/sbin/nginx"],
+    namespaces: [:net, :uts]
+  )
+receive do {:linx_process, :ready, _} -> :ok end
+{:ok, host_pid} = Process.host_pid(c)
 
 # Configure the container's network and sysctls together, all at
 # the checkpoint, before nginx ever starts:
-iex> {:ok, ns} = Rtnl.open({:pid, host_pid})
-iex> :ok = Rtnl.Link.set_up(ns, "lo")
-iex> :ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
-iex> :ok = Sysctl.write("net.ipv4.tcp_rmem", [4096, 262_144, 16_777_216],
-...>                    in: {:pid, host_pid})
-iex> :ok = Sysctl.write("kernel.hostname", "ct-web-01", in: {:pid, host_pid})
+{:ok, ns} = Rtnl.open({:pid, host_pid})
+:ok = Rtnl.Link.set_up(ns, "lo")
+:ok = Sysctl.write("net.ipv4.ip_forward", 1, in: {:pid, host_pid})
+:ok = Sysctl.write("net.ipv4.tcp_rmem", [4096, 262_144, 16_777_216],
+                   in: {:pid, host_pid})
+:ok = Sysctl.write("kernel.hostname", "ct-web-01", in: {:pid, host_pid})
 
-iex> Process.proceed(c)
+Process.proceed(c)
 ```
 
 `Linx.Process` has zero knowledge of `Linx.Sysctl`; the only
@@ -415,15 +415,15 @@ values from the namespace-acquisition path:
 | `:thread` | couldn't create the worker pthread |
 
 ```elixir
-iex> Sysctl.write("kernel.hostname", "x", in: {:pid, 9_999_999})
-{:error,
- %Linx.Sysctl.Error{
-   key: "kernel.hostname",
-   path: "/proc/sys/kernel/hostname",
-   operation: :open_ns,
-   errno: :enoent,
-   code: 2
- }}
+Sysctl.write("kernel.hostname", "x", in: {:pid, 9_999_999})
+# => {:error,
+#  %Linx.Sysctl.Error{
+#    key: "kernel.hostname",
+#    path: "/proc/sys/kernel/hostname",
+#    operation: :open_ns,
+#    errno: :enoent,
+#    code: 2
+#  }}
 ```
 
 Pattern-match on `:operation` to tell namespace-acquisition
@@ -466,9 +466,9 @@ the inode comparison `{:pid, n}` does:
 ```elixir
 # Pin a network namespace bind-mount, then use it from many
 # operations without holding a process open:
-iex> System.cmd("ip", ["netns", "add", "blue"])
-iex> Sysctl.write("net.ipv4.ip_forward", 1, in: {:path, "/var/run/netns/blue"})
-:ok
+System.cmd("ip", ["netns", "add", "blue"])
+Sysctl.write("net.ipv4.ip_forward", 1, in: {:path, "/var/run/netns/blue"})
+# => :ok
 ```
 
 This is the right shape for `ip netns`-style named namespaces and
