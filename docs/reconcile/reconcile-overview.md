@@ -29,6 +29,28 @@ the consumer — an orchestrator — never here. You add
 `{Linx.Reconcile, opts}` to *your own* supervision tree; Linx ships nothing that
 starts it for you.
 
+### Ownership = lifetime
+
+A reconciler's natural unit is the network namespace (`Linx.Netlink.Rtnl.open/1`
+is per-namespace), and a resource's owner is whatever should share its lifetime.
+That splits cleanly into long-lived host infrastructure — physical NICs,
+bridges, the host's own addresses and routes, a macvlan/ipvlan *parent* — owned
+by a host-scoped loop whose lifetime is the node's, and ephemeral per-container
+plumbing — a container's ipvlan slave, its veth pair, the addresses inside its
+namespace — owned by a loop in the container's own supervision subtree, so it
+*stops when the container stops* and leaves no orphan loop recreating an
+interface into a namespace that no longer exists. Two rules fall out: the host
+loop's desired state must never name a resource whose existence is conditional on
+a container (those belong to the container's subtree, which has the right
+lifetime), and cross-scope dependencies read one direction only — a container
+reads a host-owned link's index to build its ipvlan; the host never reaches into
+a container. What *pins* a namespace decides what survives a restart: if the
+inner process pins it, the network dies and is reborn on each restart (a brief
+blip, no leaks); if a longer-lived holder pins it (a bind-mount, or a
+pause/sandbox holder, as Kubernetes pods do), addresses and routes outlive
+individual restarts and the restarted process re-enters the same namespace with
+its config intact. That is a per-workload choice for the consumer.
+
 ## Flow
 
 The classic closed-loop control model: desired and observed states feed a diff,

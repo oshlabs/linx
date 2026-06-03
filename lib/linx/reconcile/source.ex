@@ -8,8 +8,7 @@ defmodule Linx.Reconcile.Source do
   that want direct control. This behaviour is the *narrow* seam the loop drives,
   implemented by a small adapter that delegates to that surface — so the loop
   stays subsystem-agnostic and the per-subsystem APIs stay free of a
-  lowest-common-denominator façade. See the "API surface & consistency" section
-  of `docs/reconcile/PLAN.md`.
+  lowest-common-denominator façade.
 
   Two layers, then:
 

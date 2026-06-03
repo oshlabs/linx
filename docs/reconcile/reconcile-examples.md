@@ -9,7 +9,8 @@ This is the **overview**. Each subsystem keeps its own hands-on examples in its
 `EXAMPLES.md`; the per-subsystem detail is not repeated here. This page covers
 the shared model, the generic opt-in loop (`Linx.Reconcile`), the plug-in
 contract (`Linx.Reconcile.Source`), and how the pieces fit together. The design
-and rationale live in `docs/reconcile/PLAN.md`.
+and rationale live in [reconcile-overview.md](reconcile-overview.md) and the
+`Linx.Reconcile` moduledoc.
 
 ## The shared model
 
@@ -48,8 +49,9 @@ Two principles run through all of it:
 | cgroup limits | `Linx.Cgroup.Reconcile` | a cgroup path | three-way | no |
 
 Anything not in this table (capabilities, seccomp, uid maps, mount, tty) is not
-reconciled state — it is spec applied once at spawn, or a runtime channel. See
-`docs/reconcile/PLAN.md` §5 for why.
+reconciled state — it is spec applied once at spawn (re-applied verbatim on
+restart by the supervisor), or a runtime channel — so it carries no observe/diff
+loop.
 
 ## Single-shot reconcile, by hand
 
@@ -304,9 +306,9 @@ from the host at the spawn checkpoint. See `tank/README.md` and
 
 ## See also
 
-  * `docs/reconcile/PLAN.md` — the design, the mechanism/policy seam, ownership
-    and lifetime, the subsystem classification, and the decisions behind all of
-    the above.
+  * [reconcile-overview.md](reconcile-overview.md) — the design: the
+    mechanism/policy seam, ownership and lifetime, and how the loop fits over the
+    single-shot subsystems.
   * `docs/sysctl/sysctl-examples.md` — "Declarative reconciliation" and "A long-lived
     loop (opt-in)".
   * `docs/netlink/netlink-examples.md` — "Reconciliation", "Single-shot reconcile", "the
