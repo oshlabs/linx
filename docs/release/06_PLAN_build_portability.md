@@ -1,6 +1,6 @@
 # 06 — Build UX / portability preflight
 
-**Status:** planned · **Gates 0.1.0:** yes (consumer-facing install UX) · **Topic:** the custom C compilers
+**Status:** done · **Gates 0.1.0:** yes (consumer-facing install UX) · **Topic:** the custom C compilers
 
 For a hex package that compiles C on the consumer's machine, the failure modes on the
 wrong machine must be legible. Today they aren't.

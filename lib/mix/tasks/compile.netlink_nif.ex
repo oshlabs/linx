@@ -54,6 +54,7 @@ defmodule Mix.Tasks.Compile.NetlinkNif do
 
   defp compile(source, output) do
     cc = System.get_env("CC", "cc")
+    Mix.Linx.Preflight.check!(cc)
 
     debug =
       if System.get_env("LINX_DEBUG") in ~w(1 true yes),
