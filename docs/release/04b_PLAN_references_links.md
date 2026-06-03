@@ -1,6 +1,6 @@
 # 04b — REFERENCES.md links & uniformity
 
-**Status:** planned · **Gates 0.1.0:** yes (public-facing, cheap–medium) · **Topic:** per-subsystem REFERENCES.md
+**Status:** done · **Gates 0.1.0:** yes (public-facing, cheap–medium) · **Topic:** per-subsystem REFERENCES.md
 
 Split from `04`. Companion: `04a` (EXAMPLES.md). REFERENCES.md are the per-subsystem
 citation pages (man pages, kernel docs, UAPI headers, in-repo cross-refs), surfaced on
