@@ -109,12 +109,12 @@ both are given, `:action` wins.
 
 ## Building filters — `from_rules/1` (data-layer API)
 
-The seam consumers like Silo use when they translate external
+The seam consumers use when they translate external
 policy (Docker `seccomp.json`, custom DSLs, runtime config) into
 a fully-resolved Linx filter:
 
 ```elixir
-# A rules list — the shape Silo would build from a parsed
+# A rules list — the shape a consumer would build from a parsed
 # Docker seccomp.json.
 rules = [
   {:allow, :read},

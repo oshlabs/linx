@@ -79,7 +79,3 @@ Background reading on error-handling conventions:
 - [Moxley Stratton — Best Practices For Error Values](https://medium.com/@moxicon/elixir-best-practices-for-error-values-50dc015a06f5)
 - [Elixir code anti-patterns](https://hexdocs.pm/elixir/code-anti-patterns.html) — official guide; "normalise errors for `with`".
 - [christopheradams/elixir_style_guide](https://github.com/christopheradams/elixir_style_guide) — naming conventions.
-
-## Project origin
-
-- The **silo POC** (`~/src/silo`) — the proof-of-concept whose flat `Silo.Netlink` (one ~320-line module) and `netlink_nif.c` were extracted, decomposed, and generalized into Linx's foundation.

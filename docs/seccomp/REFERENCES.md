@@ -86,7 +86,7 @@ The web-readable upstream:
 - **Docker default seccomp profile** —
   https://github.com/moby/moby/blob/master/profiles/seccomp/default.json
   (the JSON form). Denies ~50 dangerous syscalls; allows
-  everything else. The shape Silo's JSON adapter will target.
+  everything else. The shape a consumer's JSON adapter will target.
 - **runc's default seccomp profile** — same model as Docker's;
   the underlying mechanism.
 - **Chrome's renderer-process sandbox** —

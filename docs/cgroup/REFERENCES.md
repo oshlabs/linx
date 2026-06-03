@@ -36,11 +36,3 @@ sections in the source when interpretation is non-obvious.
   `Linx.Cgroup.add_process/2` composes with.
 - `lib/linx/netlink/error.ex` — pattern for `Linx.Cgroup.Error`'s
   shape and `Exception` impl.
-
-## Cross-references to silo
-
-`silo/lib/cgroup.ex` is the predecessor implementation that informed
-this design — the surface verbs, the curated stats set, the
-file-I/O-only approach all carry over. The key differences vs.
-silo's version are documented in Linx's design rationale (no baked-in parent path, struct errors, struct
-stats, typed setters).

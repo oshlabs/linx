@@ -3,7 +3,7 @@
  *
  * Linx.Process performs operations that cannot live inside the multithreaded
  * BEAM: clone(), setns(), fork() and execve(). Doing those in the BEAM
- * corrupts the VM (see silo's DESIGN.md for the reasoning), so they run in
+ * corrupts the VM, so they run in
  * this separate OS process, spawned via Port.open from Elixir.
  *
  * CONTROL CHANNEL

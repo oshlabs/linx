@@ -50,13 +50,6 @@ The agent talks ETF to the BEAM over fd 3/4:
 
 ## Prior art
 
-- **silo** (`~/src/silo`) — the proof-of-concept Linx.Process is
-  extracted from. Its `silo-init.c` (1374 lines) is the larger version
-  of what `linx_process` does, with cgroup placement, mount namespace
-  setup (`pivot_root`, idmapped rootfs), user-namespace id-map writing,
-  stdio capture, and `mini_init` all included. The architectural
-  decisions (Port boundary, ETF on fd 3/4, the checkpoint protocol)
-  trace back to silo's `DESIGN.md`.
 - [tini](https://github.com/krallin/tini),
   [dumb-init](https://github.com/Yelp/dumb-init),
   [catatonit](https://github.com/openSUSE/catatonit) — established
@@ -66,7 +59,7 @@ The agent talks ETF to the BEAM over fd 3/4:
   `setns_init`, and the checkpoint relay design parallel `linx_process`.
 - [conmon](https://github.com/containers/conmon) — the per-container
   agent in the podman/CRI-O world. The "clone parent = conmon" framing
-  in silo's `DESIGN.md` carries through here: the Port-spawned agent
+  carries through here: the Port-spawned agent
   IS conmon, sized down to its essentials.
 
 ## Build

@@ -33,8 +33,8 @@ defmodule Linx.Seccomp do
         `deny_list/2` ("not these"), and the fluent
         `Linx.Seccomp.Builder` DSL.
 
-      - **Data:** `from_rules/1` for consumers (like the Silo
-        application) that translate external policies — Docker
+      - **Data:** `from_rules/1` for consumers that translate
+        external policies — Docker
         `seccomp.json`, custom DSLs, runtime policy — into a
         plain `[{action, syscall_atom}, ...]` Elixir list and hand
         it to Linx. `to_rules/1` is the inverse for filters Linx
@@ -48,8 +48,8 @@ defmodule Linx.Seccomp do
 
   Higher-level concerns — parsing JSON profiles, looking up which
   syscalls nginx 1.24 needs, tracking workload-to-filter mappings —
-  are policy and orchestration. Those live in consumers; the
-  natural home is the **Silo** project that builds on Linx.
+  are policy and orchestration. Those live in consumers that
+  build on Linx.
 
   ## Motivating composition
 
@@ -256,10 +256,10 @@ defmodule Linx.Seccomp do
 
   Accepts `{rules, default_action}` where `rules` is a list of
   `{action, syscall_atom}` tuples and `default_action` is the
-  fallthrough verdict. The seam external consumers (Silo's
+  fallthrough verdict. The seam external consumers (a
   `seccomp.json` adapter, custom DSLs, runtime policy) use to hand
-  fully-resolved policy to Linx — Silo's job is "translate JSON to
-  this list shape"; Linx's job starts here.
+  fully-resolved policy to Linx — the consumer's job is "translate
+  JSON to this list shape"; Linx's job starts here.
 
   The filter targets the current host architecture (see `arch/0`).
   Filters built for one arch don't install on another; multi-arch
@@ -329,7 +329,7 @@ defmodule Linx.Seccomp do
   Linx itself built.
 
   Filters whose `:rules` field is `nil` (which would arise from a
-  future Silo path that loads externally-supplied raw BPF blobs)
+  consumer path that loads externally-supplied raw BPF blobs)
   return `{:error, :no_rules}`. The current build verbs always
   populate `:rules`, so this is reliable for any filter Linx
   itself produced.
