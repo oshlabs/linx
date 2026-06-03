@@ -1,6 +1,6 @@
 # 08 — `supported?/0` consistency
 
-**Status:** planned · **Gates 0.1.0:** yes (cheap, API-surface clarity) · **Topic:** capability-probe convention
+**Status:** done · **Gates 0.1.0:** yes (cheap, API-surface clarity) · **Topic:** capability-probe convention
 
 ## Problem
 `supported?/0` is defined on 6 subsystems and absent on 4, with no documented convention,

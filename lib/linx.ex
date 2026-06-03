@@ -61,6 +61,14 @@ defmodule Linx do
   independent and compose because they share that one primitive, not because a
   framework holds them together.
 
+  ## Capability detection
+
+  Subsystems that gate an *optionally-present* kernel feature expose a
+  `supported?/0` probe — `Linx.Cgroup`, `Linx.User`, `Linx.Capabilities`,
+  `Linx.Seccomp`, `Linx.Sysctl`, and `Linx.Netfilter`. Subsystems built on the
+  always-present Linux baseline Linx requires (`Linx.Process`, `Linx.Netlink`,
+  `Linx.Mount`, `Linx.Tty`) omit it by design.
+
   ## Errors
 
   Kernel-level failures are structured `%Linx.X.Error{}` exceptions
