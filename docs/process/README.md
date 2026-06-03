@@ -39,6 +39,26 @@ flowchart TD
     proceed -->|"execve(2)"| running["workload running —<br/>every constraint already in force"]
 ```
 
+## Process tree
+
+The workload is never a direct child of the BEAM: the agent Port sits between
+them and is the workload's real parent — it `clone(2)`s the child and reaps it.
+When the `:pid` namespace is requested, the workload becomes **pid 1 inside** its
+namespace while keeping a distinct **host pid** outside (the number `host_pid/1`
+returns). Anything it spawns gets the next pids inside (pid 2, …), each with its
+own host pid.
+
+```mermaid
+flowchart TD
+    beam["BEAM (Erlang VM)<br/>host pid 4001"]
+    beam --> agent["linx_process agent — a Port<br/>host pid 4120"]
+    agent -->|"clone(2) + CLONE_NEWPID, NEWNET, …"| w
+    subgraph ns["the workload's namespaces (pid, net, mnt, …)"]
+        w["nginx — the workload<br/>host pid 4123 · pid 1 inside"]
+        w --> worker["a worker it forks<br/>host pid 4150 · pid 2 inside"]
+    end
+```
+
 ## Learn more
 
 - **API** — `Linx.Process` (with `Linx.Process.Error` and `Linx.Process.Info`)

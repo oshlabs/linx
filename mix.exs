@@ -60,23 +60,20 @@ defmodule Linx.MixProject do
   # Injects mermaid.js so ```mermaid code blocks in the docs render as diagrams.
   defp mermaid_script(:html) do
     """
-    <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-    <script>
-      document.addEventListener("DOMContentLoaded", function () {
-        mermaid.initialize({startOnLoad: false});
-        let id = 0;
-        for (const code of document.querySelectorAll("pre code.mermaid")) {
-          const pre = code.parentElement;
-          const graph = code.textContent;
-          mermaid.render("mermaid-graph-" + id++, graph).then(({svg, bindFunctions}) => {
-            const div = document.createElement("div");
-            div.className = "mermaid";
-            div.innerHTML = svg;
-            if (bindFunctions) bindFunctions(div);
-            pre.replaceWith(div);
-          });
-        }
-      });
+    <script type="module">
+      import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+      mermaid.initialize({startOnLoad: false});
+      let id = 0;
+      for (const code of document.querySelectorAll("pre code.mermaid")) {
+        const pre = code.parentElement;
+        const graph = code.textContent;
+        const {svg, bindFunctions} = await mermaid.render("mermaid-graph-" + id++, graph);
+        const div = document.createElement("div");
+        div.className = "mermaid";
+        div.innerHTML = svg;
+        if (bindFunctions) bindFunctions(div);
+        pre.replaceWith(div);
+      }
     </script>
     """
   end
