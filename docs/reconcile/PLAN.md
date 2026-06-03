@@ -9,8 +9,7 @@ corrected on the next pass.
 
 It captures decisions already made and questions still open. It is forward
 pointed: nothing here is implemented yet beyond the `Linx.Netfilter` reference
-(see §2). Companion docs: the "Declarative reconcile" section of
-`docs/ROADMAP.md` and `docs/netfilter/DESIGN.md`.
+(see §2). Companion doc: `docs/netfilter/DESIGN.md`.
 
 ## 1. Consumers — who this is for
 

@@ -65,7 +65,6 @@ defmodule Linx.MixProject do
       output: "_build/docs",
       extras: [
         "README.md",
-        "AGENTS.md",
         "docs/netlink/EXAMPLES.md",
         "docs/netlink/REFERENCES.md",
         "docs/process/EXAMPLES.md",
@@ -109,8 +108,7 @@ defmodule Linx.MixProject do
           "docs/netfilter/DESIGN.md",
           "docs/netfilter/REFERENCES.md"
         ],
-        Reconcile: ["docs/reconcile/EXAMPLES.md"],
-        "Repo-wide": ["AGENTS.md"]
+        Reconcile: ["docs/reconcile/EXAMPLES.md"]
       ],
       groups_for_modules: [
         "Public types": [

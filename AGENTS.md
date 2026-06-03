@@ -31,50 +31,13 @@ This is `linx`, an Elixir library providing Linux kernel interfaces (netlink, an
         @type t :: %__MODULE__{fd: non_neg_integer, netns: :host | {:pid, pos_integer}}
       end
 
-- **Error handling — the shape is decided by how much context the error carries**, not by where it came from. Three lanes, applied uniformly across every subsystem:
-
-  1. **Context-rich kernel/syscall failure → `%Linx.X.Error{}`.** One error struct per subsystem (`Linx.Cgroup.Error`, `Linx.Mount.Error`, …), returned as `{:error, %Linx.X.Error{}}`. Every such struct **`defexception` and implements `message/1`**, so `Exception.message/1` is the single uniform way to render any Linx error as a human string. Uniform **core fields — `operation`, `errno` (a POSIX atom), `code` (the raw integer, or `nil`)** — are always present. Add **honest extras only where they're ever non-nil**: `path` (filesystem/procfs-backed subsystems), `message` (a kernel extended-ack string), and genuine subsystem specifics (e.g. Netfilter's batch `subsys`/`batch_seq`/`attr_offset`). Never pad a struct with a field that is forever `nil`. Build via a `from_posix/_` factory that maps the errno atom to its code.
-  2. **Context-free condition → a bare atom.** When there is nothing to attach, a struct is empty ceremony — return `{:error, :no_process}` (the same spirit as stdlib `File`'s `{:error, :enoent}` or `:gen_tcp`'s `{:error, :closed}`).
-  3. **Caller-side validation → a tagged tuple `{:error, {:bad_*, reason}}`** (e.g. `{:bad_flag, atom}`, `{:bad_map, reason}`). Do **not** raise `ArgumentError` for these — Linx's inputs are usually dynamic runtime data, so keep everything in the `{:ok, _} | {:error, _}` world for `with` pipelines.
-
-      defmodule Linx.Cgroup.Error do
-        @enforce_keys [:operation, :errno]
-        defexception [:operation, :errno, :code, :path]
-
-        @type t :: %__MODULE__{operation: atom, errno: atom, code: pos_integer | nil, path: Path.t() | nil}
-
-        @impl Exception
-        def message(%__MODULE__{} = e),
-          do: "cgroup #{e.operation} failed on #{e.path}: #{e.errno} (errno #{e.code})"
-      end
-
-- Lists **do not support index based access via the access syntax**. Use `Enum.at`, pattern matching, or `List`:
-
-      mylist = ["blue", "green"]
-      mylist[0]         # invalid
-      Enum.at(mylist, 0)  # correct
-
-- Variables are immutable but can be rebound. Block expressions (`if`, `case`, `cond`) return a value; bind that — you cannot rebind inside the block:
-
-      # INVALID: the rebinding inside `if` is local to the block and lost
-      if enabled? do
-        config = Map.put(config, :verbose, true)
-      end
-
-      # VALID: bind the result of the `if` itself
-      config =
-        if enabled? do
-          Map.put(config, :verbose, true)
-        else
-          config
-        end
-
+- **Error handling — shape follows how much context the failure carries:**
+  - **Context-rich kernel/syscall failure → `%Linx.X.Error{}`** (one struct per subsystem; `defexception` + `message/1`; uniform `errno`/`code`, plus honest extras like `path` only where non-nil). Build via a `from_posix/_` factory.
+  - **Context-free condition → a bare atom** (`{:error, :no_process}`), like stdlib `File` / `:gen_tcp`.
+  - **Caller input mistake → a tagged tuple** `{:error, {:bad_*, reason}}`. Do **not** `raise` for these — keep them in the `{:ok, _} | {:error, _}` world for `with` pipelines.
+  - A staged transport tuple like `{:error, {:send, :eperm}}` is fine — not every errno needs a struct.
 - **Never** nest multiple modules in one file — risks cyclic dependencies and compilation errors.
-- **Never** use map access syntax (`struct[:field]`) on structs; they don't implement Access. Use `struct.field`.
-- Don't use `String.to_atom/1` on user input (memory leak risk).
-- Predicate function names end in `?`, not `is_` — reserve `is_` for guards.
-- OTP primitives like `DynamicSupervisor` and `Registry` need names in the child spec: `{DynamicSupervisor, name: MyApp.MyDynamicSup}`.
-- Use `Task.async_stream/3` for concurrent enumeration with back-pressure, usually with `timeout: :infinity`.
+- Don't use `String.to_atom/1` on user or kernel input (memory leak risk).
 
 ## C guidelines
 
@@ -106,9 +69,6 @@ Ports:
 
 ## Mix guidelines
 
-- Check task docs/options with `mix help task_name`.
-- Debug failures with `mix test test/my_test.exs` or `mix test --failed`.
-- `mix deps.clean --all` is almost never needed — avoid it.
 - **Always run `mix format` before a git commit.**
 
 ## Test guidelines
@@ -117,7 +77,7 @@ Ports:
 - **Avoid** `Process.sleep/1` and `Process.alive?/1`:
   - To wait for a process to finish, use `Process.monitor/1` and assert the DOWN message:
 
-      ref = Process.monitor(pid)
-      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+        ref = Process.monitor(pid)
+        assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
 
   - To synchronize before the next call, use `_ = :sys.get_state(pid)`.

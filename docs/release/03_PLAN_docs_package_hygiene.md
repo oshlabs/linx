@@ -1,6 +1,6 @@
 # 03 — Docs / package hygiene
 
-**Status:** planned · **Gates 0.1.0:** yes (cheap, public-facing) · **Topic:** what ships and what renders on hexdocs
+**Status:** done · **Gates 0.1.0:** yes (cheap, public-facing) · **Topic:** what ships and what renders on hexdocs
 
 ## Problem
 - **AGENTS.md leaks into public hexdocs** — listed in `mix.exs` `extras` (`:68`) and as
