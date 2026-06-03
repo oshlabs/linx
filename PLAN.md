@@ -8,16 +8,6 @@ working scaffolding; they live in git history under `docs/release/` if needed.)
 This is a maintainer doc — it is not shipped in the hex package and does not render
 on hexdocs.
 
-## Immediate — publish 0.1.0
-
-1. `mix hex.user auth` (or `register`).
-2. Make `oshlabs/linx` public so `source_url` / "View Source" resolve.
-3. Merge `hex-release-prep` → `main`, tag `v0.1.0`.
-4. `mix hex.publish` (package + docs).
-
-**Release gate:** `./sudotest.sh` green on the exact release commit — the kernel
-layer is otherwise unverified in CI (see below).
-
 ## After 0.1.0 — verification fast-follow
 
 The pure-logic layer is well tested, but every kernel-*mutating* path (rtnl writes,
