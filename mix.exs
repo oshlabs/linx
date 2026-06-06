@@ -1,7 +1,7 @@
 defmodule Linx.MixProject do
   use Mix.Project
 
-  @version "0.1.1"
+  @version "0.2.0"
   @source_url "https://github.com/oshlabs/linx"
 
   def project do
@@ -36,7 +36,10 @@ defmodule Linx.MixProject do
   defp package do
     [
       licenses: ["MIT"],
-      links: %{"GitHub" => @source_url},
+      links: %{
+        "GitHub" => @source_url,
+        "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"
+      },
       # Ship the C sources (c_src) so the NIF/Port custom compilers can build
       # them on the consumer's machine. priv/ artifacts are built per-machine
       # and never shipped; the docs/ extras are dev-time `mix docs` material,
@@ -107,6 +110,7 @@ defmodule Linx.MixProject do
       before_closing_body_tag: &mermaid_script/1,
       extras: [
         "README.md",
+        "CHANGELOG.md",
         "docs/netlink/netlink-overview.md",
         "docs/netlink/netlink-examples.md",
         "docs/netlink/netlink-references.md",
