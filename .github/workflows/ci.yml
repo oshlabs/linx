@@ -21,12 +21,9 @@ jobs:
       matrix:
         include:
           # Floor — the lowest supported pairing (consumer floor is
-          # ~> 1.15 / OTP 26, forced by Linx.Tty's prim_tty use).
-          - elixir: "1.15"
-            otp: "26"
-          # Midpoint, for breadth across the supported range.
-          - elixir: "1.17"
-            otp: "27"
+          # ~> 1.18 / OTP 28: Linx.Tty drives the OTP-28 prim_tty internals).
+          - elixir: "1.18"
+            otp: "28"
           # Latest — mirrors the pinned dev toolchain (.tool-versions).
           # Formatter output is version-sensitive, so the format check
           # runs only on this cell.

@@ -22,7 +22,7 @@ def deps do
 end
 ```
 
-**Requirements.** Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Windows. Elixir **1.15+** on Erlang/**OTP 26+** (the `Linx.Tty` group-leader attach mode depends on the OTP-26 `prim_tty` driver). Kernel **6.6 LTS** or newer; the nf_tables paths target 6.12 LTS.
+**Requirements.** Linux only — the underlying kernel interfaces don't exist on macOS, BSD, or Windows. Elixir **1.18+** on Erlang/**OTP 28+** (the `Linx.Tty` group-leader attach mode depends on `prim_tty` internals added in OTP 28). Kernel **6.6 LTS** or newer; the nf_tables paths target 6.12 LTS.
 
 **Build prerequisites.** The kernel-interface NIFs and the process Port are compiled from C (`c_src/`) at install time, so a C compiler and the relevant headers must be present:
 
