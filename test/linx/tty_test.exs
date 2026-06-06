@@ -131,8 +131,14 @@ defmodule Linx.TtyTest do
 
   describe "window_size/1 (TIOCGWINSZ)" do
     test "returns ENOTTY on a non-tty fd" do
-      # fd 0 in `mix test` is the BEAM's stdin, generally not a tty.
-      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :enotty}} = Tty.window_size(0)
+      # fd 0 is the BEAM's stdin. Under CI (or `mix test < /dev/null`) it's
+      # redirected and not a tty, so TIOCGWINSZ returns ENOTTY. Launched from
+      # an interactive terminal, fd 0 *is* the real tty and the call succeeds;
+      # skip the assertion in that case so local runs match CI.
+      case Tty.window_size(0) do
+        {:ok, %Linx.Tty.WindowSize{}} -> :ok
+        other -> assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :enotty}} = other
+      end
     end
 
     test "returns EBADF on a closed/invalid fd" do
@@ -145,8 +151,12 @@ defmodule Linx.TtyTest do
     test "returns ENOTTY on a non-tty fd" do
       ws = %Linx.Tty.WindowSize{rows: 24, cols: 80, xpixel: 0, ypixel: 0}
 
-      assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :enotty}} =
-               Tty.set_window_size(0, ws)
+      # See the window_size/1 note: fd 0 is only a non-tty under CI/redirected
+      # stdin. Interactively it's the real terminal, where the call succeeds.
+      case Tty.set_window_size(0, ws) do
+        :ok -> :ok
+        other -> assert {:error, %Linx.Tty.Error{operation: :ioctl, errno: :enotty}} = other
+      end
     end
 
     test "rejects window dimensions that wouldn't fit in struct winsize" do
@@ -174,10 +184,10 @@ defmodule Linx.TtyTest do
           # runner's terminal mode untouched in practice.
           assert :ok = Tty.restore_and_close(fd, saved)
 
-          # And it's idempotent against the already-closed fd.
-          assert :ok =
-                   Tty.restore_and_close(fd, saved) or
-                     match?({:error, %Linx.Tty.Error{}}, Tty.restore_and_close(fd, saved))
+          # And it's idempotent against the already-closed fd: either it
+          # reports :ok again, or it errors cleanly on the stale fd.
+          again = Tty.restore_and_close(fd, saved)
+          assert again == :ok or match?({:error, %Linx.Tty.Error{}}, again)
 
         {:error, %Linx.Tty.Error{operation: :open, errno: :enxio}} ->
           :ok
