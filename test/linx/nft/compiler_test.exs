@@ -178,7 +178,12 @@ defmodule Linx.NFT.CompilerTest do
 
       [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
 
+      # The leading meta l4proto guard is the compiler's
+      # protocol-context dependency (without it, `tcp dport 22`
+      # would also match UDP packets — same transport offsets).
       assert [
+               %Expr{name: :meta, data: %{key: :l4proto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<6>>}},
                %Expr{name: :payload, data: %{base: :transport, offset: 2, len: 2}},
                %Expr{name: :cmp, data: %{op: :eq, value: <<22::big-16>>}},
                %Expr{name: :immediate, data: %Verdict{kind: :accept}}
@@ -196,6 +201,8 @@ defmodule Linx.NFT.CompilerTest do
       [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
 
       assert [
+               %Expr{name: :meta, data: %{key: :nfproto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<2>>}},
                %Expr{name: :payload, data: %{base: :network, offset: 12, len: 4}},
                %Expr{name: :cmp, data: %{op: :eq, value: <<10, 0, 0, 5>>}},
                %Expr{name: :immediate, data: %Verdict{kind: :drop}}
@@ -213,6 +220,8 @@ defmodule Linx.NFT.CompilerTest do
       [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
 
       assert [
+               %Expr{name: :meta, data: %{key: :nfproto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<2>>}},
                %Expr{name: :payload, data: %{base: :network, offset: 12, len: 4}},
                %Expr{name: :bitwise, data: %{mask: <<0xFF, 0, 0, 0>>}},
                %Expr{name: :cmp, data: %{op: :eq, value: <<10, 0, 0, 0>>}},
@@ -231,6 +240,8 @@ defmodule Linx.NFT.CompilerTest do
       [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
 
       assert [
+               %Expr{name: :meta, data: %{key: :l4proto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<6>>}},
                %Expr{name: :payload},
                %Expr{name: :lookup, data: %{set: "open_ports"}},
                %Expr{name: :immediate, data: %Verdict{kind: :accept}}
@@ -248,6 +259,8 @@ defmodule Linx.NFT.CompilerTest do
       [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
 
       assert [
+               %Expr{name: :meta, data: %{key: :l4proto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<6>>}},
                %Expr{name: :payload},
                %Expr{name: :__anon_set, data: %{values: [22, 80, 443], key_type: :inet_service}},
                %Expr{name: :immediate, data: %Verdict{kind: :accept}}
@@ -448,6 +461,8 @@ defmodule Linx.NFT.CompilerTest do
       [rule] = (rs |> fetch_table!(:ip6, "t") |> fetch_chain!("c")).rules
 
       assert [
+               %Expr{name: :meta, data: %{key: :l4proto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<58>>}},
                %Expr{name: :payload, data: %{base: :transport, offset: 0, len: 1}},
                %Expr{name: :cmp, data: %{op: :eq, value: <<128>>}},
                %Expr{name: :immediate, data: %Verdict{kind: :accept}}
@@ -465,6 +480,8 @@ defmodule Linx.NFT.CompilerTest do
       [rule] = (rs |> fetch_table!(:ip6, "t") |> fetch_chain!("c")).rules
 
       assert [
+               %Expr{name: :meta, data: %{key: :l4proto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<58>>}},
                %Expr{name: :payload, data: %{base: :transport, offset: 0, len: 1}},
                %Expr{name: :cmp, data: %{op: :eq, value: <<128>>}},
                %Expr{name: :immediate, data: %Verdict{kind: :accept}}
@@ -484,6 +501,8 @@ defmodule Linx.NFT.CompilerTest do
       [rule] = (rs |> fetch_table!(:ip6, "t") |> fetch_chain!("c")).rules
 
       assert [
+               %Expr{name: :meta, data: %{key: :l4proto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<58>>}},
                %Expr{name: :payload, data: %{base: :transport, offset: 0, len: 1}},
                %Expr{name: :__anon_set, data: %{values: values, key_type: :inet_proto}},
                %Expr{name: :immediate, data: %Verdict{kind: :accept}}

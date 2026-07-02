@@ -463,7 +463,19 @@ defmodule Linx.NFT.Compiler do
   # ===========================================================
 
   defp compile_rule({:rule, stmts, rule_opts, meta}, family, table_name, chain_name, rs, state) do
-    exprs = Enum.flat_map(stmts, &compile_stmt(&1, family, state))
+    # Protocol-context tracking — our slice of evaluate.c's
+    # proto_ctx machinery: a transport-header match in a family
+    # that doesn't pin the protocol needs a `meta l4proto` guard
+    # first (otherwise `tcp dport 22` also matches UDP packets,
+    # whose ports sit at the same transport offsets), and an
+    # `ip`/`ip6` header match in an `inet` chain needs a
+    # `meta nfproto` guard. Explicit matches on those metas pin
+    # the context, so hand-written guards aren't duplicated.
+    {exprs, _ctx} =
+      Enum.reduce(stmts, {[], initial_proto_ctx(family)}, fn stmt, {acc, ctx} ->
+        {deps, ctx2} = proto_deps(stmt, ctx, state)
+        {acc ++ deps ++ compile_stmt(stmt, family, state), ctx2}
+      end)
 
     rule_kw =
       rule_opts
@@ -793,6 +805,158 @@ defmodule Linx.NFT.Compiler do
   defp stmt_meta(tuple), do: elem(tuple, tuple_size(tuple) - 1)
   defp lhs_meta({:match, _, _, _, meta}), do: meta
   defp lhs_meta(_), do: %{line: 0, column: 0}
+
+  # ---- Protocol-context dependencies ----
+
+  @nfproto_ipv4 2
+  @nfproto_ipv6 10
+
+  @l4proto %{
+    tcp: 6,
+    udp: 17,
+    icmp: 1,
+    icmpv6: 58,
+    sctp: 132,
+    dccp: 33,
+    ah: 51,
+    esp: 50,
+    comp: 108
+  }
+
+  defp initial_proto_ctx(:ip), do: %{nfproto: :ipv4, l4proto: nil}
+  defp initial_proto_ctx(:ip6), do: %{nfproto: :ipv6, l4proto: nil}
+  defp initial_proto_ctx(_), do: %{nfproto: nil, l4proto: nil}
+
+  # Returns {dependency_exprs, updated_ctx} for one rule statement.
+  defp proto_deps({:match, lhs, op, rhs, _meta}, ctx, state) do
+    {deps, ctx} = lhs_proto_deps(lhs, ctx, state)
+    {deps, pin_from_match(lhs, op, rhs, ctx)}
+  end
+
+  defp proto_deps({:vmap, lhs, _target, _meta}, ctx, state),
+    do: lhs_proto_deps(lhs, ctx, state)
+
+  defp proto_deps({:set_update, _op, _set, key_lhs, _opts, _meta}, ctx, state),
+    do: lhs_proto_deps(key_lhs, ctx, state)
+
+  defp proto_deps(_stmt, ctx, _state), do: {[], ctx}
+
+  defp lhs_proto_deps({:concat_lhs, parts, _meta}, ctx, state) do
+    Enum.reduce(parts, {[], ctx}, fn part, {deps, ctx} ->
+      {more, ctx2} = lhs_proto_deps(part, ctx, state)
+      {deps ++ more, ctx2}
+    end)
+  end
+
+  defp lhs_proto_deps({:payload, header, _field, meta}, ctx, state) do
+    case header do
+      :ip ->
+        require_nfproto(:ipv4, ctx, meta, state)
+
+      :ip6 ->
+        require_nfproto(:ipv6, ctx, meta, state)
+
+      transport when is_map_key(@l4proto, transport) ->
+        require_l4proto(transport, ctx, meta, state)
+
+      _ ->
+        {[], ctx}
+    end
+  end
+
+  defp lhs_proto_deps(_lhs, ctx, _state), do: {[], ctx}
+
+  defp require_nfproto(want, ctx, meta, state) do
+    case ctx.nfproto do
+      ^want ->
+        {[], ctx}
+
+      nil ->
+        value = if want == :ipv4, do: @nfproto_ipv4, else: @nfproto_ipv6
+        {[Expr.meta(:nfproto), Expr.cmp(:eq, <<value>>)], %{ctx | nfproto: want}}
+
+      other ->
+        raise_at!(
+          state,
+          meta,
+          "compiler: #{want} header match conflicts with the rule's #{other} context"
+        )
+    end
+  end
+
+  defp require_l4proto(transport, ctx, meta, state) do
+    proto = Map.fetch!(@l4proto, transport)
+
+    # icmp only exists in IPv4 packets and icmpv6 in IPv6 —
+    # contradiction with a pinned network protocol is an error
+    # (nft rejects `icmpv6 type` in an ip-family table the same
+    # way). The l4proto value itself implies the network protocol,
+    # so no extra nfproto guard is emitted.
+    case {transport, ctx.nfproto} do
+      {:icmp, :ipv6} ->
+        raise_at!(state, meta, "compiler: icmp match conflicts with the rule's ipv6 context")
+
+      {:icmpv6, :ipv4} ->
+        raise_at!(state, meta, "compiler: icmpv6 match conflicts with the rule's ipv4 context")
+
+      _ ->
+        :ok
+    end
+
+    case ctx.l4proto do
+      ^proto ->
+        {[], ctx}
+
+      nil ->
+        {[Expr.meta(:l4proto), Expr.cmp(:eq, <<proto>>)], %{ctx | l4proto: proto}}
+
+      other ->
+        raise_at!(
+          state,
+          meta,
+          "compiler: #{transport} match conflicts with the rule's transport protocol " <>
+            "(already pinned to protocol #{other})"
+        )
+    end
+  end
+
+  # A hand-written `meta l4proto tcp` / `meta nfproto ipv4` /
+  # `ip protocol tcp` equality match pins the context so we don't
+  # re-emit the guard.
+  defp pin_from_match({:meta, :l4proto, _}, :eq, rhs, ctx) do
+    case proto_value(rhs) do
+      nil -> ctx
+      n -> %{ctx | l4proto: n}
+    end
+  end
+
+  defp pin_from_match({:meta, :nfproto, _}, :eq, rhs, ctx) do
+    case proto_value(rhs) do
+      @nfproto_ipv4 -> %{ctx | nfproto: :ipv4}
+      @nfproto_ipv6 -> %{ctx | nfproto: :ipv6}
+      _ -> ctx
+    end
+  end
+
+  defp pin_from_match({:payload, :ip, :protocol, _}, :eq, rhs, ctx) do
+    case proto_value(rhs) do
+      nil -> ctx
+      n -> %{ctx | l4proto: n}
+    end
+  end
+
+  defp pin_from_match(_lhs, _op, _rhs, ctx), do: ctx
+
+  defp proto_value({:integer, n, _}), do: n
+
+  defp proto_value({:identifier, name, _}) do
+    case parse_int_keyword(name) do
+      {:ok, n} -> n
+      :error -> nil
+    end
+  end
+
+  defp proto_value(_), do: nil
 
   # ---- LHS ----
 
@@ -1618,6 +1782,12 @@ defmodule Linx.NFT.Compiler do
   defp parse_int_keyword("udp"), do: {:ok, 17}
   defp parse_int_keyword("icmp"), do: {:ok, 1}
   defp parse_int_keyword("icmpv6"), do: {:ok, 58}
+  defp parse_int_keyword("sctp"), do: {:ok, 132}
+  defp parse_int_keyword("dccp"), do: {:ok, 33}
+
+  # `meta nfproto` values.
+  defp parse_int_keyword("ipv4"), do: {:ok, 2}
+  defp parse_int_keyword("ipv6"), do: {:ok, 10}
 
   # ICMPv6 type values (RFC 4443 + ND from RFC 4861 + extensions).
   # These are unique to the ICMPv6 namespace; ICMPv4-specific

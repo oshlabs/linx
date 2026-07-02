@@ -77,6 +77,8 @@ defmodule Linx.NFT.DynsetTest do
         """)
 
       assert [
+               %Expr{name: :meta, data: %{key: :nfproto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<2>>}},
                %Expr{name: :payload, data: %{base: :network, offset: 12, len: 4}},
                %Expr{name: :dynset, data: dynset},
                %Expr{name: :immediate}

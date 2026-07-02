@@ -320,11 +320,20 @@ accepted syntax reaches the kernel. Includes the two items parked in
   conversion before range/set lookup.
 - [ ] Concatenated set types + pipapo-backed concatenated ranges
   (`NFTA_SET_ELEM_KEY_END`, kernel ≥ 5.6).
-- [ ] **Protocol-context dependency generation** — the crown feature of
-  `evaluate.c`: `tcp dport 22` in an `inet` chain auto-materializes `meta
-  l4proto tcp`; `ip saddr` in a netdev/bridge chain materializes the ether
-  type dependency. Track a per-rule protocol context in the compiler; reject
-  contradictions (`ip saddr` after `meta nfproto ipv6`) with both locations.
+- [x] **Protocol-context dependency generation** (2026-07-02): per-rule
+  proto context in the compiler — transport matches materialise a
+  `meta l4proto` guard (fixing a REAL bug: `tcp dport 22` previously also
+  matched UDP packets, same transport offsets) and `ip`/`ip6` header
+  matches in `inet` chains materialise `meta nfproto`; explicit
+  `meta l4proto`/`meta nfproto`/`ip protocol` equality matches pin the
+  context (no duplicate guards); tcp-vs-udp and icmp-vs-ipv6 contradictions
+  are located errors. The formatter folds the guard into the following
+  payload load and uses it as a protocol hint — fixing the
+  `udp dport`-rendered-as-`tcp dport` and `icmpv6 type`-as-`icmp type`
+  ambiguities. Kernel acceptance caught a latent Wire bug in the process:
+  meta_key_int had NFPROTO/L4PROTO as 12/13 (actually NFTRACE/RTCLASSID);
+  the kernel enum puts them at 15/16. Still open: ether-type deps for
+  bridge/netdev families.
 - [ ] Constant folding of binops the kernel can't evaluate (nft folds in
   `evaluate.c`); reject non-constant forms with a clear error.
 - [ ] Interpolation growth: today `#{…}` works in match-RHS only. Extend to

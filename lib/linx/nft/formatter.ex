@@ -298,10 +298,40 @@ defmodule Linx.NFT.Formatter do
   # ===========================================================
 
   defp format_rule(%Rule{expressions: exprs, comment: comment}) do
-    stmts = format_exprs(exprs)
+    stmts = exprs |> elide_proto_deps() |> format_exprs()
     pieces = if comment, do: stmts ++ [~s/comment "#{escape_string(comment)}"/], else: stmts
     Enum.join(pieces, " ")
   end
+
+  # The compiler auto-materialises `meta l4proto` / `meta nfproto`
+  # guards before payload matches (protocol-context tracking). When
+  # a guard is immediately followed by the payload load it exists
+  # for, folding it away reproduces nft's own listing style — and
+  # the protocol value becomes a HINT that disambiguates the
+  # transport field names (`udp dport` vs `tcp dport`, `icmpv6
+  # type` vs `icmp type`; the offsets alone can't tell). Re-parsing
+  # the folded output regenerates the identical guard.
+  defp elide_proto_deps([
+         %Expr{name: :meta, data: %{key: :l4proto}},
+         %Expr{name: :cmp, data: %{op: :eq, value: <<proto>>}},
+         %Expr{name: :payload, data: %{base: :transport} = pdata} = payload
+         | rest
+       ]) do
+    [%{payload | data: Map.put(pdata, :proto_hint, proto)} | elide_proto_deps(rest)]
+  end
+
+  defp elide_proto_deps([
+         %Expr{name: :meta, data: %{key: :nfproto}},
+         %Expr{name: :cmp, data: %{op: :eq, value: <<nf>>}},
+         %Expr{name: :payload, data: %{base: :network}} = payload
+         | rest
+       ])
+       when nf in [2, 10] do
+    [payload | elide_proto_deps(rest)]
+  end
+
+  defp elide_proto_deps([expr | rest]), do: [expr | elide_proto_deps(rest)]
+  defp elide_proto_deps([]), do: []
 
   defp format_exprs(exprs), do: do_format_exprs(exprs, [])
 
@@ -331,13 +361,13 @@ defmodule Linx.NFT.Formatter do
   # ---- payload + cmp ----
   defp do_format_exprs(
          [
-           %Expr{name: :payload, data: %{base: b, offset: o, len: l}},
+           %Expr{name: :payload, data: %{base: b, offset: o, len: l} = pdata},
            %Expr{name: :cmp, data: %{op: op, value: v}}
            | rest
          ],
          acc
        ) do
-    field = payload_field(b, o, l)
+    field = payload_field(pdata)
     rhs = render_payload_value(v, b, o, l)
     stmt = stmt(field, render_op(op), rhs)
     do_format_exprs(rest, [stmt | acc])
@@ -346,14 +376,14 @@ defmodule Linx.NFT.Formatter do
   # ---- payload + bitwise + cmp → CIDR ----
   defp do_format_exprs(
          [
-           %Expr{name: :payload, data: %{base: b, offset: o, len: l}},
+           %Expr{name: :payload, data: %{base: _, offset: _, len: l} = pdata},
            %Expr{name: :bitwise, data: %{mask: mask}},
            %Expr{name: :cmp, data: %{op: op, value: v}}
            | rest
          ],
          acc
        ) do
-    field = payload_field(b, o, l)
+    field = payload_field(pdata)
     prefix = bitwise_prefix_len(mask)
     addr = render_address(v, l)
     stmt = stmt(field, render_op(op), "#{addr}/#{prefix}")
@@ -363,13 +393,13 @@ defmodule Linx.NFT.Formatter do
   # ---- payload + lookup → set ref / vmap ref / anon set ----
   defp do_format_exprs(
          [
-           %Expr{name: :payload, data: %{base: b, offset: o, len: l}},
+           %Expr{name: :payload, data: %{base: _, offset: _, len: _} = pdata},
            %Expr{name: :lookup, data: %{set: name} = lookup}
            | rest
          ],
          acc
        ) do
-    field = payload_field(b, o, l)
+    field = payload_field(pdata)
     ref = if lookup[:dreg] == 0, do: "vmap @#{name}", else: "@#{name}"
     do_format_exprs(rest, ["#{field} #{ref}" | acc])
   end
@@ -377,13 +407,13 @@ defmodule Linx.NFT.Formatter do
   # ---- LHS + __anon_vmap → inline vmap literal ----
   defp do_format_exprs(
          [
-           %Expr{name: :payload, data: %{base: b, offset: o, len: l}},
+           %Expr{name: :payload, data: %{base: _, offset: _, len: _} = pdata},
            %Expr{name: :__anon_vmap, data: %{elements: elems, key_type: kt}}
            | rest
          ],
          acc
        ) do
-    field = payload_field(b, o, l)
+    field = payload_field(pdata)
     do_format_exprs(rest, ["#{field} vmap { #{render_vmap_elems(elems, kt)} }" | acc])
   end
 
@@ -424,13 +454,13 @@ defmodule Linx.NFT.Formatter do
 
   defp do_format_exprs(
          [
-           %Expr{name: :payload, data: %{base: b, offset: o, len: l}},
+           %Expr{name: :payload, data: %{base: _, offset: _, len: _} = pdata},
            %Expr{name: :__anon_set, data: %{values: vals, key_type: kt}}
            | rest
          ],
          acc
        ) do
-    field = payload_field(b, o, l)
+    field = payload_field(pdata)
     rendered = vals |> Enum.map(&render_set_element(&1, kt)) |> Enum.join(", ")
     do_format_exprs(rest, ["#{field} { #{rendered} }" | acc])
   end
@@ -667,8 +697,8 @@ defmodule Linx.NFT.Formatter do
 
   defp concat_load?(_), do: false
 
-  defp render_load_lhs(%Expr{name: :payload, data: %{base: b, offset: o, len: l}}),
-    do: payload_field(b, o, l)
+  defp render_load_lhs(%Expr{name: :payload, data: %{base: _, offset: _, len: _} = pdata}),
+    do: payload_field(pdata)
 
   defp render_load_lhs(%Expr{name: :ct, data: %{key: key}}), do: "ct #{key}"
   defp render_load_lhs(%Expr{name: :meta, data: %{key: key}}), do: "meta #{key}"
@@ -759,6 +789,28 @@ defmodule Linx.NFT.Formatter do
   # ===========================================================
   # Payload / meta / address rendering
   # ===========================================================
+
+  # Map form: consults the :proto_hint left by elide_proto_deps/1
+  # to disambiguate transport-header field names (the offsets are
+  # identical across TCP/UDP/SCTP/DCCP, and across ICMP/ICMPv6).
+  defp payload_field(%{base: :transport, offset: o, len: 2} = data) when o in [0, 2] do
+    proto =
+      case data[:proto_hint] do
+        17 -> "udp"
+        132 -> "sctp"
+        33 -> "dccp"
+        _ -> "tcp"
+      end
+
+    "#{proto} #{if o == 0, do: "sport", else: "dport"}"
+  end
+
+  defp payload_field(%{base: :transport, offset: o, len: 1} = data) when o in [0, 1] do
+    proto = if data[:proto_hint] == 58, do: "icmpv6", else: "icmp"
+    "#{proto} #{if o == 0, do: "type", else: "code"}"
+  end
+
+  defp payload_field(%{base: b, offset: o, len: l}), do: payload_field(b, o, l)
 
   defp payload_field(:transport, 0, 2), do: "tcp sport"
   defp payload_field(:transport, 2, 2), do: "tcp dport"

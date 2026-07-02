@@ -173,9 +173,14 @@ defmodule Linx.NFT.ExpressionGrammarTest do
 
       [rule] = table.chains["c"].rules
 
-      # ip daddr (4 bytes) → reg 8; tcp dport (2 bytes) → reg 9;
-      # lookup reads the concatenation starting at reg 8.
+      # Protocol guards first (nfproto for ip daddr, l4proto for
+      # tcp dport), then: ip daddr (4 bytes) → reg 8; tcp dport
+      # (2 bytes) → reg 9; lookup reads the concatenation at reg 8.
       assert [
+               %Expr{name: :meta, data: %{key: :nfproto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<2>>}},
+               %Expr{name: :meta, data: %{key: :l4proto}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<6>>}},
                %Expr{name: :payload, data: %{base: :network, offset: 16, len: 4, dreg: 8}},
                %Expr{name: :payload, data: %{base: :transport, offset: 2, len: 2, dreg: 9}},
                %Expr{name: :lookup, data: %{set: "svc", sreg: 8}},

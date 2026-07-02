@@ -781,8 +781,15 @@ defmodule Linx.Netfilter.Wire do
   def meta_key_int(:oiftype), do: 9
   def meta_key_int(:skuid), do: 10
   def meta_key_int(:skgid), do: 11
-  def meta_key_int(:nfproto), do: 12
-  def meta_key_int(:l4proto), do: 13
+  # 12 = NFT_META_NFTRACE, 13 = NFT_META_RTCLASSID, 14 =
+  # NFT_META_SECMARK — nfproto/l4proto sit AFTER those in the
+  # kernel enum (a kernel-acceptance catch: 12/13 here made the
+  # protocol guards load nftrace/rtclassid instead).
+  def meta_key_int(:nftrace), do: 12
+  def meta_key_int(:rtclassid), do: 13
+  def meta_key_int(:secmark), do: 14
+  def meta_key_int(:nfproto), do: 15
+  def meta_key_int(:l4proto), do: 16
 
   @spec meta_key_atom(non_neg_integer()) :: atom() | {:unknown_meta_key, non_neg_integer()}
   def meta_key_atom(0), do: :len
@@ -797,8 +804,11 @@ defmodule Linx.Netfilter.Wire do
   def meta_key_atom(9), do: :oiftype
   def meta_key_atom(10), do: :skuid
   def meta_key_atom(11), do: :skgid
-  def meta_key_atom(12), do: :nfproto
-  def meta_key_atom(13), do: :l4proto
+  def meta_key_atom(12), do: :nftrace
+  def meta_key_atom(13), do: :rtclassid
+  def meta_key_atom(14), do: :secmark
+  def meta_key_atom(15), do: :nfproto
+  def meta_key_atom(16), do: :l4proto
   def meta_key_atom(n), do: {:unknown_meta_key, n}
 
   # ===========================================================
