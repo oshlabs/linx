@@ -55,7 +55,8 @@ defmodule Linx.NFT do
   It targets the common ~85% subset; the long tail (`synproxy`,
   `secmark`, `osf`, `fib`, `jhash`, advanced ct fields,
   `dup`/`fwd`, ipsec contexts) is not yet implemented (see
-  `docs/netfilter/DESIGN.md`).
+  `NFT-PLAN.md` for the parity roadmap and
+  `docs/netfilter/netfilter-overview.md` for design notes).
 
   ## Interpolation
 
@@ -178,7 +179,10 @@ defmodule Linx.NFT do
   end
 
   defp tokenize_with_interp(source, file, line) do
-    Tokenizer.tokenize(source, file: file, line: line, interpolation?: true)
+    # `escapes?: true` — Elixir-style string escapes are a
+    # sigil-only convenience; `parse/1` / `parse_file/1` stay
+    # byte-for-byte compatible with nft's scanner (no escapes).
+    Tokenizer.tokenize(source, file: file, line: line, interpolation?: true, escapes?: true)
   end
 
   defp has_interpolation?(tokens) do

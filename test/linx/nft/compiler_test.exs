@@ -624,18 +624,53 @@ defmodule Linx.NFT.CompilerTest do
     end
   end
 
-  describe "deferred features" do
-    test "limit statement raises a clear error" do
-      err =
-        compile_err("""
+  describe "limit statement" do
+    test "limit rate lowers to an nft_limit expression" do
+      rs =
+        compile!("""
         table inet t {
           chain c { limit rate 10/second accept }
         }
         """)
 
-      assert err.message =~ "limit"
+      [rule] = rs.tables[{:inet, "t"}].chains["c"].rules
+
+      assert Enum.any?(rule.expressions, fn
+               %Linx.Netfilter.Expr{
+                 name: :limit,
+                 data: %{rate: 10, per: 1, burst: 5, type: :packets, over: false}
+               } ->
+                 true
+
+               _ ->
+                 false
+             end)
     end
 
+    test "limit rate over N/minute burst M packets" do
+      rs =
+        compile!("""
+        table inet t {
+          chain c { limit rate over 4/minute burst 9 packets drop }
+        }
+        """)
+
+      [rule] = rs.tables[{:inet, "t"}].chains["c"].rules
+
+      assert Enum.any?(rule.expressions, fn
+               %Linx.Netfilter.Expr{
+                 name: :limit,
+                 data: %{rate: 4, per: 60, burst: 9, over: true}
+               } ->
+                 true
+
+               _ ->
+                 false
+             end)
+    end
+  end
+
+  describe "deferred features" do
     test "meta mark set raises a clear error" do
       err =
         compile_err("""
@@ -647,15 +682,40 @@ defmodule Linx.NFT.CompilerTest do
       assert err.message =~ "set"
     end
 
-    test "named object raises a clear error" do
-      err =
-        compile_err("""
+    test "named counter objects land in the table and objref via `counter name`" do
+      rs =
+        compile!("""
         table inet t {
-          counter ctr { }
+          counter ctr {
+            packets 7 bytes 512
+          }
+          chain c {
+            counter name "ctr" accept
+          }
         }
         """)
 
-      assert err.message =~ "named `counter` objects"
+      table = rs.tables[{:inet, "t"}]
+      obj = table.objects[{:counter, "ctr"}]
+      assert obj.data == %{packets: 7, bytes: 512}
+
+      [rule] = table.chains["c"].rules
+
+      assert Enum.any?(rule.expressions, fn
+               %Linx.Netfilter.Expr{name: :objref, data: %{name: "ctr", kind: :counter}} -> true
+               _ -> false
+             end)
+    end
+
+    test "named quota objects still raise a clear error" do
+      err =
+        compile_err("""
+        table inet t {
+          quota q { }
+        }
+        """)
+
+      assert err.message =~ "named `quota` objects"
     end
 
     test "flowtable raises a clear error" do

@@ -69,9 +69,9 @@ defmodule Linx.NFT.Parser do
 
   The parser covers the structural shape and the slice of the
   grammar needed for the canonical `~NFT` examples in
-  `docs/netfilter/EXAMPLES.md`. The set of recognised statement
-  / lhs / rhs shapes will grow as the compiler and long-tail
-  extensions add callers (see `docs/netfilter/DESIGN.md`). The
+  `docs/netfilter/netfilter-examples.md`. The set of recognised
+  statement / lhs / rhs shapes will grow as the compiler and
+  long-tail extensions add callers (see `NFT-PLAN.md`). The
   architectural commitments — recursive descent, raise-on-mismatch,
   file:line:column on every AST node — are finalised here.
   """
@@ -686,10 +686,61 @@ defmodule Linx.NFT.Parser do
 
   defp parse_match_stmt(tokens, state) do
     {lhs, rest} = parse_match_lhs(tokens, state)
-    {op, rest} = parse_match_op(rest)
-    {rhs, rest} = parse_value(rest, state)
-    meta = lhs_meta(lhs)
-    {{:match, lhs, op, rhs, meta}, rest}
+    finish_match(lhs, rest, state)
+  end
+
+  # Everything after a match LHS: `.`-concatenation of further
+  # selectors, a `vmap` dispatch, or a (possibly implicit-eq)
+  # relational comparison. Shared by the payload, `meta`, and `ct`
+  # statement paths.
+  defp finish_match(lhs, tokens, state) do
+    {lhs, tokens} = parse_lhs_concat(lhs, tokens, state)
+
+    case tokens do
+      [{:identifier, "vmap", _} | rest] ->
+        {target, rest2} = parse_vmap_target(rest, state)
+        {{:vmap, lhs, target, lhs_meta(lhs)}, rest2}
+
+      _ ->
+        {op, rest} = parse_match_op(tokens)
+        {rhs, rest2} = parse_value(rest, state)
+        {{:match, lhs, op, rhs, lhs_meta(lhs)}, rest2}
+    end
+  end
+
+  # `ip daddr . tcp dport ...` — selector concatenation (nft:
+  # `concat_expr : concat_expr DOT basic_expr`).
+  defp parse_lhs_concat(first, [{:dot, _} | rest], state) do
+    {next, rest2} = parse_match_lhs(rest, state)
+
+    case parse_lhs_concat(next, rest2, state) do
+      {{:concat_lhs, parts, _}, rest3} ->
+        {{:concat_lhs, [first | parts], lhs_meta(first)}, rest3}
+
+      {single, rest3} ->
+        {{:concat_lhs, [first, single], lhs_meta(first)}, rest3}
+    end
+  end
+
+  defp parse_lhs_concat(lhs, tokens, _state), do: {lhs, tokens}
+
+  # The target of a `vmap`: `@name` (a declared verdict map) or an
+  # inline `{ key : verdict, ... }` literal.
+  defp parse_vmap_target([{:at, meta}, {:identifier, name, _} | rest], _state) do
+    {{:set_ref, name, meta}, rest}
+  end
+
+  defp parse_vmap_target([{:lbrace, meta} | _] = tokens, state) do
+    {elems, rest} = parse_brace_value_list(tokens, state)
+    {{:map_inline, elems, meta}, rest}
+  end
+
+  defp parse_vmap_target([tok | _], state) do
+    raise_unexpected!(state, tok, "expected `@name` or `{ ... }` after `vmap`")
+  end
+
+  defp parse_vmap_target([], state) do
+    raise_eof!(state, "expected `@name` or `{ ... }` after `vmap`")
   end
 
   defp parse_match_lhs([{:identifier, header, meta} | rest], state)
@@ -821,9 +872,26 @@ defmodule Linx.NFT.Parser do
 
   defp parse_nat_stmt(tokens, kind, meta, state) do
     rest = expect_identifier_word!(tokens, "to", state)
-    {target, rest} = parse_value(rest, state)
+    {target, rest} = parse_nat_target(rest, state)
     {opts, rest} = parse_nat_opts(rest, state, [])
     {{:nat, kind, target, opts, meta}, rest}
+  end
+
+  # `to <addr>[:<port>]` — the tokenizer splits `1.2.3.4:8080`
+  # into address + colon + integer the way nft's scanner does, so
+  # the port shows up as a trailing `:value` here. Also covers
+  # `$var:8080` and `:portrange` forms.
+  defp parse_nat_target(tokens, state) do
+    {value, rest} = parse_value(tokens, state)
+
+    case rest do
+      [{:colon, _} | rest2] ->
+        {port, rest3} = parse_value(rest2, state)
+        {{:nat_target, value, port, value_meta(value)}, rest3}
+
+      _ ->
+        {value, rest}
+    end
   end
 
   defp parse_masquerade_stmt(tokens, meta, state) do
@@ -865,15 +933,12 @@ defmodule Linx.NFT.Parser do
         {{:meta_set, String.to_atom(field), value, meta}, rest3}
 
       _ ->
-        # `meta FIELD VALUE` as a match (without explicit op).
-        {op, rest2} = parse_match_op(rest)
-        {value, rest3} = parse_value(rest2, state)
-
+        # `meta FIELD ...` as a match (op, implicit eq, or vmap).
         unless field in @meta_fields do
           raise_at!(state, meta, "unknown meta field #{inspect(field)}")
         end
 
-        {{:match, {:meta, String.to_atom(field), meta}, op, value, meta}, rest3}
+        finish_match({:meta, String.to_atom(field), meta}, rest, state)
     end
   end
 
@@ -887,14 +952,11 @@ defmodule Linx.NFT.Parser do
         {{:meta_set, String.to_atom("ct_" <> field), value, meta}, rest3}
 
       _ ->
-        {op, rest2} = parse_match_op(rest)
-        {value, rest3} = parse_value(rest2, state)
-
         unless field in @ct_fields do
           raise_at!(state, meta, "unknown ct field #{inspect(field)}")
         end
 
-        {{:match, {:ct, String.to_atom(field), meta}, op, value, meta}, rest3}
+        finish_match({:ct, String.to_atom(field), meta}, rest, state)
     end
   end
 
@@ -976,6 +1038,13 @@ defmodule Linx.NFT.Parser do
   defp parse_single_value([{:elixir_expr, raw, meta} | rest], _state),
     do: {{:elixir_expr, raw, meta}, rest}
 
+  # Unclassifiable literal the tokenizer demoted instead of
+  # rejecting (nft-style). Accepted at value position; the
+  # compiler rejects it with a located error if it can't be
+  # interpreted in context.
+  defp parse_single_value([{:symbol, raw, meta} | rest], _state),
+    do: {{:symbol, raw, meta}, rest}
+
   defp parse_single_value([{:star, meta} | rest], _state),
     do: {{:wildcard, meta}, rest}
 
@@ -1035,9 +1104,12 @@ defmodule Linx.NFT.Parser do
     end
   end
 
-  # A set element is a value, optionally `value : action` for maps.
+  # A set element is a value (possibly a `.`-concatenation of
+  # values, for concatenated key types), optionally `value : data`
+  # for maps.
   defp parse_set_element(tokens, state) do
     {key, rest} = parse_single_value(tokens, state)
+    {key, rest} = parse_element_concat(key, rest, state)
 
     case rest do
       [{:colon, _} | rest2] ->
@@ -1056,6 +1128,21 @@ defmodule Linx.NFT.Parser do
         {key, rest}
     end
   end
+
+  # `10.96.0.1 . 443` — concatenated element for `type X . Y` sets.
+  defp parse_element_concat(first, [{:dot, _} | rest], state) do
+    {next, rest2} = parse_single_value(rest, state)
+
+    case parse_element_concat(next, rest2, state) do
+      {{:concat, parts, _}, rest3} ->
+        {{:concat, [first | parts], value_meta(first)}, rest3}
+
+      {single, rest3} ->
+        {{:concat, [first, single], value_meta(first)}, rest3}
+    end
+  end
+
+  defp parse_element_concat(value, tokens, _state), do: {value, tokens}
 
   # Map data is a verdict (`accept`, `jump CHAIN`, ...) or a value.
   defp parse_map_data([{:identifier, v, meta} | rest], _state) when v in @verdict_atoms do
@@ -1239,6 +1326,7 @@ defmodule Linx.NFT.Parser do
   defp lhs_meta({:payload, _h, _f, meta}), do: meta
   defp lhs_meta({:meta, _f, meta}), do: meta
   defp lhs_meta({:ct, _f, meta}), do: meta
+  defp lhs_meta({:concat_lhs, _parts, meta}), do: meta
 
   defp value_meta({_, _, meta}) when is_map(meta), do: meta
   defp value_meta({_, _, _, meta}) when is_map(meta), do: meta
@@ -1311,6 +1399,8 @@ defmodule Linx.NFT.Parser do
   defp render_kind(other), do: Atom.to_string(other)
 
   defp render_value(:identifier, v), do: v
+  defp render_value(:symbol, v), do: v
+  defp render_value(:time, v), do: "#{v}ms"
   defp render_value(:integer, v), do: Integer.to_string(v)
   defp render_value(:string, v), do: ~s/"#{v}"/
   defp render_value(:ipv4, v), do: v

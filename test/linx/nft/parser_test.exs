@@ -361,7 +361,8 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:set, "blocklist", opts, _}], _}] = parse!(src)
       assert opts[:type] == :ipv4_addr
       assert opts[:flags] == [:interval, :timeout]
-      assert {:time, 3600, _} = opts[:timeout]
+      # :time tokens carry milliseconds (the kernel's set-timeout unit).
+      assert {:time, 3_600_000, _} = opts[:timeout]
     end
 
     test "map with concatenated key" do

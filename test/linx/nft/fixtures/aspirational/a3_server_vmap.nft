@@ -1,0 +1,31 @@
+#!/usr/sbin/nft -f
+# Server dispatch via verdict maps + named counters, wiki style.
+flush ruleset
+
+table inet server {
+	counter http_hits {}
+	counter ssh_hits {
+		packets 0 bytes 0
+	}
+
+	set trusted {
+		type ipv4_addr
+		flags interval
+		elements = { 10.0.0.0/8, 192.168.0.0/16 }
+	}
+
+	chain ssh_in {
+		counter name "ssh_hits" accept
+	}
+
+	chain http_in {
+		counter name "http_hits" accept
+	}
+
+	chain input {
+		type filter hook input priority filter; policy drop;
+		ct state vmap { established : accept, related : accept, invalid : drop }
+		ip saddr @trusted accept
+		tcp dport vmap { 22 : jump ssh_in, 80 : jump http_in, 443 : jump http_in }
+	}
+}

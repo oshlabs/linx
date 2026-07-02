@@ -172,6 +172,8 @@ defmodule Linx.Netfilter.Expr do
   defp payload_alias(:ip_protocol), do: {:network, 9, 1}
   defp payload_alias(:ip6_saddr), do: {:network, 8, 16}
   defp payload_alias(:ip6_daddr), do: {:network, 24, 16}
+  defp payload_alias(:ip6_nexthdr), do: {:network, 6, 1}
+  defp payload_alias(:ip6_hoplimit), do: {:network, 7, 1}
   defp payload_alias(:tcp_sport), do: {:transport, 0, 2}
   defp payload_alias(:tcp_dport), do: {:transport, 2, 2}
   defp payload_alias(:udp_sport), do: {:transport, 0, 2}
@@ -331,6 +333,67 @@ defmodule Linx.Netfilter.Expr do
         bytes: Keyword.get(opts, :bytes, 0)
       }
     }
+  end
+
+  @doc """
+  Limit expression — token-bucket rate limiting (`nft_limit`).
+  The rule matches while the rate is *under* the limit; with
+  `over: true` the sense inverts (matches once the rate is
+  exceeded — the usual shape for `limit rate over N/second drop`).
+
+  Options:
+
+    * `:rate` — units per `:per` window (required, pos integer).
+    * `:per` — window in **seconds**: 1 (second), 60 (minute),
+      3600 (hour), 86_400 (day), 604_800 (week). Default `1`.
+    * `:burst` — token-bucket depth. Defaults to `5` for packet
+      limits (nft's own default) and `0` for byte limits.
+    * `:type` — `:packets` (default) or `:bytes`.
+    * `:over` — invert the match sense (default `false`).
+
+      Expr.limit(rate: 5, per: 60)                 # limit rate 5/minute
+      Expr.limit(rate: 10, over: true)             # limit rate over 10/second
+  """
+  @spec limit(keyword()) :: t()
+  def limit(opts) when is_list(opts) do
+    type = Keyword.get(opts, :type, :packets)
+
+    unless type in [:packets, :bytes] do
+      raise ArgumentError, "limit :type must be :packets or :bytes, got: #{inspect(type)}"
+    end
+
+    rate = Keyword.fetch!(opts, :rate)
+
+    unless is_integer(rate) and rate > 0 do
+      raise ArgumentError, "limit :rate must be a positive integer, got: #{inspect(rate)}"
+    end
+
+    default_burst = if type == :packets, do: 5, else: 0
+
+    %__MODULE__{
+      name: :limit,
+      data: %{
+        rate: rate,
+        per: Keyword.get(opts, :per, 1),
+        burst: Keyword.get(opts, :burst, default_burst),
+        type: type,
+        over: Keyword.get(opts, :over, false)
+      }
+    }
+  end
+
+  @doc """
+  Named-object reference expression (`nft_objref`) — attaches a
+  table-level stateful object (declared via
+  `Linx.Netfilter.Object`) to this rule: `counter name "hits"`,
+  `quota name "monthly"`, etc. All rules referencing the same
+  object share its state.
+
+      Expr.objref("http_hits", :counter)
+  """
+  @spec objref(String.t(), Linx.Netfilter.Object.kind()) :: t()
+  def objref(name, kind) when is_binary(name) and is_atom(kind) do
+    %__MODULE__{name: :objref, data: %{name: name, kind: kind}}
   end
 
   # ===========================================================

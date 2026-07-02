@@ -66,9 +66,25 @@ defmodule Linx.NFT.TokenizerTest do
       assert [{:integer, 0, _}] = tokens!("0b0")
     end
 
-    test "0x with no digits is an error" do
-      assert {:error, %ParseError{message: msg}} = Tokenizer.tokenize("0x")
-      assert msg =~ "expected hex digits"
+    test "0x with no digits lexes as 0 + identifier, like nft" do
+      # nft's scanner has no `0x`-with-no-digits token: it lexes
+      # `0` (a NUM) and then `x` as a string. Mirror that instead
+      # of raising.
+      assert [{:integer, 0, _}, {:identifier, "x", _}] = tokens!("0x")
+    end
+
+    test "leading-zero literals are octal, matching nft's scanner" do
+      # scanner.l: `base = yytext[0] == '0' ? 8 : 10`.
+      assert [{:integer, 8, _}] = tokens!("010")
+      assert [{:integer, 493, _}] = tokens!("0755")
+      assert [{:integer, 0, _}] = tokens!("0")
+    end
+
+    test "leading-zero literal with 8/9 digits demotes to :symbol, like nft's strtoull" do
+      # nft: partial octal conversion (`*end` non-NUL) demotes the
+      # lexeme to a plain string token.
+      assert [{:symbol, "08", _}] = tokens!("08")
+      assert [{:symbol, "0899", _}] = tokens!("0899")
     end
   end
 
@@ -81,13 +97,25 @@ defmodule Linx.NFT.TokenizerTest do
       assert [{:string, "", _}] = tokens!(~s/""/)
     end
 
-    test "string with escapes" do
-      assert [{:string, ~s/he said "hi"/, _}] =
-               tokens!(~s/"he said \\"hi\\""/)
+    test "default mode matches nft exactly: no escape processing" do
+      # nft's pattern is `\"[^"]*\"` — a backslash is a literal
+      # byte and the string ends at the first `"`.
+      assert [{:string, "line1\\nline2", _}] = tokens!(~s/"line1\\nline2"/)
+      assert [{:string, "back\\slash", _}] = tokens!(~s/"back\\slash"/)
 
-      assert [{:string, "line1\nline2", _}] = tokens!(~s/"line1\\nline2"/)
-      assert [{:string, "tab\there", _}] = tokens!(~s/"tab\\there"/)
-      assert [{:string, "back\\slash", _}] = tokens!(~s/"back\\\\slash"/)
+      # Elixir-style `\"` escapes are NOT file syntax: the string
+      # closes at the second quote and the leftovers fail to lex —
+      # nft rejects the same input (as a grammar error on JUNK).
+      assert {:error, %ParseError{}} = Tokenizer.tokenize(~s/"he said \\"hi\\""/)
+    end
+
+    test "escapes?: true (sigil mode) processes Elixir-style escapes" do
+      assert [{:string, ~s/he said "hi"/, _}] =
+               tokens!(~s/"he said \\"hi\\""/, escapes?: true)
+
+      assert [{:string, "line1\nline2", _}] = tokens!(~s/"line1\\nline2"/, escapes?: true)
+      assert [{:string, "tab\there", _}] = tokens!(~s/"tab\\there"/, escapes?: true)
+      assert [{:string, "back\\slash", _}] = tokens!(~s/"back\\\\slash"/, escapes?: true)
     end
 
     test "unterminated string is an error pointing at the opening quote" do
@@ -198,25 +226,46 @@ defmodule Linx.NFT.TokenizerTest do
       assert [{:cidr_v4, "0.0.0.0/0", _}] = tokens!("0.0.0.0/0")
     end
 
-    test "invalid IPv4 (out of range octet) is an error" do
-      assert {:error, %ParseError{message: msg}} = Tokenizer.tokenize("999.0.0.1")
-      assert msg =~ "unrecognised numeric or address literal"
+    test "invalid IPv4 (out of range octet) demotes to :symbol, like nft" do
+      # nft's scanner cannot fail — an unclassifiable run becomes a
+      # string token and the grammar/evaluation reject it with a
+      # located error. The parser/compiler do the same with :symbol.
+      assert [{:symbol, "999.0.0.1", _}] = tokens!("999.0.0.1")
+      assert [{:symbol, "1.2.3.4.5", _}] = tokens!("1.2.3.4.5")
     end
   end
 
-  describe "time-suffixed integers" do
-    test "Ns / Nm / Nh / Nd / Nw produce :time tokens in seconds" do
-      assert [{:time, 30, _}] = tokens!("30s")
-      assert [{:time, 60, _}] = tokens!("1m")
-      assert [{:time, 3600, _}] = tokens!("1h")
-      assert [{:time, 86_400, _}] = tokens!("1d")
-      assert [{:time, 604_800, _}] = tokens!("1w")
+  describe "time literals (nft timestring)" do
+    test "single-unit forms produce :time tokens in milliseconds" do
+      assert [{:time, 30_000, _}] = tokens!("30s")
+      assert [{:time, 60_000, _}] = tokens!("1m")
+      assert [{:time, 3_600_000, _}] = tokens!("1h")
+      assert [{:time, 86_400_000, _}] = tokens!("1d")
+      assert [{:time, 250, _}] = tokens!("250ms")
     end
 
-    test "letter must not be followed by an identifier char" do
-      # `10ms` is an integer followed by an identifier (`ms`), not
-      # a time literal — we don't recognise sub-second units yet.
-      assert [{:integer, 10, _}, {:identifier, "ms", _}] = tokens!("10ms")
+    test "compound forms, matching scanner.l's timestring definition" do
+      # ([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?
+      assert [{:time, ms, _}] = tokens!("1h30m10s")
+      assert ms == 3_600_000 + 30 * 60_000 + 10_000
+
+      assert [{:time, ms2, _}] = tokens!("2d12h")
+      assert ms2 == 2 * 86_400_000 + 12 * 3_600_000
+
+      assert [{:time, 1_500, _}] = tokens!("1s500ms")
+    end
+
+    test "units must be strictly descending, like the flex pattern" do
+      # `10s5m` cannot match the timestring pattern as ONE token;
+      # flex's longest-match lexes it as two consecutive
+      # timestrings (`10s`, `5m`) — and so do we.
+      assert [{:time, 10_000, _}, {:time, 300_000, _}] = tokens!("10s5m")
+    end
+
+    test "nft has no week unit — 5w is not a time literal" do
+      # nft lexes `5` (NUM) + `w` (string); a downstream parse
+      # error in most positions. We match.
+      assert [{:integer, 5, _}, {:identifier, "w", _}] = tokens!("5w")
     end
 
     test "a digit-led IPv6 hextet ending in d is an address, not N days" do

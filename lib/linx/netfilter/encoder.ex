@@ -192,6 +192,7 @@ defmodule Linx.Netfilter.Encoder do
       sets_msgs = Enum.map(table.sets, fn {_, s} -> set(s, family) end)
       maps_msgs = Enum.map(table.maps, fn {_, m} -> set(m, family) end)
       anon_set_msgs = Enum.map(anonymous_sets, &set(&1, family))
+      obj_msgs = Enum.map(table.objects, fn {_, o} -> object(o, family, table.name) end)
 
       set_elem_msgs =
         (Enum.map(table.sets, fn {_, s} -> set_elements(s, family) end) ++
@@ -209,14 +210,62 @@ defmodule Linx.Netfilter.Encoder do
         end)
 
       # Order matters: declarations before references.
-      #   named + anonymous sets/maps → rules can reference them
+      #   named objects + named/anonymous sets/maps → rules can
+      #     reference them
       #   chains → vmap verdicts can reference them by name
       #   set/map elements → vmaps with jump/goto verdicts find chains
       #   rules → everything referenced exists
       [destroytable(family, table.name), table(table)] ++
+        obj_msgs ++
         sets_msgs ++ maps_msgs ++ anon_set_msgs ++ chain_msgs ++ set_elem_msgs ++ rule_msgs
     end)
   end
+
+  @doc """
+  Builds a `NEWOBJ` message declaring a table-level named object
+  (counter, quota, …). Only `:counter` has a data encoding so far;
+  other kinds raise until their NFTA_OBJ_DATA shapes land.
+  """
+  @spec object(Linx.Netfilter.Object.t(), atom(), String.t()) :: Message.t()
+  def object(%Linx.Netfilter.Object{} = obj, family, table_name) do
+    data_attrs =
+      case {obj.kind, obj.data} do
+        {:counter, data} ->
+          data = data || %{}
+
+          [
+            {nfta_counter_bytes(), Wire.u64_be(Map.get(data, :bytes, 0))},
+            {nfta_counter_packets(), Wire.u64_be(Map.get(data, :packets, 0))}
+          ]
+
+        {kind, _} ->
+          raise ArgumentError,
+                "NEWOBJ encoding for #{inspect(kind)} objects is not implemented yet"
+      end
+
+    attrs = [
+      {nfta_obj_table(), [table_name, 0]},
+      {nfta_obj_name(), [obj.name, 0]},
+      {nfta_obj_type(), Wire.u32_be(object_kind_int(obj.kind))},
+      {nfta_obj_data(), Attr.encode(data_attrs)}
+    ]
+
+    %Message{
+      type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_newobj()),
+      flags: nlm_f_create(),
+      payload: Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
+    }
+  end
+
+  defp object_kind_int(:counter), do: nft_object_counter()
+  defp object_kind_int(:quota), do: nft_object_quota()
+  defp object_kind_int(:ct_helper), do: nft_object_ct_helper()
+  defp object_kind_int(:limit), do: nft_object_limit()
+  defp object_kind_int(:connlimit), do: nft_object_connlimit()
+  defp object_kind_int(:ct_timeout), do: nft_object_ct_timeout()
+  defp object_kind_int(:secmark), do: nft_object_secmark()
+  defp object_kind_int(:ct_expectation), do: nft_object_ct_expect()
+  defp object_kind_int(:synproxy), do: nft_object_synproxy()
 
   # Walks all rules in `table`, replacing every `:__anon_set`
   # sentinel expression with a regular `lookup`. Returns the
@@ -260,6 +309,29 @@ defmodule Linx.Netfilter.Encoder do
           }
 
           {acc ++ [lookup_expr], sa ++ [anon_set], n + 1}
+
+        # Anonymous verdict map — `tcp dport vmap { 22 : accept }`.
+        # Same lifecycle as an anonymous set, but the lookup's
+        # destination is the verdict register (0) so the map data
+        # BECOMES the rule verdict.
+        %Expr{name: :__anon_vmap, data: data}, {acc, sa, n} ->
+          name = "__map#{n}"
+
+          {:ok, anon_map} =
+            Linx.Netfilter.Map.new(name,
+              key_type: data.key_type,
+              data_type: :verdict,
+              flags: [:anonymous, :constant],
+              elements: data.elements,
+              table: table_name
+            )
+
+          lookup_expr = %Expr{
+            name: :lookup,
+            data: %{set: name, sreg: Map.get(data, :sreg, 1), dreg: 0, flags: []}
+          }
+
+          {acc ++ [lookup_expr], sa ++ [anon_map], n + 1}
 
         other, {acc, sa, n} ->
           {acc ++ [other], sa, n}
@@ -643,6 +715,11 @@ defmodule Linx.Netfilter.Encoder do
       # big-endian hosts.
       type == :mark and is_integer(value) ->
         <<value::native-32>>
+
+      # ct state keys follow the big-endian u32 convention the rule
+      # compiler already uses for ct state bitwise/cmp matching.
+      type == :ct_state and is_integer(value) ->
+        <<value::big-32>>
 
       # The declared key length for :ifname is IFNAMSIZ (16); the kernel
       # compares the full width, so pad with NULs like nft does.
@@ -1181,6 +1258,31 @@ defmodule Linx.Netfilter.Encoder do
     ]
     |> maybe_add(not is_nil(effective_code), fn ->
       {nfta_reject_icmp_code(), <<effective_code::8>>}
+    end)
+  end
+
+  defp encode_expr_data(:objref, %{name: name, kind: kind}) do
+    [
+      {nfta_objref_imm_type(), Wire.u32_be(object_kind_int(kind))},
+      {nfta_objref_imm_name(), [name, 0]}
+    ]
+  end
+
+  defp encode_expr_data(:limit, %{rate: rate, per: per, burst: burst, type: type, over: over}) do
+    type_int =
+      case type do
+        :packets -> nft_limit_pkts()
+        :bytes -> nft_limit_pkt_bytes()
+      end
+
+    [
+      {nfta_limit_rate(), Wire.u64_be(rate)},
+      {nfta_limit_unit(), Wire.u64_be(per)},
+      {nfta_limit_burst(), Wire.u32_be(burst)},
+      {nfta_limit_type(), Wire.u32_be(type_int)}
+    ]
+    |> maybe_add(over, fn ->
+      {nfta_limit_flags(), Wire.u32_be(nft_limit_f_inv())}
     end)
   end
 

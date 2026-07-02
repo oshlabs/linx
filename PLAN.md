@@ -28,6 +28,10 @@ unprivileged suite. Still open:
 
 ## Deferred features
 
+The `~NFT` parser/compiler now has its own roadmap to full nftables parity —
+see `NFT-PLAN.md` (the two `~NFT` items below are absorbed into its Phase 6
+and kept here only until they land).
+
 - **`~NFT` ranges over host-byte-order fields** (`meta mark 10-20`): needs a
   byteorder-conversion expression before the set lookup; the compiler
   currently refuses with a clear error rather than mis-encoding.

@@ -13,7 +13,7 @@ defmodule Linx.NFT.Compiler do
   ## Supported
 
   The slice of the AST that covers the canonical examples in
-  `docs/netfilter/EXAMPLES.md`:
+  `docs/netfilter/netfilter-examples.md`:
 
     * **Tables** in every family, with optional `comment`.
     * **Chains** with base headers (`type`/`hook`/`priority`/
@@ -24,28 +24,46 @@ defmodule Linx.NFT.Compiler do
     * **Matches** on the common headers — `tcp/udp dport/sport`
       against integer / range / inline-set / `@set_ref`,
       `ip/ip6 saddr/daddr` against address / CIDR / `@set_ref`,
-      `meta iif/oif/iifname/oifname/mark`, `ct state`.
+      `ip protocol`, `ip6 nexthdr/hoplimit`, `icmp/icmpv6
+      type/code` (with per-protocol symbolic names),
+      `meta iif/oif` (by index or name, resolved at compile time
+      like nft), `meta iifname/oifname/mark`, `ct state`.
     * **Verdicts** — accept / drop / continue / return / queue /
       `jump <chain>` / `goto <chain>` / `reject [with ...]`.
-    * **Actions** — `counter`, `log`, `dnat to <addr>[:port]`,
-      `snat to`, `masquerade`, `redirect`.
+    * **Verdict maps** — `tcp dport vmap @named` and inline
+      anonymous `ct state vmap { established : accept, ... }`.
+    * **Actions** — `counter` (anonymous or `counter name "obj"`),
+      `log` (prefix/group/snaplen/queue-threshold/flags),
+      `limit rate [over] N/unit [burst ...]`,
+      `dnat to <addr>[:port]`, `snat to`, `masquerade`,
+      `redirect`.
     * **Sets / maps / vmaps** — declarations with `type`, `flags`,
       `timeout`, `gc-interval`, `size`, `elements`.
+    * **Named counter objects** — table-level `counter name { … }`
+      declarations plus `counter name` objref statements.
+    * **`define` / `$var`** — top-level defines with parse-time
+      substitution, duplicate-define errors, and did-you-mean
+      suggestions on unknown variables.
 
   ## Not yet supported (raises a clear ParseError)
 
-    * `limit`, `meta mark set`, `ct ... set` — no setter `%Expr{}`
-      yet on the Linx side. Pipeline DSL can construct them; the
-      compiler will pick them up once they're added.
-    * Named objects (`counter` / `quota` / `limit` blocks at table
-      level) — declaration OK, but the underlying `%Object{}`
-      shapes vary per kind; defer to a follow-up.
-    * Flowtables — same reason.
-    * `include` and `define` — file-merging and binding semantics
-      are not yet implemented (use `Linx.NFT.parse_file/1`).
+    * `meta mark set`, `ct ... set` — no setter `%Expr{}` yet on
+      the Linx side. Pipeline DSL can construct them; the compiler
+      will pick them up once they're added.
+    * Named `quota` / `limit` / ct-helper objects — the `%Object{}`
+      data shapes and NFTA_OBJ_DATA encodings land per kind
+      (`:counter` shipped first).
+    * Concatenated selectors and set elements (`a . b`) — parse
+      into `{:concat_lhs, …}` / `{:concat, …}` nodes; lowering
+      waits for the pipapo/concat backend work (NFT-PLAN.md
+      Phase 6).
+    * Flowtables.
+    * `include` — file-merging is not yet implemented.
     * `\#{...}` interpolation — only meaningful from the
       `~NFT` sigil; the compiler is called from there with a
       separate path that emits runtime code.
+
+  See `NFT-PLAN.md` for the full parity roadmap.
 
   Each deferred case raises `Linx.NFT.ParseError` pointing at the
   AST node's source location with a message naming the missing
@@ -58,6 +76,50 @@ defmodule Linx.NFT.Compiler do
   alias Linx.Netfilter.Map, as: NMap
 
   import Bitwise
+
+  # ICMP / ICMPv6 type namespaces collide (`echo-request` is 8 in
+  # ICMPv4 but 128 in ICMPv6), so symbolic names are resolved
+  # against the LHS field's kind — the same context-driven
+  # `symbol_parse` discipline nft's evaluate.c uses — and the value
+  # then flows through the generic 1-byte-integer path.
+  @icmp_type_names %{
+    "echo-reply" => 0,
+    "destination-unreachable" => 3,
+    "source-quench" => 4,
+    "redirect" => 5,
+    "echo-request" => 8,
+    "router-advertisement" => 9,
+    "router-solicitation" => 10,
+    "time-exceeded" => 11,
+    "parameter-problem" => 12,
+    "timestamp-request" => 13,
+    "timestamp-reply" => 14,
+    "info-request" => 15,
+    "info-reply" => 16,
+    "address-mask-request" => 17,
+    "address-mask-reply" => 18
+  }
+
+  @icmpv6_type_names %{
+    "destination-unreachable" => 1,
+    "packet-too-big" => 2,
+    "time-exceeded" => 3,
+    "parameter-problem" => 4,
+    "echo-request" => 128,
+    "echo-reply" => 129,
+    "mld-listener-query" => 130,
+    "mld-listener-report" => 131,
+    "mld-listener-done" => 132,
+    "nd-router-solicit" => 133,
+    "nd-router-advert" => 134,
+    "nd-neighbor-solicit" => 135,
+    "nd-neighbor-advert" => 136,
+    "redirect" => 137,
+    "router-renumbering" => 138,
+    "ind-neighbor-solicit" => 141,
+    "ind-neighbor-advert" => 142,
+    "mld2-listener-report" => 143
+  }
 
   defmodule State do
     @moduledoc false
@@ -88,6 +150,7 @@ defmodule Linx.NFT.Compiler do
     }
 
     try do
+      ast_items = resolve_defines(ast_items, state)
       rs = Enum.reduce(ast_items, Ruleset.new(), &compile_top(&1, &2, state))
       {:ok, rs}
     rescue
@@ -130,9 +193,7 @@ defmodule Linx.NFT.Compiler do
   end
 
   defp compile_top({:define, _name, _value, _meta}, rs, _state) do
-    # Captured by the parser AST; the compiler ignores defines for
-    # now (no inline substitution implemented yet). Future: thread
-    # a binding env through compile_top/compile_table_item/etc.
+    # Already consumed by resolve_defines/2 — nothing left to emit.
     rs
   end
 
@@ -149,6 +210,91 @@ defmodule Linx.NFT.Compiler do
     # mode already does the equivalent via DESTROYTABLE.)
     rs
   end
+
+  # ===========================================================
+  # define / $var resolution
+  # ===========================================================
+
+  # nft binds `define` names to UNEVALUATED expressions and
+  # resolves `$var` references during parsing; duplicate defines in
+  # the same scope are an error (`redefine` overrides — not
+  # supported yet). We do the same as a pre-pass over the AST:
+  # collect top-level defines in order (later defines may reference
+  # earlier ones), then substitute every `{:var_ref, name, meta}`
+  # node. The substituted value keeps the USE site's location so
+  # type errors point where the variable was used.
+  defp resolve_defines(items, state) do
+    bindings =
+      Enum.reduce(items, %{}, fn
+        {:define, name, value, meta}, acc ->
+          if Map.has_key?(acc, name) do
+            raise_at!(
+              state,
+              meta,
+              "compiler: redefinition of `#{name}` (defined earlier in this file)"
+            )
+          end
+
+          {:ok, resolved} = substitute_vars(value, acc, state)
+          Map.put(acc, name, resolved)
+
+        _other, acc ->
+          acc
+      end)
+
+    {:ok, resolved} = substitute_vars(items, bindings, state)
+    resolved
+  end
+
+  defp substitute_vars({:var_ref, name, meta}, bindings, state) do
+    case Map.fetch(bindings, name) do
+      {:ok, value} ->
+        {:ok, re_meta(value, meta)}
+
+      :error ->
+        suggestion =
+          bindings
+          |> Map.keys()
+          |> Enum.max_by(&String.jaro_distance(&1, name), fn -> nil end)
+          |> case do
+            nil ->
+              ""
+
+            best ->
+              if String.jaro_distance(best, name) > 0.7,
+                do: " — did you mean `$#{best}`?",
+                else: ""
+          end
+
+        raise_at!(state, meta, "compiler: undefined variable `$#{name}`#{suggestion}")
+    end
+  end
+
+  defp substitute_vars(list, bindings, state) when is_list(list) do
+    {:ok, Enum.map(list, fn item -> elem(substitute_vars(item, bindings, state), 1) end)}
+  end
+
+  defp substitute_vars(tuple, bindings, state) when is_tuple(tuple) do
+    {:ok,
+     tuple
+     |> Tuple.to_list()
+     |> Enum.map(fn item -> elem(substitute_vars(item, bindings, state), 1) end)
+     |> List.to_tuple()}
+  end
+
+  defp substitute_vars(other, _bindings, _state), do: {:ok, other}
+
+  # Point the substituted value's location at the use site.
+  defp re_meta(tuple, meta) when is_tuple(tuple) do
+    last = tuple_size(tuple) - 1
+
+    case elem(tuple, last) do
+      %{line: _, column: _} -> put_elem(tuple, last, meta)
+      _ -> tuple
+    end
+  end
+
+  defp re_meta(other, _meta), do: other
 
   # ===========================================================
   # Table-body items
@@ -202,6 +348,23 @@ defmodule Linx.NFT.Compiler do
       meta,
       state,
       "add_vmap"
+    )
+  end
+
+  defp compile_table_item({:object, :counter, name, opts, meta}, family, table_name, rs, state) do
+    data = %{
+      packets: object_int_opt(opts, :packets, state),
+      bytes: object_int_opt(opts, :bytes, state)
+    }
+
+    {:ok, obj} = Linx.Netfilter.Object.new(:counter, name, data)
+
+    wrap_add!(
+      rs,
+      fn rs -> Ruleset.add_object!(rs, {family, table_name}, obj) end,
+      meta,
+      state,
+      "add_object"
     )
   end
 
@@ -290,18 +453,110 @@ defmodule Linx.NFT.Compiler do
     [Expr.immediate(verdict_from(kind))]
   end
 
+  # `tcp dport vmap @dispatch` — a named verdict-map lookup: load
+  # the selector, then a lookup whose destination register is the
+  # verdict register (0), so the map's data BECOMES the verdict.
+  defp compile_stmt({:vmap, lhs, {:set_ref, name, _}, _meta}, _family, state) do
+    {load_expr, _kind} = compile_lhs(lhs, state)
+    [load_expr, Expr.lookup(name, dreg: 0)]
+  end
+
+  # `ct state vmap { established : accept, invalid : drop }` — an
+  # anonymous verdict map: emit a `__anon_vmap` sentinel that the
+  # encoder expands into an anonymous map + verdict-register lookup
+  # at push time (mirroring the `__anon_set` lifecycle).
+  defp compile_stmt({:vmap, lhs, {:map_inline, elems, vmeta}, _meta}, _family, state) do
+    {load_expr, kind} = compile_lhs(lhs, state)
+    key_type = set_key_type_for(kind)
+
+    elements =
+      Enum.map(elems, fn
+        {:map_elem, key, data, _} ->
+          {vmap_key!(key, kind, key_type, state), vmap_verdict!(data, state)}
+
+        other ->
+          raise_at!(
+            state,
+            value_meta(other) || vmeta,
+            "compiler: vmap literal elements must be `key : verdict` pairs"
+          )
+      end)
+
+    [
+      load_expr,
+      %Expr{name: :__anon_vmap, data: %{key_type: key_type, elements: elements, sreg: 1}}
+    ]
+  end
+
   defp compile_stmt({:match, lhs, op, rhs, _meta}, _family, state) do
     {load_expr, value_kind} = compile_lhs(lhs, state)
     cmp_or_lookup = compile_rhs(rhs, op, value_kind, state)
     List.wrap(load_expr) ++ List.wrap(cmp_or_lookup)
   end
 
-  defp compile_stmt({:counter, _opts, _meta}, _family, _state) do
-    [Expr.counter()]
+  # `counter name "hits"` — reference to a table-level named
+  # counter object (all referencing rules share its state);
+  # plain `counter` (with or without initial packets/bytes) is a
+  # per-rule anonymous counter.
+  defp compile_stmt({:counter, opts, meta}, _family, state) do
+    case Keyword.get(opts, :name) do
+      nil ->
+        [Expr.counter()]
+
+      {:string, name, _} ->
+        [Expr.objref(name, :counter)]
+
+      {:identifier, name, _} ->
+        [Expr.objref(name, :counter)]
+
+      other ->
+        raise_at!(
+          state,
+          value_meta(other) || meta,
+          "compiler: `counter name` expects a counter object name"
+        )
+    end
   end
 
-  defp compile_stmt({:log, opts, _meta}, _family, _state) do
-    [Expr.log(opts)]
+  # Translate the parser's nft-flavored log options into the
+  # `Expr.log/1` contract. Two impedance mismatches matter:
+  #
+  #   * nft's plain `log` (no group) logs via the kernel logger,
+  #     NOT nflog — so pass `group: nil` explicitly to suppress
+  #     the pipeline-DSL convenience default of group 5000, which
+  #     would silently change where messages go.
+  #   * `flags all` is a single keyword in nft syntax but a flag
+  #     LIST on the wire (NF_LOG_MASK).
+  defp compile_stmt({:log, opts, meta}, _family, state) do
+    expr_opts =
+      Enum.flat_map(opts, fn
+        {:prefix, p} ->
+          [prefix: p]
+
+        {:group, g} ->
+          [group: g]
+
+        {:snaplen, n} ->
+          [snaplen: n]
+
+        {:"queue-threshold", n} ->
+          [qthreshold: n]
+
+        {:flags, flag} ->
+          [flags: log_flags!(flag, state, meta)]
+
+        {:level, _} ->
+          raise_at!(
+            state,
+            meta,
+            "compiler: `log level` is not yet supported (no NFTA_LOG_LEVEL encoding)"
+          )
+
+        {key, _} ->
+          raise_at!(state, meta, "compiler: unsupported log option `#{key}`")
+      end)
+
+    [Expr.log(Keyword.put_new(expr_opts, :group, nil))]
   end
 
   defp compile_stmt({:reject, opts, _meta}, _family, _state) do
@@ -345,12 +600,29 @@ defmodule Linx.NFT.Compiler do
     Expr.snat_to(addr, port, flags: flags)
   end
 
-  defp compile_stmt({:limit, _rate, _opts, meta}, _family, state) do
-    raise_at!(
-      state,
-      meta,
-      "compiler: `limit` statement requires a `%Expr.limit{}` constructor that's not yet implemented"
-    )
+  defp compile_stmt({:limit, {:rate, n, unit}, opts, meta}, _family, state) do
+    per =
+      case unit do
+        :second -> 1
+        :minute -> 60
+        :hour -> 3600
+        :day -> 86_400
+        :week -> 604_800
+        other -> raise_at!(state, meta, "compiler: unknown limit rate unit `#{other}`")
+      end
+
+    {burst, type} =
+      case Keyword.get(opts, :burst) do
+        nil -> {nil, :packets}
+        {b, unit_atom} when unit_atom in [:packets, :bytes] -> {b, unit_atom}
+        b when is_integer(b) -> {b, :packets}
+      end
+
+    limit_opts =
+      [rate: n, per: per, type: type, over: Keyword.get(opts, :over, false)]
+      |> then(fn kw -> if burst, do: Keyword.put(kw, :burst, burst), else: kw end)
+
+    [Expr.limit(limit_opts)]
   end
 
   defp compile_stmt({:meta_set, _field, _value, meta}, _family, state) do
@@ -373,6 +645,64 @@ defmodule Linx.NFT.Compiler do
     )
   end
 
+  # A vmap key, resolved against the LHS field's kind: ct states
+  # by name, ICMP types by their per-protocol tables, everything
+  # else via the generic set-literal path.
+  defp vmap_key!({:identifier, name, meta}, :ct_state, _key_type, state) do
+    case safe_ct_state_bits(String.to_atom(name)) do
+      nil -> raise_at!(state, meta, "compiler: unknown ct state `#{name}`")
+      bits -> bits
+    end
+  end
+
+  defp vmap_key!(key, :icmp_type, key_type, state) do
+    key
+    |> resolve_named_ints(@icmp_type_names, "ICMP type", state)
+    |> literal_for_set!(key_type, state)
+  end
+
+  defp vmap_key!(key, :icmpv6_type, key_type, state) do
+    key
+    |> resolve_named_ints(@icmpv6_type_names, "ICMPv6 type", state)
+    |> literal_for_set!(key_type, state)
+  end
+
+  defp vmap_key!(key, _kind, key_type, state) do
+    literal_for_set!(key, key_type, state)
+  end
+
+  defp vmap_verdict!({:verdict, :accept, _}, _state), do: Verdict.accept()
+  defp vmap_verdict!({:verdict, :drop, _}, _state), do: Verdict.drop()
+  defp vmap_verdict!({:verdict, {:jump, target}, _}, _state), do: Verdict.jump(target)
+  defp vmap_verdict!({:verdict, {:goto, target}, _}, _state), do: Verdict.goto(target)
+  defp vmap_verdict!({:verdict, kind, _}, _state) when is_atom(kind), do: Verdict.new!(kind)
+
+  defp vmap_verdict!(other, state) do
+    raise_at!(
+      state,
+      value_meta(other),
+      "compiler: vmap data must be a verdict (accept/drop/jump/goto/...)"
+    )
+  end
+
+  defp object_int_opt(opts, key, state) do
+    case Keyword.get(opts, key) do
+      nil -> 0
+      {:integer, n, _} -> n
+      other -> raise_at!(state, value_meta(other), "compiler: expected integer #{key} value")
+    end
+  end
+
+  @log_all_flags [:tcp_seq, :tcp_opt, :ip_opt, :uid, :macdecode]
+
+  defp log_flags!(:all, _state, _meta), do: @log_all_flags
+  defp log_flags!(:skuid, _state, _meta), do: [:uid]
+  defp log_flags!(:ether, _state, _meta), do: [:macdecode]
+
+  defp log_flags!(other, state, meta) do
+    raise_at!(state, meta, "compiler: unsupported log flags `#{other}`")
+  end
+
   defp stmt_meta(tuple), do: elem(tuple, tuple_size(tuple) - 1)
   defp lhs_meta({:match, _, _, _, meta}), do: meta
   defp lhs_meta(_), do: %{line: 0, column: 0}
@@ -391,6 +721,15 @@ defmodule Linx.NFT.Compiler do
           "compiler: unknown payload field `#{header} #{field}`"
         )
     end
+  end
+
+  defp compile_lhs({:concat_lhs, _parts, meta}, state) do
+    raise_at!(
+      state,
+      meta,
+      "compiler: concatenated selectors (`a . b`) are not yet supported — " <>
+        "planned alongside concatenated set types (NFT-PLAN.md Phase 6)"
+    )
   end
 
   defp compile_lhs({:meta, field, meta}, state) do
@@ -422,9 +761,11 @@ defmodule Linx.NFT.Compiler do
   defp payload_dispatch(:ip, :protocol), do: {:ok, :ip_protocol, {:int, 1}}
   defp payload_dispatch(:ip6, :saddr), do: {:ok, :ip6_saddr, :ipv6}
   defp payload_dispatch(:ip6, :daddr), do: {:ok, :ip6_daddr, :ipv6}
-  defp payload_dispatch(:icmp, :type), do: {:ok, :icmp_type, {:int, 1}}
+  defp payload_dispatch(:ip6, :nexthdr), do: {:ok, :ip6_nexthdr, {:int, 1}}
+  defp payload_dispatch(:ip6, :hoplimit), do: {:ok, :ip6_hoplimit, {:int, 1}}
+  defp payload_dispatch(:icmp, :type), do: {:ok, :icmp_type, :icmp_type}
   defp payload_dispatch(:icmp, :code), do: {:ok, :icmp_code, {:int, 1}}
-  defp payload_dispatch(:icmpv6, :type), do: {:ok, :icmpv6_type, {:int, 1}}
+  defp payload_dispatch(:icmpv6, :type), do: {:ok, :icmpv6_type, :icmpv6_type}
   defp payload_dispatch(:icmpv6, :code), do: {:ok, :icmpv6_code, {:int, 1}}
   defp payload_dispatch(_, _), do: :unknown
 
@@ -434,8 +775,8 @@ defmodule Linx.NFT.Compiler do
   # native register against NFTA_DATA_VALUE verbatim. `{:int, w}` is
   # network order; `{:int, w, :host}` is host order. `meta protocol` is a
   # __be16 (network order); 1-byte fields have no order.
-  defp meta_kind(:iif), do: {:int, 4, :host}
-  defp meta_kind(:oif), do: {:int, 4, :host}
+  defp meta_kind(:iif), do: :ifindex
+  defp meta_kind(:oif), do: :ifindex
   defp meta_kind(:iifname), do: :ifname
   defp meta_kind(:oifname), do: :ifname
   defp meta_kind(:mark), do: {:int, 4, :host}
@@ -453,6 +794,18 @@ defmodule Linx.NFT.Compiler do
   defp ct_kind(_), do: nil
 
   # ---- RHS ----
+
+  defp compile_rhs(value, op, :icmp_type, state) do
+    value
+    |> resolve_named_ints(@icmp_type_names, "ICMP type", state)
+    |> compile_rhs(op, {:int, 1}, state)
+  end
+
+  defp compile_rhs(value, op, :icmpv6_type, state) do
+    value
+    |> resolve_named_ints(@icmpv6_type_names, "ICMPv6 type", state)
+    |> compile_rhs(op, {:int, 1}, state)
+  end
 
   defp compile_rhs({:set_ref, name, _}, _op, _kind, _state) do
     Expr.lookup(name)
@@ -476,6 +829,23 @@ defmodule Linx.NFT.Compiler do
     values = Enum.map(elems, &literal_for_set!(&1, set_key_type, state))
     flags = if Enum.any?(elems, &range_or_cidr?/1), do: [:constant, :interval], else: [:constant]
     Expr.set_literal(values, set_key_type, flags: flags)
+  end
+
+  # `meta iif`/`oif` compare an interface INDEX (host-order u32).
+  # nft resolves interface names to indexes at rule-load time via
+  # if_nametoindex(3) — do the same with :net.if_name2index/1, so
+  # `iif "lo"` works. The interface must exist on the compiling
+  # host, exactly as with nft.
+  defp compile_rhs({:integer, n, _}, op, :ifindex, _state) do
+    Expr.cmp(op, encode_int_host(n, 4))
+  end
+
+  defp compile_rhs({:string, s, meta}, op, :ifindex, state) do
+    Expr.cmp(op, encode_int_host(ifindex!(s, state, meta), 4))
+  end
+
+  defp compile_rhs({:identifier, s, meta}, op, :ifindex, state) do
+    Expr.cmp(op, encode_int_host(ifindex!(s, state, meta), 4))
   end
 
   defp compile_rhs({:integer, n, _}, op, {:int, width}, _state) do
@@ -602,6 +972,17 @@ defmodule Linx.NFT.Compiler do
     compile_rhs({:set_inline, elems, meta}, op, kind, state)
   end
 
+  # Unclassifiable literal the tokenizer demoted instead of
+  # rejecting (mirrors nft, whose scanner never fails and whose
+  # evaluation step reports the error with a location).
+  defp compile_rhs({:symbol, raw, meta}, _op, kind, state) do
+    raise_at!(
+      state,
+      meta,
+      "compiler: cannot interpret literal `#{raw}` as #{kind_name(kind)}"
+    )
+  end
+
   defp compile_rhs(node, _op, kind, state) do
     raise_at!(
       state,
@@ -652,6 +1033,7 @@ defmodule Linx.NFT.Compiler do
 
   # ---- Set / value-kind helpers ----
 
+  defp set_key_type_for(:ifindex), do: :mark
   defp set_key_type_for({:int, 2}), do: :inet_service
   defp set_key_type_for({:int, 4}), do: :mark
   defp set_key_type_for({:int, 1}), do: :inet_proto
@@ -695,6 +1077,23 @@ defmodule Linx.NFT.Compiler do
   defp literal_for_set!({:range, lo, hi, _}, _, _state),
     do: {:range, literal_int!(lo), literal_int!(hi)}
 
+  defp literal_for_set!({:concat, _parts, meta}, _key_type, state) do
+    raise_at!(
+      state,
+      meta,
+      "compiler: concatenated set elements (`a . b`) are not yet supported — " <>
+        "planned alongside concatenated set types (NFT-PLAN.md Phase 6)"
+    )
+  end
+
+  defp literal_for_set!({:symbol, raw, meta}, key_type, state) do
+    raise_at!(
+      state,
+      meta,
+      "compiler: cannot interpret literal `#{raw}` as a #{key_type} set element"
+    )
+  end
+
   defp literal_for_set!(node, _kind, state) do
     raise_at!(
       state,
@@ -702,6 +1101,55 @@ defmodule Linx.NFT.Compiler do
       "compiler: unsupported set element shape: #{inspect(node)}"
     )
   end
+
+  # Replaces symbolic names with their integer values throughout a
+  # value node (single values, inline sets, lists, ranges), keyed
+  # by a per-field name table. Unknown names raise located errors.
+  defp resolve_named_ints({:identifier, name, meta}, table, what, state) do
+    case Map.fetch(table, name) do
+      {:ok, n} -> {:integer, n, meta}
+      :error -> raise_at!(state, meta, "compiler: unknown #{what} `#{name}`")
+    end
+  end
+
+  defp resolve_named_ints({:set_inline, elems, meta}, table, what, state) do
+    {:set_inline, Enum.map(elems, &resolve_named_ints(&1, table, what, state)), meta}
+  end
+
+  defp resolve_named_ints({:list, elems, meta}, table, what, state) do
+    {:list, Enum.map(elems, &resolve_named_ints(&1, table, what, state)), meta}
+  end
+
+  defp resolve_named_ints({:range, lo, hi, meta}, table, what, state) do
+    {:range, resolve_named_ints(lo, table, what, state),
+     resolve_named_ints(hi, table, what, state), meta}
+  end
+
+  defp resolve_named_ints(other, _table, _what, _state), do: other
+
+  defp ifindex!(name, state, meta) do
+    case :net.if_name2index(String.to_charlist(name)) do
+      {:ok, index} ->
+        index
+
+      {:error, _} ->
+        raise_at!(
+          state,
+          meta,
+          "compiler: unknown interface `#{name}` — `iif`/`oif` resolve the name " <>
+            "to an index at compile time (like nft), so the interface must exist; " <>
+            "use `iifname`/`oifname` to match by name string instead"
+        )
+    end
+  end
+
+  defp kind_name({:int, w}), do: "a #{w * 8}-bit integer"
+  defp kind_name({:int, w, :host}), do: "a #{w * 8}-bit integer"
+  defp kind_name(:ipv4), do: "an IPv4 address"
+  defp kind_name(:ipv6), do: "an IPv6 address"
+  defp kind_name(:ifname), do: "an interface name"
+  defp kind_name(:ct_state), do: "a ct state"
+  defp kind_name(other), do: inspect(other)
 
   defp literal_int!({:integer, n, _}), do: n
   defp literal_int!({:time, n, _}), do: n
@@ -864,6 +1312,21 @@ defmodule Linx.NFT.Compiler do
   defp nat_target!({:address, :ipv4, addr, _}, _state, _meta), do: {addr, nil}
   defp nat_target!({:address, :ipv6, addr, _}, _state, _meta), do: {addr, nil}
   defp nat_target!({:string, addr, _}, _state, _meta), do: {addr, nil}
+
+  # `dnat to 10.0.0.5:8080` — address plus explicit port (the
+  # tokenizer splits the colon form the way nft's scanner does).
+  defp nat_target!({:nat_target, inner, port_val, meta}, state, _meta) do
+    {addr, nil} = nat_target!(inner, state, meta)
+
+    port =
+      case port_val do
+        {:integer, n, _} -> n
+        {:range, lo, hi, _} -> {literal_int!(lo), literal_int!(hi)}
+        other -> raise_at!(state, value_meta(other), "compiler: unsupported NAT port shape")
+      end
+
+    {addr, port}
+  end
 
   defp nat_target!({:range, lo, hi, _}, _state, _meta) do
     # `dnat to <ip>:<port_lo>-<port_hi>` — port range with no addr.

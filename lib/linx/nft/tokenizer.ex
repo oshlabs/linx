@@ -13,11 +13,19 @@ defmodule Linx.NFT.Tokenizer do
     * `:default` — top-level lexing of keywords, identifiers,
       literals, operators, punctuation, statement separators.
     * `:line_comment` — `#` to end of line.
-    * `:block_comment` — `/* ... */`; supports nesting (nft itself
-      doesn't, but supporting nesting costs ~5 lines and prevents
-      a real footgun on hand-edited files).
-    * `:string` — `"..."` with `\\\\`/`\\"`/`\\n`/`\\t`/`\\r`/`\\0`
-      escapes. (String-internal Elixir interpolation is not yet
+    * `:block_comment` — `/* ... */`; supports nesting. NOTE:
+      block comments are a Linx extension — nft itself has *no*
+      block comments (its `scanner.l` knows only `#` line
+      comments), so files using them are not loadable with
+      `nft -f`. Accepted inbound for convenience; the formatter
+      never emits them.
+    * `:string` — `"..."`. By default this matches nft's scanner
+      exactly (`\\"[^"]*\\"`): **no escape processing** — a
+      backslash is a literal byte and the string ends at the
+      first `"`. With `escapes?: true` (set by the `~NFT` sigil)
+      the Elixir-style escapes `\\\\`/`\\"`/`\\n`/`\\t`/`\\r`/`\\0`
+      are processed — a documented sigil-only convenience.
+      (String-internal Elixir interpolation is not yet
       supported — it'll push `:elixir_expr` from `:string` when
       added, no other change required.)
     * `:elixir_expr` — only enterable when the `:interpolation?`
@@ -57,12 +65,22 @@ defmodule Linx.NFT.Tokenizer do
   Network primitives need a small lookahead to disambiguate:
 
     * `0x...` / `0X...` — hex integer.
-    * `0b...` / `0B...` — binary integer.
+    * `0b...` / `0B...` — binary integer (Linx extension; nft has
+      no binary literals — the formatter never emits them).
+    * `0...` (leading zero, more digits) — **octal** integer,
+      matching nft's scanner (`scanner.l`: `base = yytext[0] ==
+      '0' ? 8 : 10`). A leading-zero literal containing `8`/`9`
+      is not a number (nft demotes it to a string) — it becomes
+      a `:symbol` token here.
     * `\\d+` followed by no `.` or `:` or `/` — plain decimal integer.
     * `\\d+\\.\\d+\\.\\d+\\.\\d+` — IPv4 literal (optional `/N` CIDR).
     * IPv6: any run starting with hex chars that contains `:` and
       whose contents are valid IPv6 syntax.
     * MAC: six 2-char hex octets joined by `:`.
+    * Time: nft's compound `timestring`
+      (`([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?`) —
+      `30s`, `1h30m10s`, `250ms` — emitted as `{:time, ms, meta}`
+      in **milliseconds** (the kernel's set-timeout unit).
 
   Identifiers that *happen* to begin with hex letters (e.g. `eth0`
   or even `fe80`) are still tagged as identifiers when not
@@ -70,13 +88,24 @@ defmodule Linx.NFT.Tokenizer do
   `:` plus a hex char, the lexer rewinds and re-scans as an
   IPv6/MAC literal.
 
+  Identifiers directly followed by `.`/`/` and more identifier
+  characters continue as one token (`example.com`, `br-lan/wan0`),
+  matching nft's bare-string pattern
+  (`({letter}|[_.])({letter}|{digit}|[/\\-_\\.])*`). A spaced
+  `.` is still the concatenation operator.
+
   ## Errors
 
-  Anything the tokenizer can't classify raises a
-  `Linx.NFT.ParseError` with `{file, line, column}` and the
-  offending source line. The caller (sigil macro, `parse/1`,
-  `parse_file/1`) catches and either re-raises (compile-time) or
-  returns `{:error, %ParseError{}}`.
+  Following nft's design (its scanner cannot fail — stray bytes
+  become a `JUNK` token the *grammar* rejects), a numeric-or-
+  address-looking run the tokenizer can't classify is emitted as
+  a `{:symbol, raw, meta}` token; the parser/compiler reject it
+  with a located error where it isn't meaningful. Only structural
+  problems (unterminated string/comment/interpolation, truly
+  unexpected bytes) raise `Linx.NFT.ParseError` directly, carrying
+  `{file, line, column}` and the offending source line. The caller
+  (sigil macro, `parse/1`, `parse_file/1`) catches and either
+  re-raises (compile-time) or returns `{:error, %ParseError{}}`.
 
   ## Extensibility
 
@@ -120,6 +149,7 @@ defmodule Linx.NFT.Tokenizer do
       :tokens,
       :stack,
       :interpolation?,
+      escapes?: false,
       string_buf: nil,
       string_start: nil,
       expr_iodata: nil,
@@ -139,6 +169,8 @@ defmodule Linx.NFT.Tokenizer do
           | {:mac, String.t(), token_meta()}
           | {:cidr_v4, String.t(), token_meta()}
           | {:cidr_v6, String.t(), token_meta()}
+          | {:time, non_neg_integer(), token_meta()}
+          | {:symbol, String.t(), token_meta()}
           | {:elixir_expr, String.t(), token_meta()}
           | {:stmt_sep, token_meta()}
           | {atom(), token_meta()}
@@ -157,6 +189,11 @@ defmodule Linx.NFT.Tokenizer do
     * `:interpolation?` — whether to recognize `\#{...}` Elixir
       interpolation (default `false`). The sigil sets this to
       `true`; `parse/1` / `parse_file/1` leave it `false`.
+    * `:escapes?` — whether to process Elixir-style escape
+      sequences inside `"..."` string literals (default `false`,
+      which matches nft's scanner exactly: backslash is a literal
+      byte, the string ends at the first `"`). The sigil sets
+      this to `true`.
 
   Returns `{:ok, tokens}` or `{:error, %Linx.NFT.ParseError{}}`.
   """
@@ -171,7 +208,8 @@ defmodule Linx.NFT.Tokenizer do
       column: Keyword.get(opts, :column, 1),
       tokens: [],
       stack: [:default],
-      interpolation?: Keyword.get(opts, :interpolation?, false)
+      interpolation?: Keyword.get(opts, :interpolation?, false),
+      escapes?: Keyword.get(opts, :escapes?, false)
     }
 
     try do
@@ -479,33 +517,36 @@ defmodule Linx.NFT.Tokenizer do
     |> advance_col(rest, 1)
   end
 
-  # ---- escapes ----
-  defp string_step(%State{source: <<"\\\"", rest::binary>>} = state) do
+  # ---- escapes (sigil-only: `escapes?: true`) ----
+  # In the default nft-exact mode a backslash is a literal byte
+  # (nft's pattern is `\"[^"]*\"` — no escapes), handled by the
+  # generic char clause below.
+  defp string_step(%State{escapes?: true, source: <<"\\\"", rest::binary>>} = state) do
     %{state | source: rest, column: state.column + 2, string_buf: ["\"" | state.string_buf]}
   end
 
-  defp string_step(%State{source: <<"\\\\", rest::binary>>} = state) do
+  defp string_step(%State{escapes?: true, source: <<"\\\\", rest::binary>>} = state) do
     %{state | source: rest, column: state.column + 2, string_buf: ["\\" | state.string_buf]}
   end
 
-  defp string_step(%State{source: <<"\\n", rest::binary>>} = state) do
+  defp string_step(%State{escapes?: true, source: <<"\\n", rest::binary>>} = state) do
     %{state | source: rest, column: state.column + 2, string_buf: ["\n" | state.string_buf]}
   end
 
-  defp string_step(%State{source: <<"\\t", rest::binary>>} = state) do
+  defp string_step(%State{escapes?: true, source: <<"\\t", rest::binary>>} = state) do
     %{state | source: rest, column: state.column + 2, string_buf: ["\t" | state.string_buf]}
   end
 
-  defp string_step(%State{source: <<"\\r", rest::binary>>} = state) do
+  defp string_step(%State{escapes?: true, source: <<"\\r", rest::binary>>} = state) do
     %{state | source: rest, column: state.column + 2, string_buf: ["\r" | state.string_buf]}
   end
 
-  defp string_step(%State{source: <<"\\0", rest::binary>>} = state) do
+  defp string_step(%State{escapes?: true, source: <<"\\0", rest::binary>>} = state) do
     %{state | source: rest, column: state.column + 2, string_buf: [<<0>> | state.string_buf]}
   end
 
   # Unknown escape: keep the char literally (lenient).
-  defp string_step(%State{source: <<"\\", c::utf8, rest::binary>>} = state) do
+  defp string_step(%State{escapes?: true, source: <<"\\", c::utf8, rest::binary>>} = state) do
     %{
       state
       | source: rest,
@@ -720,11 +761,21 @@ defmodule Linx.NFT.Tokenizer do
   # Numeric & address literals
   # ===========================================================
 
-  defp read_hex_integer(%State{source: <<_::binary-size(2), rest::binary>>} = state) do
+  # `0x` with no hex digits: nft's scanner would lex `0` (a NUM)
+  # and then `x...` as a separate string token — mirror that
+  # instead of raising, per the lexer-never-rejects principle.
+  defp read_hex_integer(%State{source: <<z, _::binary-size(1), rest::binary>>} = state) do
     {digits, rest2} = take_while(rest, &hex?/1)
 
     if digits == "" do
-      raise_at!(state, "expected hex digits after `0x`")
+      <<^z, rest_from_x::binary>> = state.source
+
+      %{
+        state
+        | tokens: [{:integer, 0, current_meta(state)} | state.tokens],
+          source: rest_from_x,
+          column: state.column + 1
+      }
     else
       value = String.to_integer(digits, 16)
       meta = current_meta(state)
@@ -739,11 +790,18 @@ defmodule Linx.NFT.Tokenizer do
     end
   end
 
-  defp read_bin_integer(%State{source: <<_::binary-size(2), rest::binary>>} = state) do
+  defp read_bin_integer(%State{source: <<z, _::binary-size(1), rest::binary>>} = state) do
     {digits, rest2} = take_while(rest, &binary_digit?/1)
 
     if digits == "" do
-      raise_at!(state, "expected binary digits after `0b`")
+      <<^z, rest_from_b::binary>> = state.source
+
+      %{
+        state
+        | tokens: [{:integer, 0, current_meta(state)} | state.tokens],
+          source: rest_from_b,
+          column: state.column + 1
+      }
     else
       value = String.to_integer(digits, 2)
       meta = current_meta(state)
@@ -760,71 +818,111 @@ defmodule Linx.NFT.Tokenizer do
 
   # First char is `[0-9]` — could be plain int, IPv4, CIDR, or
   # MAC/IPv6 (rare since MAC/IPv6 normally start with hex letters,
-  # but `10::1` or `12:34:...` qualify), or a time-suffixed
-  # literal like `5m` / `1h` / `30s`.
+  # but `10::1` or `12:34:...` qualify), or a time literal.
   #
-  # We peek the leading run of decimal digits first; if those are
-  # followed by `s|m|h|d|w` and then a non-identifier byte, it's a
-  # time literal (the `d`/`s`/etc. would otherwise be eaten by the
-  # numeric/address scan since they're all hex digits). Anything
-  # else falls back to the standard address/integer classification.
+  # Time literals follow nft's `timestring` definition exactly
+  # (`scanner.l:138`):
+  #
+  #     ([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?
+  #
+  # i.e. compound (`1h30m10s`), strictly descending unit order,
+  # `ms` supported, and NO week unit (`5w` is not a time literal
+  # in nft; it lexes as `5` + string `w`, a downstream parse
+  # error — we match that). The value is emitted in milliseconds,
+  # the unit the kernel uses for set timeouts.
+  #
+  # Time vs address is resolved the way flex resolves overlapping
+  # rules: **longest match wins**. `830d:ba45::1` matches the
+  # timestring rule for 4 bytes (`830d`) but the IPv6 rule for the
+  # whole address, so the address wins; `10s5m` matches no address
+  # beyond `10`, so the timestring (`10s`) wins and `5m` lexes as
+  # a second timestring. A tie (or a longer-but-unclassifiable
+  # address run) goes to the timestring, since a matched
+  # timestring is always meaningful while a random hex run is not.
   defp read_numeric_or_address(state) do
-    {decimal, rest} = take_while(state.source, &digit?/1)
+    case scan_time(state.source) do
+      {:ok, ms, twidth, trest} ->
+        {full, rest, awidth} = scan_address_chars(state.source)
 
-    case rest do
-      <<unit, after_unit::binary>>
-      when unit in [?s, ?m, ?h, ?d, ?w] ->
-        cond do
-          ident_char?(peek_byte(after_unit)) ->
-            continue_address_scan(decimal, rest, state)
+        if awidth > twidth and classifiable?(full) do
+          classify_address_or_integer(full, rest, awidth, state)
+        else
+          meta = current_meta(state)
 
-          # `830d:ba45:…` — `d` is also a hex digit (the only time unit
-          # that is), so a digit-led first hextet ending in `d` followed
-          # by an IPv6 separator is an address, not "830 days".
-          looks_like_address_start?(after_unit) ->
-            continue_address_scan(decimal, rest, state)
-
-          true ->
-            emit_time_literal(decimal, unit, after_unit, state)
+          %{
+            state
+            | tokens: [{:time, ms, meta} | state.tokens],
+              source: trest,
+              column: state.column + twidth
+          }
         end
 
-      _ ->
-        continue_address_scan(decimal, rest, state)
+      :error ->
+        {full, rest, width} = scan_address_chars(state.source)
+        classify_address_or_integer(full, rest, width, state)
     end
   end
 
-  defp continue_address_scan(prefix, rest, state) do
-    {more, rest2} = take_while(rest, &numeric_addr_char?/1)
-    full = prefix <> more
-    {full, rest3, width} = maybe_consume_cidr_suffix(full, rest2)
-    classify_address_or_integer(full, rest3, width, state)
+  defp scan_address_chars(source) do
+    {chars, rest} = take_while(source, &numeric_addr_char?/1)
+    maybe_consume_cidr_suffix(chars, rest)
   end
 
-  defp emit_time_literal(decimal, unit, after_unit, state) do
-    seconds = String.to_integer(decimal) * time_multiplier(unit)
-    meta = current_meta(state)
-    width = byte_size(decimal) + 1
-
-    %{
-      state
-      | tokens: [{:time, seconds, meta} | state.tokens],
-        source: after_unit,
-        column: state.column + width
-    }
+  defp classifiable?(chars) do
+    pure_decimal?(chars) or ipv4?(chars) or ipv4_cidr?(chars) or
+      ipv6?(chars) or ipv6_cidr?(chars) or mac?(chars)
   end
 
-  defp peek_byte(<<c, _::binary>>), do: c
-  defp peek_byte(<<>>), do: 0
+  # ---- nft timestring scan ----
 
-  defp time_multiplier(?s), do: 1
-  defp time_multiplier(?m), do: 60
-  defp time_multiplier(?h), do: 3600
-  defp time_multiplier(?d), do: 86400
-  defp time_multiplier(?w), do: 604_800
+  @time_units [d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000, ms: 1]
+  @time_unit_order Keyword.keys(@time_units)
+
+  defp scan_time(source), do: do_scan_time(source, @time_unit_order, 0, 0)
+
+  defp do_scan_time(source, allowed_units, acc_ms, width) do
+    {digits, rest} = take_while(source, &digit?/1)
+
+    with true <- digits != "",
+         {:ok, unit, unit_width, rest2} <- scan_time_unit(rest),
+         true <- unit in allowed_units do
+      remaining = drop_units_through(allowed_units, unit)
+      acc_ms = acc_ms + String.to_integer(digits) * Keyword.fetch!(@time_units, unit)
+      width = width + byte_size(digits) + unit_width
+
+      case do_scan_time(rest2, remaining, acc_ms, width) do
+        {:ok, _, _, _} = more -> more
+        :error -> {:ok, acc_ms, width, rest2}
+      end
+    else
+      _ -> :error
+    end
+  end
+
+  # `ms` must be checked before `m` (and its `m` must not itself
+  # start another group's digits — `1m5s` is minutes+seconds, but
+  # `1ms` is milliseconds since `s` isn't a digit).
+  defp scan_time_unit(<<"ms", rest::binary>>), do: {:ok, :ms, 2, rest}
+  defp scan_time_unit(<<"d", rest::binary>>), do: {:ok, :d, 1, rest}
+  defp scan_time_unit(<<"h", rest::binary>>), do: {:ok, :h, 1, rest}
+  defp scan_time_unit(<<"m", rest::binary>>), do: {:ok, :m, 1, rest}
+  defp scan_time_unit(<<"s", rest::binary>>), do: {:ok, :s, 1, rest}
+  defp scan_time_unit(_), do: :error
+
+  defp drop_units_through([unit | rest], unit), do: rest
+  defp drop_units_through([_ | rest], unit), do: drop_units_through(rest, unit)
+  defp drop_units_through([], _unit), do: []
 
   # Identifier-or-IPv6/MAC. Letter-leading; if all-hex and followed
   # by `:hex...`, switch to address mode (rewind would be more
   # honest, but we just continue collection).
+  #
+  # nft's bare-string pattern allows `.` and `/` mid-string
+  # (`({letter}|[_.])({letter}|{digit}|[/\-_\.])*`), so
+  # `example.com` and `br-lan/wan0` are single tokens there. A
+  # `.`/`/` directly attached to more identifier characters
+  # continues the token; a spaced `.` remains the concatenation
+  # operator.
   defp read_identifier(state) do
     {chars, rest} = take_while(state.source, &ident_char?/1)
 
@@ -836,6 +934,17 @@ defmodule Linx.NFT.Tokenizer do
         {full, rest3, width} = maybe_consume_cidr_suffix(full, rest2)
         classify_address_or_integer(full, rest3, width, state)
 
+      bare_string_continues?(rest) ->
+        {full, rest2} = continue_bare_string(chars, rest)
+        meta = current_meta(state)
+
+        %{
+          state
+          | tokens: [{:identifier, full, meta} | state.tokens],
+            source: rest2,
+            column: state.column + byte_size(full)
+        }
+
       true ->
         meta = current_meta(state)
         width = byte_size(chars)
@@ -846,6 +955,21 @@ defmodule Linx.NFT.Tokenizer do
             source: rest,
             column: state.column + width
         }
+    end
+  end
+
+  defp bare_string_continues?(<<sep, c, _::binary>>) when sep in [?., ?/],
+    do: ident_char?(c)
+
+  defp bare_string_continues?(_), do: false
+
+  defp continue_bare_string(chars, rest) do
+    if bare_string_continues?(rest) do
+      <<sep, r::binary>> = rest
+      {more, r2} = take_while(r, &ident_char?/1)
+      continue_bare_string(chars <> <<sep>> <> more, r2)
+    else
+      {chars, rest}
     end
   end
 
@@ -869,14 +993,22 @@ defmodule Linx.NFT.Tokenizer do
 
     cond do
       pure_decimal?(chars) ->
-        value = String.to_integer(chars)
+        case parse_integer_literal(chars) do
+          {:ok, value} ->
+            %{
+              state
+              | tokens: [{:integer, value, meta} | state.tokens],
+                source: rest,
+                column: state.column + width
+            }
 
-        %{
-          state
-          | tokens: [{:integer, value, meta} | state.tokens],
-            source: rest,
-            column: state.column + width
-        }
+          :error ->
+            # Leading-zero literal with 8/9 digits — nft's octal
+            # strtoull stops mid-string and the lexeme demotes to
+            # a plain string token (`scanner.l`: `if (errno != 0
+            # || *end)`).
+            emit_address(state, :symbol, chars, rest, width, meta)
+        end
 
       ipv4_cidr?(chars) ->
         emit_address(state, :cidr_v4, chars, rest, width, meta)
@@ -893,10 +1025,60 @@ defmodule Linx.NFT.Tokenizer do
       ipv6?(chars) ->
         emit_address(state, :ipv6, chars, rest, width, meta)
 
+      split = ipv4_port_split(chars) ->
+        # `1.2.3.4:8080` (a NAT target) — nft's ip4addr regex
+        # longest-matches just the address, leaving `:8080` to lex
+        # as COLON + NUM. Our greedy scan glommed the run; split it
+        # back the way flex would.
+        {kind, prefix, suffix} = split
+
+        %{
+          state
+          | tokens: [{kind, prefix, meta} | state.tokens],
+            source: ":" <> suffix <> rest,
+            column: state.column + byte_size(prefix)
+        }
+
       true ->
-        raise_at!(state, "unrecognised numeric or address literal: #{inspect(chars)}")
+        # Unclassifiable numeric/address-shaped run (`1.2.3.4.5`).
+        # nft's scanner cannot fail — it emits the run as a string
+        # token and lets the grammar/evaluation reject it with a
+        # located error. Mirror that with a :symbol token.
+        emit_address(state, :symbol, chars, rest, width, meta)
     end
   end
+
+  defp ipv4_port_split(chars) do
+    case String.split(chars, ":", parts: 2) do
+      [prefix, suffix] when suffix != "" ->
+        cond do
+          ipv4?(prefix) -> {:ipv4, prefix, suffix}
+          ipv4_cidr?(prefix) -> {:cidr_v4, prefix, suffix}
+          true -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # nft's decstring: base 8 when the literal has a leading zero,
+  # base 10 otherwise (`scanner.l:930-941`). `0` alone is zero;
+  # a leading-zero literal containing non-octal digits fails the
+  # conversion and is not a number.
+  defp parse_integer_literal("0"), do: {:ok, 0}
+
+  defp parse_integer_literal(<<"0", rest::binary>>) do
+    if binary_all?(rest, &octal_digit?/1) do
+      {:ok, String.to_integer(rest, 8)}
+    else
+      :error
+    end
+  end
+
+  defp parse_integer_literal(chars), do: {:ok, String.to_integer(chars)}
+
+  defp octal_digit?(c), do: c >= ?0 and c <= ?7
 
   defp emit_address(state, kind, value, rest, width, meta) do
     %{

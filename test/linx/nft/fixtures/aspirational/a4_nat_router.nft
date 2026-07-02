@@ -1,0 +1,28 @@
+#!/usr/sbin/nft -f
+# Home NAT router with defines, port-forwards, and masquerade.
+flush ruleset
+
+define wan = "eth0"
+define lan = "eth1"
+define web_server = 192.168.1.10
+
+table ip nat {
+	chain prerouting {
+		type nat hook prerouting priority dstnat; policy accept;
+		iifname $wan tcp dport 80 dnat to $web_server:8080
+		iifname $wan tcp dport { 443, 8443 } dnat to $web_server
+	}
+	chain postrouting {
+		type nat hook postrouting priority srcnat; policy accept;
+		oifname $wan masquerade persistent
+	}
+}
+
+table inet filter {
+	chain forward {
+		type filter hook forward priority filter; policy drop;
+		iifname $lan oifname $wan accept
+		iifname $wan oifname $lan ct state established,related accept
+		iifname $wan ip daddr $web_server tcp dport { 8080, 443, 8443 } accept
+	}
+}

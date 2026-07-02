@@ -214,6 +214,41 @@ defmodule Linx.Netfilter.Wire do
   defmacro nfta_counter_packets, do: 2
   defmacro nfta_counter_pad, do: 3
 
+  # NFTA_OBJ_* (named-object messages)
+  defmacro nfta_obj_table, do: 1
+  defmacro nfta_obj_name, do: 2
+  defmacro nfta_obj_type, do: 3
+  defmacro nfta_obj_data, do: 4
+
+  # NFTA_OBJREF_* (nft_objref expression)
+  defmacro nfta_objref_imm_type, do: 1
+  defmacro nfta_objref_imm_name, do: 2
+
+  # NFT_OBJECT_* — named-object kinds
+  defmacro nft_object_counter, do: 1
+  defmacro nft_object_quota, do: 2
+  defmacro nft_object_ct_helper, do: 3
+  defmacro nft_object_limit, do: 4
+  defmacro nft_object_connlimit, do: 5
+  defmacro nft_object_ct_timeout, do: 7
+  defmacro nft_object_secmark, do: 8
+  defmacro nft_object_ct_expect, do: 9
+  defmacro nft_object_synproxy, do: 10
+
+  # NFTA_LIMIT_* (nft_limit expression)
+  defmacro nfta_limit_rate, do: 1
+  defmacro nfta_limit_unit, do: 2
+  defmacro nfta_limit_burst, do: 3
+  defmacro nfta_limit_type, do: 4
+  defmacro nfta_limit_flags, do: 5
+
+  # NFT_LIMIT_* — limit type
+  defmacro nft_limit_pkts, do: 0
+  defmacro nft_limit_pkt_bytes, do: 1
+
+  # NFT_LIMIT_F_*
+  defmacro nft_limit_f_inv, do: 1
+
   # NFTA_NAT_* (nft_nat expression)
   defmacro nfta_nat_type, do: 1
   defmacro nfta_nat_family, do: 2

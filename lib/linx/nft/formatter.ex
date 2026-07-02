@@ -90,9 +90,17 @@ defmodule Linx.NFT.Formatter do
   # Tables
   # ===========================================================
 
-  defp format_table(%Table{family: f, name: n, chains: chains, sets: sets, maps: maps}) do
+  defp format_table(%Table{
+         family: f,
+         name: n,
+         chains: chains,
+         sets: sets,
+         maps: maps,
+         objects: objects
+       }) do
     body_parts =
       Enum.concat([
+        Enum.sort_by(Map.values(objects), &{&1.kind, &1.name}) |> Enum.map(&format_object/1),
         Enum.sort_by(Map.values(sets), & &1.name) |> Enum.map(&format_set/1),
         Enum.sort_by(Map.values(maps), & &1.name) |> Enum.map(&format_map/1),
         Enum.sort_by(Map.values(chains), & &1.name) |> Enum.map(&format_chain/1)
@@ -100,6 +108,17 @@ defmodule Linx.NFT.Formatter do
 
     body = Enum.join(body_parts, "\n\n")
     "table #{f} #{n} {\n#{indent(body, 2)}\n}\n"
+  end
+
+  defp format_object(%Linx.Netfilter.Object{kind: :counter, name: name, data: data}) do
+    data = data || %{}
+    packets = Map.get(data, :packets, 0)
+    bytes = Map.get(data, :bytes, 0)
+    "counter #{name} {\n  packets #{packets} bytes #{bytes}\n}"
+  end
+
+  defp format_object(%Linx.Netfilter.Object{kind: kind, name: name}) do
+    "# <unsupported object: #{kind} #{name}>"
   end
 
   # ===========================================================
@@ -147,7 +166,7 @@ defmodule Linx.NFT.Formatter do
           do: "flags #{Enum.join(flags, ", ")}",
           else: nil
         ),
-        if(to, do: "timeout #{format_seconds(to)}", else: nil),
+        if(to, do: "timeout #{format_time_ms(to)}", else: nil),
         if(elems != [],
           do: "elements = { #{elems |> Enum.map(&format_set_value/1) |> Enum.join(", ")} }",
           else: nil
@@ -176,7 +195,7 @@ defmodule Linx.NFT.Formatter do
           do: "flags #{Enum.join(flags, ", ")}",
           else: nil
         ),
-        if(to, do: "timeout #{format_seconds(to)}", else: nil),
+        if(to, do: "timeout #{format_time_ms(to)}", else: nil),
         if(elems != [],
           do: "elements = { #{elems |> Enum.map(&format_map_element/1) |> Enum.join(", ")} }",
           else: nil
@@ -194,9 +213,9 @@ defmodule Linx.NFT.Formatter do
   defp format_set_value(other), do: inspect(other)
 
   # Like format_set_value/1 but key-type-aware. For :ifname sets,
-  # element strings need to be quoted so the parser reads them
-  # back as `:string` tokens (bare `eth0.10` would lex as
-  # `ident . int` since `.` isn't an identifier char).
+  # element strings are quoted — nft itself lists ifnames quoted,
+  # and quoting keeps names that collide with nft keywords loadable
+  # in string-accepting positions.
   defp render_set_element({:range, lo, hi}, _kt), do: "#{lo}-#{hi}"
   defp render_set_element(v, _kt) when is_integer(v), do: Integer.to_string(v)
   defp render_set_element(v, :ifname) when is_binary(v), do: ~s/"#{v}"/
@@ -209,15 +228,26 @@ defmodule Linx.NFT.Formatter do
   defp format_map_element({key, value}),
     do: "#{format_set_value(key)} : #{format_set_value(value)}"
 
-  defp format_seconds(secs) when is_integer(secs) do
-    cond do
-      rem(secs, 604_800) == 0 -> "#{div(secs, 604_800)}w"
-      rem(secs, 86_400) == 0 -> "#{div(secs, 86_400)}d"
-      rem(secs, 3600) == 0 -> "#{div(secs, 3600)}h"
-      rem(secs, 60) == 0 -> "#{div(secs, 60)}m"
-      true -> "#{secs}s"
-    end
+  # Renders a millisecond duration (the kernel's set-timeout unit,
+  # and what `%Set{}.timeout` holds) as nft's compound timestring —
+  # `90m` becomes `1h30m`, sub-second remainders use `ms`. nft's
+  # own scanner has no week unit, so the largest emitted unit is
+  # days.
+  defp format_time_ms(ms) when is_integer(ms) and ms > 0 do
+    units = [d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000, ms: 1]
+
+    {parts, 0} =
+      Enum.reduce(units, {[], ms}, fn {unit, size}, {parts, remaining} ->
+        case div(remaining, size) do
+          0 -> {parts, remaining}
+          n -> {["#{n}#{unit}" | parts], rem(remaining, size)}
+        end
+      end)
+
+    parts |> Enum.reverse() |> Enum.join()
   end
+
+  defp format_time_ms(0), do: "0s"
 
   # ===========================================================
   # Rules
@@ -265,17 +295,66 @@ defmodule Linx.NFT.Formatter do
     do_format_exprs(rest, [stmt | acc])
   end
 
-  # ---- payload + lookup → set ref / anon set ----
+  # ---- payload + lookup → set ref / vmap ref / anon set ----
   defp do_format_exprs(
          [
            %Expr{name: :payload, data: %{base: b, offset: o, len: l}},
-           %Expr{name: :lookup, data: %{set: name}}
+           %Expr{name: :lookup, data: %{set: name} = lookup}
            | rest
          ],
          acc
        ) do
     field = payload_field(b, o, l)
-    do_format_exprs(rest, ["#{field} @#{name}" | acc])
+    ref = if lookup[:dreg] == 0, do: "vmap @#{name}", else: "@#{name}"
+    do_format_exprs(rest, ["#{field} #{ref}" | acc])
+  end
+
+  # ---- LHS + __anon_vmap → inline vmap literal ----
+  defp do_format_exprs(
+         [
+           %Expr{name: :payload, data: %{base: b, offset: o, len: l}},
+           %Expr{name: :__anon_vmap, data: %{elements: elems, key_type: kt}}
+           | rest
+         ],
+         acc
+       ) do
+    field = payload_field(b, o, l)
+    do_format_exprs(rest, ["#{field} vmap { #{render_vmap_elems(elems, kt)} }" | acc])
+  end
+
+  defp do_format_exprs(
+         [
+           %Expr{name: :ct, data: %{key: key}},
+           %Expr{name: :__anon_vmap, data: %{elements: elems, key_type: kt}}
+           | rest
+         ],
+         acc
+       ) do
+    do_format_exprs(rest, ["ct #{key} vmap { #{render_vmap_elems(elems, kt)} }" | acc])
+  end
+
+  defp do_format_exprs(
+         [
+           %Expr{name: :meta, data: %{key: key}},
+           %Expr{name: :__anon_vmap, data: %{elements: elems, key_type: kt}}
+           | rest
+         ],
+         acc
+       ) do
+    do_format_exprs(rest, ["meta #{key} vmap { #{render_vmap_elems(elems, kt)} }" | acc])
+  end
+
+  # ---- ct + lookup → set ref / vmap ref ----
+  defp do_format_exprs(
+         [
+           %Expr{name: :ct, data: %{key: key}},
+           %Expr{name: :lookup, data: %{set: name} = lookup}
+           | rest
+         ],
+         acc
+       ) do
+    ref = if lookup[:dreg] == 0, do: "vmap @#{name}", else: "@#{name}"
+    do_format_exprs(rest, ["ct #{key} #{ref}" | acc])
   end
 
   defp do_format_exprs(
@@ -323,12 +402,13 @@ defmodule Linx.NFT.Formatter do
   defp do_format_exprs(
          [
            %Expr{name: :meta, data: %{key: key}},
-           %Expr{name: :lookup, data: %{set: name}}
+           %Expr{name: :lookup, data: %{set: name} = lookup}
            | rest
          ],
          acc
        ) do
-    do_format_exprs(rest, ["meta #{key} @#{name}" | acc])
+    ref = if lookup[:dreg] == 0, do: "vmap @#{name}", else: "@#{name}"
+    do_format_exprs(rest, ["meta #{key} #{ref}" | acc])
   end
 
   # ---- ct state (compiler emits bitwise + cmp_neq/eq_0 — the
@@ -392,6 +472,11 @@ defmodule Linx.NFT.Formatter do
     do_format_exprs(rest, [format_verdict(v) | acc])
   end
 
+  # ---- named-object references ----
+  defp do_format_exprs([%Expr{name: :objref, data: %{name: name, kind: kind}} | rest], acc) do
+    do_format_exprs(rest, [~s/#{kind} name "#{name}"/ | acc])
+  end
+
   # ---- counter ----
   defp do_format_exprs([%Expr{name: :counter, data: %{packets: 0, bytes: 0}} | rest], acc) do
     do_format_exprs(rest, ["counter" | acc])
@@ -402,17 +487,53 @@ defmodule Linx.NFT.Formatter do
   end
 
   # ---- log ----
+  @log_all_flags [:tcp_seq, :tcp_opt, :ip_opt, :uid, :macdecode]
+
   defp do_format_exprs([%Expr{name: :log, data: data} | rest], acc) do
+    flags =
+      case Enum.sort(List.wrap(data[:flags] || [])) do
+        [] -> nil
+        sorted -> render_log_flags(sorted)
+      end
+
     parts =
       [
         if(data[:prefix], do: ~s/prefix "#{escape_string(data[:prefix])}"/, else: nil),
         if(data[:group], do: "group #{data[:group]}", else: nil),
-        if(data[:level], do: "level #{data[:level]}", else: nil)
+        if(data[:level], do: "level #{data[:level]}", else: nil),
+        if(data[:snaplen], do: "snaplen #{data[:snaplen]}", else: nil),
+        if(data[:qthreshold], do: "queue-threshold #{data[:qthreshold]}", else: nil),
+        flags
       ]
       |> Enum.reject(&is_nil/1)
 
     text = ["log" | parts] |> Enum.join(" ")
     do_format_exprs(rest, [text | acc])
+  end
+
+  # ---- limit ----
+  defp do_format_exprs([%Expr{name: :limit, data: data} | rest], acc) do
+    %{rate: rate, per: per, burst: burst, type: type, over: over} = data
+
+    unit =
+      case per do
+        1 -> "second"
+        60 -> "minute"
+        3600 -> "hour"
+        86_400 -> "day"
+        604_800 -> "week"
+        other -> "#{other}s"
+      end
+
+    default_burst = if type == :packets, do: 5, else: 0
+
+    text =
+      ["limit rate"] ++
+        if(over, do: ["over"], else: []) ++
+        ["#{rate}/#{unit}"] ++
+        if(burst != default_burst, do: ["burst #{burst} #{type}"], else: [])
+
+    do_format_exprs(rest, [Enum.join(text, " ") | acc])
   end
 
   # ---- reject ----
@@ -475,6 +596,32 @@ defmodule Linx.NFT.Formatter do
     do_format_exprs(rest, ["# <unsupported expression: #{inspect(expr.name)}>" | acc])
   end
 
+  defp render_vmap_elems(elems, key_type) do
+    elems
+    |> Enum.map(fn {key, verdict} ->
+      "#{render_vmap_key(key, key_type)} : #{format_verdict(verdict)}"
+    end)
+    |> Enum.join(", ")
+  end
+
+  defp render_vmap_key(bits, :ct_state) when is_integer(bits) do
+    case bits_to_ct_states(bits) do
+      [single] -> single
+      _ -> Integer.to_string(bits)
+    end
+  end
+
+  defp render_vmap_key(key, kt), do: render_set_element(key, kt)
+
+  defp render_log_flags(sorted) do
+    cond do
+      sorted == Enum.sort(@log_all_flags) -> "flags all"
+      sorted == [:uid] -> "flags skuid"
+      sorted == [:macdecode] -> "flags ether"
+      true -> nil
+    end
+  end
+
   defp invert_ct_cmp_op(:neq, 0), do: :eq
   defp invert_ct_cmp_op(:eq, 0), do: :neq
   defp invert_ct_cmp_op(other, _), do: other
@@ -519,6 +666,8 @@ defmodule Linx.NFT.Formatter do
   defp payload_field(:transport, 0, 1), do: "icmp type"
   defp payload_field(:transport, 1, 1), do: "icmp code"
   defp payload_field(:network, 9, 1), do: "ip protocol"
+  defp payload_field(:network, 6, 1), do: "ip6 nexthdr"
+  defp payload_field(:network, 7, 1), do: "ip6 hoplimit"
   defp payload_field(:network, 12, 4), do: "ip saddr"
   defp payload_field(:network, 16, 4), do: "ip daddr"
   defp payload_field(:network, 8, 16), do: "ip6 saddr"
@@ -534,6 +683,8 @@ defmodule Linx.NFT.Formatter do
   defp render_payload_value(v, :network, _o, 4) when byte_size(v) == 4, do: render_ipv4(v)
   defp render_payload_value(v, :network, _o, 16) when byte_size(v) == 16, do: render_ipv6(v)
   defp render_payload_value(v, :network, 9, 1), do: render_ip_protocol(v)
+  defp render_payload_value(v, :network, 6, 1), do: render_ip_protocol(v)
+  defp render_payload_value(<<n>>, :network, 7, 1), do: Integer.to_string(n)
   defp render_payload_value(v, _, _, _), do: inspect(v)
 
   defp render_address(v, 4) when byte_size(v) == 4, do: render_ipv4(v)
@@ -629,7 +780,12 @@ defmodule Linx.NFT.Formatter do
   defp stmt(lhs, nil, rhs), do: "#{lhs} #{rhs}"
   defp stmt(lhs, op, rhs), do: "#{lhs} #{op} #{rhs}"
 
-  defp escape_string(s), do: String.replace(s, ~s/"/, ~S/\"/)
+  # nft's quoted-string pattern is `\"[^"]*\"` — there is NO escape
+  # syntax, so a literal `"` cannot be represented inside an nft
+  # string at all. Replace it with `'` (lossy but loadable) rather
+  # than emit `\"`, which nft would read as a backslash followed by
+  # the string terminator.
+  defp escape_string(s), do: String.replace(s, ~s/"/, "'")
 
   defp indent(text, n) do
     pad = String.duplicate(" ", n)
@@ -668,7 +824,12 @@ defmodule Linx.NFT.Formatter do
     # rest is a richer formatter capability that hasn't been built
     # yet (it'd need an AST-to-source emitter; the existing
     # Formatter walks compiled %Expr{}s).
-    case Tokenizer.tokenize(source, file: file, line: line, interpolation?: true) do
+    case Tokenizer.tokenize(source,
+           file: file,
+           line: line,
+           interpolation?: true,
+           escapes?: true
+         ) do
       {:ok, tokens} ->
         if has_interpolation?(tokens) do
           source
