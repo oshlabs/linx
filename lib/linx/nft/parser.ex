@@ -82,7 +82,7 @@ defmodule Linx.NFT.Parser do
     @moduledoc false
 
     @enforce_keys [:file, :original_source]
-    defstruct [:file, :original_source]
+    defstruct [:file, :original_source, errors: nil]
   end
 
   @type ast :: tuple()
@@ -111,19 +111,75 @@ defmodule Linx.NFT.Parser do
   """
   @spec parse([tuple()], keyword()) ::
           {:ok, [ast()]} | {:error, ParseError.t()}
+  # nft aborts after parser_max_errors (10); we match.
+  @max_errors 10
+
   def parse(tokens, opts \\ []) when is_list(tokens) do
+    {:ok, errors} = Agent.start_link(fn -> [] end)
+
     state = %State{
       file: Keyword.get(opts, :file, "nofile"),
-      original_source: Keyword.get(opts, :source, "")
+      original_source: Keyword.get(opts, :source, ""),
+      errors: errors
     }
 
     try do
       items = parse_top(skip_seps(tokens), state, [])
-      {:ok, Enum.reverse(items)}
+
+      case collected_errors(state) do
+        [] -> {:ok, Enum.reverse(items)}
+        [%ParseError{} = first | rest] -> {:error, %{first | others: rest}}
+      end
     rescue
-      e in ParseError -> {:error, e}
+      e in ParseError ->
+        # A non-recoverable error: report it along with anything
+        # collected before it.
+        {:error, %{e | others: collected_errors(state)}}
+    catch
+      :throw, :nft_max_errors ->
+        # Error budget spent — report exactly what was collected,
+        # like nft's `if (++state->nerrs == parser_max_errors)
+        # YYABORT`.
+        [%ParseError{} = first | rest] = collected_errors(state)
+        {:error, %{first | others: rest}}
+    after
+      Agent.stop(errors)
     end
   end
+
+  defp collected_errors(%State{errors: pid}), do: pid |> Agent.get(& &1) |> Enum.reverse()
+
+  # Records a recoverable error; aborts the parse once the budget
+  # is spent.
+  defp record_error!(%State{errors: pid}, %ParseError{} = e) do
+    count = Agent.get_and_update(pid, fn errs -> {length(errs) + 1, [e | errs]} end)
+
+    if count >= @max_errors do
+      throw(:nft_max_errors)
+    end
+
+    :ok
+  end
+
+  # Statement-boundary resynchronisation: drop tokens up to and
+  # including the next top-depth statement separator, or stop
+  # (without consuming) at a `}` closing the surrounding block.
+  # Separators inside braces/brackets/parens don't count — a
+  # malformed inline set shouldn't resume mid-set.
+  defp sync_to_stmt_sep(tokens), do: do_sync(tokens, 0)
+
+  defp do_sync([], _depth), do: []
+  defp do_sync([{:stmt_sep, _} | rest], 0), do: rest
+  defp do_sync([{:rbrace, _} | _] = tokens, 0), do: tokens
+  defp do_sync([{:rbrace, _} | rest], depth), do: do_sync(rest, depth - 1)
+
+  defp do_sync([{open, _} | rest], depth) when open in [:lbrace, :lbracket, :lparen],
+    do: do_sync(rest, depth + 1)
+
+  defp do_sync([{close, _} | rest], depth) when close in [:rbracket, :rparen],
+    do: do_sync(rest, max(depth - 1, 0))
+
+  defp do_sync([_ | rest], depth), do: do_sync(rest, depth)
 
   # ===========================================================
   # Top level
@@ -138,27 +194,49 @@ defmodule Linx.NFT.Parser do
       [] ->
         acc
 
+      _ ->
+        {item, rest} =
+          try do
+            parse_top_item(tokens, state)
+          rescue
+            e in ParseError ->
+              record_error!(state, e)
+              {nil, resync_with_progress(tokens)}
+          end
+
+        parse_top(skip_seps(rest), state, if(item, do: [item | acc], else: acc))
+    end
+  end
+
+  defp parse_top_item(tokens, state) do
+    case tokens do
       [{:identifier, "table", meta} | rest] ->
-        {item, rest2} = parse_table(rest, meta, state)
-        parse_top(skip_seps(rest2), state, [item | acc])
+        parse_table(rest, meta, state)
 
       [{:identifier, "include", meta} | rest] ->
-        {item, rest2} = parse_include(rest, meta, state)
-        parse_top(skip_seps(rest2), state, [item | acc])
+        parse_include(rest, meta, state)
 
       [{:identifier, "define", meta} | rest] ->
-        {item, rest2} = parse_define(rest, meta, state)
-        parse_top(skip_seps(rest2), state, [item | acc])
+        parse_define(rest, meta, state)
 
       # `flush ruleset` — declarative "start with an empty ruleset"
       # directive, commonly used at the top of nftables.conf files.
       # The compiler treats it as a noop (Ruleset.new() is already
       # empty).
       [{:identifier, "flush", meta}, {:identifier, "ruleset", _} | rest] ->
-        parse_top(skip_seps(rest), state, [{:flush_ruleset, meta} | acc])
+        {{:flush_ruleset, meta}, rest}
 
       [tok | _] ->
         raise_unexpected!(state, tok, "expected `table`, `include`, `define`, or `flush ruleset`")
+    end
+  end
+
+  # Resync, guaranteeing at least one token of progress so the
+  # top-level recovery loop can't spin on a stray `}`.
+  defp resync_with_progress(tokens) do
+    case sync_to_stmt_sep(tokens) do
+      ^tokens -> tl(tokens)
+      rest -> rest
     end
   end
 
@@ -303,10 +381,21 @@ defmodule Linx.NFT.Parser do
         {comment, rest2} = expect_string!(rest, state, "comment text")
         parse_chain_body(skip_seps(rest2), state, [{:comment, comment} | opts], stmts)
 
-      # Otherwise: it's a rule.
+      # Otherwise: it's a rule. A malformed rule is recorded and
+      # skipped (resync at the next statement separator), so one
+      # typo doesn't hide errors further down — nft's
+      # `error stmt_separator` recovery, at rule granularity.
       _ ->
-        {rule, rest2} = parse_rule(tokens, state)
-        parse_chain_body(skip_seps(rest2), state, opts, [rule | stmts])
+        {rule, rest2} =
+          try do
+            parse_rule(tokens, state)
+          rescue
+            e in ParseError ->
+              record_error!(state, e)
+              {nil, sync_to_stmt_sep(tokens)}
+          end
+
+        parse_chain_body(skip_seps(rest2), state, opts, if(rule, do: [rule | stmts], else: stmts))
     end
   end
 

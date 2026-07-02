@@ -32,17 +32,30 @@ defmodule Linx.NFT.ParseError do
   Elixir ecosystem.
   """
 
-  defexception [:file, :line, :column, :snippet, :message]
+  defexception [:file, :line, :column, :snippet, :message, others: []]
 
   @type t :: %__MODULE__{
           file: String.t(),
           line: pos_integer(),
           column: pos_integer(),
           snippet: String.t() | nil,
-          message: String.t()
+          message: String.t(),
+          others: [t()]
         }
 
   @impl true
+  def message(%__MODULE__{others: [_ | _] = others} = err) do
+    # Multi-error report (nft-style: the parser recovers at
+    # statement boundaries and keeps going, up to 10 errors).
+    rest =
+      Enum.map_join(others, "\n\n", fn %__MODULE__{} = o ->
+        message(%{o | others: []})
+      end)
+
+    message(%{err | others: []}) <>
+      "\n\n" <> rest <> "\n\n(#{length(others) + 1} errors)"
+  end
+
   def message(%__MODULE__{file: file, line: line, column: column, snippet: snip, message: msg}) do
     header = "#{file}:#{line}:#{column}: #{msg}"
 

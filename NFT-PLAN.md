@@ -290,11 +290,15 @@ reports up to `parser_max_errors` (10) per run, and uses bison LAC to print
 exact "expected any of: …" token sets; every error carries a source-excerpt
 location. We fail fast on the first error with a caret snippet.
 
-- [ ] **Multi-error mode**: on parse error, synchronize to the next
-  `:stmt_sep` at the current nesting depth (RD can sync smarter than nft's
-  line-level recovery), collect up to 10 `%ParseError{}`s, return
-  `{:error, [errors]}` from `parse/1` (keep raising the *first* in sigil
-  mode, but print the rest as compiler diagnostics).
+- [x] **Multi-error mode** (2026-07-02): the parser recovers at rule and
+  top-level-item boundaries (brace-depth-aware resync to the next
+  statement separator), collecting up to 10 errors like nft's
+  parser_max_errors. `%ParseError{}` gained an `others` field so the
+  `{:error, %ParseError{}}` contract is unchanged; `Exception.message/1`
+  renders the full report with an "(N errors)" trailer. Tokenizer errors
+  remain structural aborts. Table-BODY item recovery (bad set decl inside
+  an otherwise good table skips the whole table) is coarser than rule-level
+  — refine later if it bites.
 - [ ] **Expected-set messages**: our `expect_*!` helpers already know what
   they wanted; extend dispatch-point errors ("expected rule statement") to
   enumerate the valid words in that context — the RD equivalent of LAC, and
