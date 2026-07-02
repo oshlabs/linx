@@ -428,22 +428,28 @@ defmodule Linx.NFT.Compiler do
   defp payload_dispatch(:icmpv6, :code), do: {:ok, :icmpv6_code, {:int, 1}}
   defp payload_dispatch(_, _), do: :unknown
 
-  defp meta_kind(:iif), do: {:int, 4}
-  defp meta_kind(:oif), do: {:int, 4}
+  # Byte-order matters for multi-byte kinds: packet-header payloads are
+  # network order (big-endian) — the register holds raw packet bytes — but
+  # the kernel stores these meta/ct fields in *host* order and memcmps the
+  # native register against NFTA_DATA_VALUE verbatim. `{:int, w}` is
+  # network order; `{:int, w, :host}` is host order. `meta protocol` is a
+  # __be16 (network order); 1-byte fields have no order.
+  defp meta_kind(:iif), do: {:int, 4, :host}
+  defp meta_kind(:oif), do: {:int, 4, :host}
   defp meta_kind(:iifname), do: :ifname
   defp meta_kind(:oifname), do: :ifname
-  defp meta_kind(:mark), do: {:int, 4}
+  defp meta_kind(:mark), do: {:int, 4, :host}
   defp meta_kind(:protocol), do: {:int, 2}
   defp meta_kind(:nfproto), do: {:int, 1}
   defp meta_kind(:l4proto), do: {:int, 1}
-  defp meta_kind(:length), do: {:int, 4}
-  defp meta_kind(:skuid), do: {:int, 4}
-  defp meta_kind(:skgid), do: {:int, 4}
+  defp meta_kind(:length), do: {:int, 4, :host}
+  defp meta_kind(:skuid), do: {:int, 4, :host}
+  defp meta_kind(:skgid), do: {:int, 4, :host}
   defp meta_kind(_), do: nil
 
   defp ct_kind(:state), do: :ct_state
   defp ct_kind(:direction), do: {:int, 1}
-  defp ct_kind(:mark), do: {:int, 4}
+  defp ct_kind(:mark), do: {:int, 4, :host}
   defp ct_kind(_), do: nil
 
   # ---- RHS ----
@@ -476,6 +482,10 @@ defmodule Linx.NFT.Compiler do
     Expr.cmp(op, encode_int(n, width))
   end
 
+  defp compile_rhs({:integer, n, _}, op, {:int, width, :host}, _state) do
+    Expr.cmp(op, encode_int_host(n, width))
+  end
+
   defp compile_rhs({:time, n, _}, op, {:int, width}, _state) do
     Expr.cmp(op, encode_int(n, width))
   end
@@ -484,11 +494,12 @@ defmodule Linx.NFT.Compiler do
     Expr.cmp(op, pad_ifname(s))
   end
 
-  defp compile_rhs({:string, s, meta}, op, {:int, _width}, state) do
-    case Integer.parse(s) do
-      {n, ""} -> compile_rhs({:integer, n, meta}, op, {:int, 4}, state)
-      _ -> raise_at!(state, meta, "compiler: expected integer value, got string #{inspect(s)}")
-    end
+  defp compile_rhs({:string, s, meta}, op, {:int, _, _} = kind, state) do
+    compile_int_string(s, meta, op, kind, state)
+  end
+
+  defp compile_rhs({:string, s, meta}, op, {:int, _width} = kind, state) do
+    compile_int_string(s, meta, op, kind, state)
   end
 
   defp compile_rhs({:address, :ipv4, addr, meta}, op, :ipv4, state) do
@@ -530,6 +541,20 @@ defmodule Linx.NFT.Compiler do
     |> tap(fn _ -> _ = meta end)
   end
 
+  # Interval sets are compared in memcmp order, which for a host-order
+  # field on a little-endian machine is not numeric order — correct
+  # support needs a byteorder conversion expression the compiler doesn't
+  # emit yet. Refuse rather than install a range that matches the wrong
+  # packets.
+  defp compile_rhs({:range, _lo, _hi, meta}, _op, {:int, _width, :host}, state) do
+    raise_at!(
+      state,
+      meta,
+      "compiler: ranges over host-byte-order fields (meta mark/iif/oif/length/" <>
+        "skuid/skgid, ct mark) are not supported yet"
+    )
+  end
+
   defp compile_rhs({:identifier, name, meta}, op, :ct_state, state) do
     # ct state matching is a bitmask check: a packet's state field
     # has at most one bit set, but `ct state X` semantically means
@@ -548,6 +573,20 @@ defmodule Linx.NFT.Compiler do
     case parse_int_keyword(name) do
       {:ok, n} ->
         Expr.cmp(op, encode_int(n, width))
+
+      :error ->
+        raise_at!(
+          state,
+          meta,
+          "compiler: don't know how to interpret identifier `#{name}` as integer"
+        )
+    end
+  end
+
+  defp compile_rhs({:identifier, name, meta}, op, {:int, width, :host}, state) do
+    case parse_int_keyword(name) do
+      {:ok, n} ->
+        Expr.cmp(op, encode_int_host(n, width))
 
       :error ->
         raise_at!(
@@ -616,6 +655,9 @@ defmodule Linx.NFT.Compiler do
   defp set_key_type_for({:int, 2}), do: :inet_service
   defp set_key_type_for({:int, 4}), do: :mark
   defp set_key_type_for({:int, 1}), do: :inet_proto
+  # Host-order u32 fields use the :mark set type: the encoder emits :mark
+  # keys in native order, matching the native register these fields load.
+  defp set_key_type_for({:int, 4, :host}), do: :mark
   defp set_key_type_for(:ipv4), do: :ipv4_addr
   defp set_key_type_for(:ipv6), do: :ipv6_addr
   defp set_key_type_for(:ifname), do: :ifname
@@ -911,6 +953,20 @@ defmodule Linx.NFT.Compiler do
   defp encode_int(n, 2), do: <<n::big-16>>
   defp encode_int(n, 4), do: <<n::big-32>>
   defp encode_int(n, 8), do: <<n::big-64>>
+
+  # Host byte order — for the meta/ct fields the kernel stores natively
+  # (see meta_kind/1). The register is memcmp'd against these bytes.
+  defp encode_int_host(n, 1), do: <<n>>
+  defp encode_int_host(n, 2), do: <<n::native-16>>
+  defp encode_int_host(n, 4), do: <<n::native-32>>
+  defp encode_int_host(n, 8), do: <<n::native-64>>
+
+  defp compile_int_string(s, meta, op, kind, state) do
+    case Integer.parse(s) do
+      {n, ""} -> compile_rhs({:integer, n, meta}, op, kind, state)
+      _ -> raise_at!(state, meta, "compiler: expected integer value, got string #{inspect(s)}")
+    end
+  end
 
   defp pad_ifname(s) when is_binary(s) do
     # Linux IFNAMSIZ == 16; nft compares against a 16-byte zero-

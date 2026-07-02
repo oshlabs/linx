@@ -28,10 +28,16 @@ defmodule Linx.Netfilter.Table do
   ## Construction
 
       iex> Table.new(:inet, "myapp")
-      {:ok, %Linx.Netfilter.Table{family: :inet, name: "myapp", flags: [], ...}}
+      {:ok, %Linx.Netfilter.Table{family: :inet, name: "myapp", flags: [:owner], ...}}
 
-      iex> Table.new(:inet, "myapp", flags: [:owner])
-      {:ok, %Linx.Netfilter.Table{flags: [:owner], ...}}
+      iex> Table.new(:inet, "myapp", flags: [:persist])
+      {:ok, %Linx.Netfilter.Table{flags: [:persist], ...}}
+
+  `:flags` defaults to `[:owner]` — the `Linx.Netfilter` design is that
+  the socket owns its tables, so a pushed table auto-reaps when the
+  creating socket closes (the moduledoc's "Owner flag is the default"
+  guarantee, kernel ≥ 5.13). Pass `flags: [:persist]` for policies that
+  should survive the BEAM, or `flags: []` for plain unflagged tables.
 
   Errors: `{:error, {:bad_table, reason}}`.
 
@@ -86,7 +92,11 @@ defmodule Linx.Netfilter.Table do
   @spec new(family(), String.t(), keyword()) ::
           {:ok, t()} | {:error, {:bad_table, term()}}
   def new(family, name, opts \\ []) when is_atom(family) and is_binary(name) and is_list(opts) do
-    flags = Keyword.get(opts, :flags, [])
+    # [:owner] by default: aligns the primary authoring path with the
+    # documented "sockets own their tables" guarantee — a ruleset built
+    # with Ruleset.add_table/3 and pushed auto-reaps on socket close,
+    # exactly like create_table/2.
+    flags = Keyword.get(opts, :flags, [:owner])
 
     with :ok <- validate_family(family),
          :ok <- validate_name(name),

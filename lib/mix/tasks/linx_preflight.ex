@@ -5,8 +5,7 @@ defmodule Mix.Linx.Preflight do
   # any `cc` invocation, so a build on the wrong machine fails (or warns) with a
   # clear, actionable message instead of a raw compiler dump.
   #
-  # Guards only — the duplicated compile scaffolding in the tasks is intentionally
-  # left as-is for now (see docs/release/06_PLAN_build_portability.md).
+  # Guards only — the shared compile scaffolding lives in `Mix.Linx.CC`.
 
   # The supported kernel floor, matching the README. The C syscall-availability
   # floor is lower (~5.8); this is the version Linx is built and tested against.

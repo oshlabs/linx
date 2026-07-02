@@ -344,8 +344,20 @@ defmodule Linx.Tty do
 
   The byte pump runs in the *calling process* and blocks until the
   workload terminates. The caller's terminal is restored
-  unconditionally via `try/after`, even on a crash inside the loop,
-  so a wedged terminal is structurally impossible.
+  unconditionally via `try/after`, even on a crash inside the loop.
+  Both pumps also trap exits for their lifetime, so an exit *signal*
+  (e.g. a linked `linger: false` session stopping with a non-normal
+  reason) arrives as a message and unwinds through the restore instead
+  of killing the pump mid-flight with the terminal still raw.
+
+  ## Session must be running
+
+  `attach/2` requires the session to be at the `:running` stage.
+  Terminal stages return `{:error, :no_process}`; pre-running stages
+  (`:starting` / `:spawned` / `:ready`) return
+  `{:error, {:not_running, stage}}` — the agent rejects PTY input at
+  the checkpoint, so attaching before `proceed/1` would kill the
+  parked workload on the first keystroke.
   """
   @spec attach(:controlling | :group_leader, session(), keyword()) ::
           {:ok, {:exited, non_neg_integer()} | {:signaled, pos_integer()} | :detached}
@@ -437,17 +449,27 @@ defmodule Linx.Tty do
     end
   end
 
-  # Refuses attach against a session whose workload has already
-  # terminated, or whose GenServer is gone. `Linx.Process.info/1`
-  # is a synchronous GenServer.call that returns the lifecycle
-  # stage cheaply.
+  # Requires the session to be exactly at the :running stage.
+  # `Linx.Process.info/1` is a synchronous GenServer.call that returns
+  # the lifecycle stage cheaply.
+  #
+  # Terminal stages mean there is nothing to attach to. Pre-:running
+  # stages (:starting / :spawned / :ready) are refused too: the agent
+  # treats {:pty_in, _} at the checkpoint as a protocol error (the first
+  # keystroke would kill the parked workload), and an abort/1 landing
+  # mid-attach would deliver {:linx_process, :aborted} — pumps handle it
+  # defensively, but attaching to a not-yet-running session is a caller
+  # bug worth surfacing at the door.
   defp ensure_session_running(session) do
     case Linx.Process.info(session) do
+      {:ok, %{stage: :running}} ->
+        :ok
+
       {:ok, %{stage: stage}} when stage in [:exited, :signaled, :aborted, :errored] ->
         {:error, :no_process}
 
-      {:ok, _info} ->
-        :ok
+      {:ok, %{stage: stage}} ->
+        {:error, {:not_running, stage}}
 
       {:error, :no_process} ->
         {:error, :no_process}
@@ -671,6 +693,13 @@ defmodule Linx.Tty do
       {:linx_process, :signaled, signum} ->
         {:ok, {:signaled, signum}}
 
+      # Defensive: attach requires :running, but another process can
+      # still abort/1 a session in the window before the precondition
+      # check lands, and the terminal event would match no clause —
+      # blocking the pump forever with the terminal captured.
+      {:linx_process, :aborted} ->
+        {:error, :aborted}
+
       {:linx_process, :error, errno, stage} ->
         {:error, Linx.Process.Error.from_agent(errno, stage)}
     after
@@ -739,6 +768,16 @@ defmodule Linx.Tty do
 
   defp attach_controlling(session, detach_key) do
     with {:ok, fd, saved} <- open_controlling_raw() do
+      # Trap exits for the pump's lifetime (mirroring the group_leader
+      # path): the caller is often linked to the session (spawn/1 links),
+      # and with linger: false the session exits with a non-:normal
+      # reason at the terminal event. Untrapped, that signal can kill
+      # this process before the `after` below runs — leaving the
+      # terminal raw, prim_tty's reader disabled node-wide, and the
+      # SIGWINCH handler leaked. Trapped, it arrives as a message the
+      # pump handles.
+      saved_trap = Process.flag(:trap_exit, true)
+
       # Pause Erlang's prim_tty reader so it stops competing with us
       # for /dev/tty reads. See the module doc's "Coexisting with
       # iex's tty driver". `nil` when no user_drv (escript, etc.) --
@@ -775,6 +814,7 @@ defmodule Linx.Tty do
         restore_and_close(fd, saved)
         close_port(port)
         give_tty_back(tty_state)
+        Process.flag(:trap_exit, saved_trap)
       end
     end
   end
@@ -1094,8 +1134,28 @@ defmodule Linx.Tty do
       {:linx_process, :signaled, signum} ->
         {:ok, {:signaled, signum}}
 
+      # Defensive: attach requires :running, but another process can
+      # still abort/1 in the window before the precondition check
+      # lands — without this clause the pump would block forever with
+      # the terminal raw.
+      {:linx_process, :aborted} ->
+        {:error, :aborted}
+
       {:linx_process, :error, errno, stage} ->
         {:error, Linx.Process.Error.from_agent(errno, stage)}
+
+      # attach_controlling traps exits for the pump's lifetime, so a
+      # linked session's exit arrives here as a message instead of
+      # killing us mid-pump. The session's terminal *event* is sent
+      # before its exit signal, so this only fires when the session is
+      # killed brutally (or its terminal event went to another owner).
+      {:EXIT, ^session, _reason} ->
+        {:error, :no_process}
+
+      # Any other trapped exit: unwind cleanly (the `after` restores the
+      # terminal) and re-raise the link semantics the caller expects.
+      {:EXIT, pid, reason} when reason != :normal ->
+        exit({:linked_exit, pid, reason})
     end
   end
 end

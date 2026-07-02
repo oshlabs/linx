@@ -93,13 +93,54 @@ defmodule Linx.Netlink.Socket do
 
   Sequence numbers start at 1; 0 is reserved for unsolicited kernel messages,
   so a reply bearing seq 0 is never an answer to one of our requests.
+
+  The wire field is 32 bits, so the 64-bit counter is masked here — the value
+  handed out is always exactly what the kernel echoes back. (Unmasked, request
+  2³²+1 would never match its echoed reply and `talk/4` would block forever.)
+  The wrap skips 0 to keep the reservation above.
   """
   @spec next_seq(t) :: pos_integer
-  def next_seq(%__MODULE__{seq: seq}), do: :atomics.add_get(seq, 1, 1)
+  def next_seq(%__MODULE__{seq: seq} = socket) do
+    import Bitwise
+
+    case :atomics.add_get(seq, 1, 1) &&& 0xFFFFFFFF do
+      0 -> next_seq(socket)
+      n -> n
+    end
+  end
 
   @doc "Closes a socket from `open/2`."
   @spec close(t) :: :ok
   def close(%__MODULE__{socket: socket}), do: :socket.close(socket)
+
+  # One netlink datagram can far exceed OTP's default 8 KiB read length
+  # (an RTM_GETLINK dump chunk on a host with SR-IOV VFs easily does).
+  # 64 KiB is the ceiling the kernel itself uses for dump allocations.
+  @recv_size 65_536
+
+  @doc """
+  Receives one datagram from `socket`, blocking until it arrives.
+
+  Reads up to 64 KiB per datagram — `:socket.recv/1`'s default read length
+  is only 8 KiB, which silently truncates large netlink dump chunks. If the
+  kernel still flags the read as truncated (`MSG_TRUNC` in the returned
+  message flags), returns `{:error, :truncated}` instead of handing back a
+  cut buffer that would decode into an incomplete message list.
+  """
+  @spec recv_datagram(t, pos_integer) :: {:ok, binary} | {:error, term}
+  def recv_datagram(%__MODULE__{socket: socket}, size \\ @recv_size) do
+    case :socket.recvmsg(socket, size, 0, [], :infinity) do
+      {:ok, %{flags: flags, iov: iov}} ->
+        if :trunc in flags do
+          {:error, :truncated}
+        else
+          {:ok, IO.iodata_to_binary(iov)}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   @doc """
   Joins a netlink multicast group on `socket`.

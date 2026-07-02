@@ -459,8 +459,10 @@ defmodule Linx.SeccompTest do
 
     test "an empty allow_list compiles to a fall-through-only filter" do
       {:ok, f} = Seccomp.allow_list([], default: :allow)
-      # 5 insns: arch prologue (3) + load nr (1) + default RET (1).
-      assert div(byte_size(f.bpf), 8) == 5
+      # arch prologue (3) + load nr (1) [+ x32 guard (2) on x86_64] +
+      # default RET (1).
+      expected = if f.arch == :x86_64, do: 7, else: 5
+      assert div(byte_size(f.bpf), 8) == expected
     end
   end
 
@@ -779,9 +781,11 @@ defmodule Linx.SeccompTest do
                |> Builder.build()
     end
 
-    test "build/1 of an empty builder gives a 5-insn fall-through filter" do
+    test "build/1 of an empty builder gives a minimal fall-through filter" do
       {:ok, f} = Builder.new() |> Builder.build(default: :allow)
-      assert div(byte_size(f.bpf), 8) == 5
+      # 5 insns, +2 for the x32 guard on x86_64.
+      expected = if f.arch == :x86_64, do: 7, else: 5
+      assert div(byte_size(f.bpf), 8) == expected
     end
   end
 
@@ -789,10 +793,16 @@ defmodule Linx.SeccompTest do
 
   alias Linx.Seccomp.Compiler
 
+  # The x86_64 prologue carries a 2-insn x32-ABI guard after `ld nr`:
+  #   jge 0x40000000, jt=0, jf=1   (x32 bit set, or negative nr)
+  #   ret KILL_PROCESS
+  @x32_guard <<0x35, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x40>> <>
+               <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>>
+
   describe "Linx.Seccomp.Compiler — empty rules / x86_64" do
-    test "empty allow filter is 5 instructions / 40 bytes" do
+    test "empty allow filter is 7 instructions / 56 bytes" do
       {:ok, bpf} = Compiler.compile([], :allow, :x86_64)
-      assert byte_size(bpf) == 40
+      assert byte_size(bpf) == 56
     end
 
     test "empty allow filter has the canonical bytes" do
@@ -803,12 +813,15 @@ defmodule Linx.SeccompTest do
       # jeq AUDIT_ARCH_X86_64=0xC000003E, jt=1, jf=0
       # ret KILL_PROCESS = 0x80000000 (arch mismatch fall-through)
       # ld [0] (load syscall nr into A)
+      # jge __X32_SYSCALL_BIT=0x40000000, jt=0, jf=1 (x32/negative nr guard)
+      # ret KILL_PROCESS (x32 fall-through)
       # ret ALLOW = 0x7FFF0000 (default)
       expected =
         <<0x20, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00>> <>
           <<0x15, 0x00, 0x01, 0x00, 0x3E, 0x00, 0x00, 0xC0>> <>
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
           <<0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
+          @x32_guard <>
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x7F>>
 
       assert bpf == expected
@@ -817,15 +830,35 @@ defmodule Linx.SeccompTest do
     test "empty deny filter (default kill_process) ends with ret KILL_PROCESS" do
       {:ok, bpf} = Compiler.compile([], :kill_process, :x86_64)
       # Last 8 bytes = the default RET instruction.
-      <<_::32-bytes, last::binary>> = bpf
+      <<_::48-bytes, last::binary>> = bpf
       assert last == <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>>
     end
   end
 
+  describe "Linx.Seccomp.Compiler — x32-ABI guard (C2)" do
+    test "every x86_64 filter carries the x32 trap right after ld nr" do
+      # A deny-list with default :allow is the fail-open case the guard
+      # exists for: without it, `ptrace` entered via the x32 ABI
+      # (0x40000000 | 101) matches no JEQ and falls through to ALLOW.
+      {:ok, bpf} =
+        Compiler.compile([{{:errno, :eperm}, :ptrace}], :allow, :x86_64)
+
+      <<_prologue::32-bytes, guard::16-bytes, _rest::binary>> = bpf
+      assert guard == @x32_guard
+    end
+
+    test "aarch64 filters carry no x32 guard (no x32 ABI there)" do
+      {:ok, bpf} = Compiler.compile([], :allow, :aarch64)
+      refute :binary.match(bpf, @x32_guard) != :nomatch
+      # 5 insns: arch prologue (3) + ld nr (1) + default RET (1).
+      assert div(byte_size(bpf), 8) == 5
+    end
+  end
+
   describe "Linx.Seccomp.Compiler — single rule / x86_64" do
-    test "[{:allow, :read}] + default :kill_process is 7 insns" do
+    test "[{:allow, :read}] + default :kill_process is 9 insns" do
       {:ok, bpf} = Compiler.compile([{:allow, :read}], :kill_process, :x86_64)
-      assert div(byte_size(bpf), 8) == 7
+      assert div(byte_size(bpf), 8) == 9
     end
 
     test "has the canonical byte layout" do
@@ -835,6 +868,8 @@ defmodule Linx.SeccompTest do
       # jeq AUDIT_ARCH_X86_64, jt=1, jf=0
       # ret KILL_PROCESS (arch mismatch)
       # ld [0]
+      # jge 0x40000000, jt=0, jf=1 (x32 guard)
+      # ret KILL_PROCESS (x32)
       # jeq __NR_read=0, jt=1 (skip default RET, land on ALLOW), jf=0
       # ret KILL_PROCESS (default)
       # ret ALLOW (per-rule)
@@ -843,6 +878,7 @@ defmodule Linx.SeccompTest do
           <<0x15, 0x00, 0x01, 0x00, 0x3E, 0x00, 0x00, 0xC0>> <>
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
           <<0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
+          @x32_guard <>
           <<0x15, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00>> <>
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80>> <>
           <<0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x7F>>
@@ -852,17 +888,18 @@ defmodule Linx.SeccompTest do
   end
 
   describe "Linx.Seccomp.Compiler — multi-rule shared actions" do
-    test "two :allow rules share one ret ALLOW (8 insns, not 9)" do
+    test "two :allow rules share one ret ALLOW (10 insns, not 11)" do
       # rules with the same action share one terminal RET, so:
-      # 3 (prologue) + 1 (ld nr) + 2 (JEQs) + 1 (default RET) + 1 (allow RET) = 8
+      # 3 (prologue) + 1 (ld nr) + 2 (x32 guard) + 2 (JEQs) + 1 (default RET)
+      # + 1 (allow RET) = 10
       {:ok, bpf} =
         Compiler.compile([{:allow, :read}, {:allow, :write}], :kill_process, :x86_64)
 
-      assert div(byte_size(bpf), 8) == 8
+      assert div(byte_size(bpf), 8) == 10
     end
 
     test "two rules with distinct actions get distinct terminal RETs" do
-      # 3 + 1 + 2 + 1 + 2 = 9 insns
+      # 3 + 1 + 2 + 2 + 1 + 2 = 11 insns
       {:ok, bpf} =
         Compiler.compile(
           [{:allow, :read}, {{:errno, :eperm}, :ptrace}],
@@ -870,16 +907,16 @@ defmodule Linx.SeccompTest do
           :x86_64
         )
 
-      assert div(byte_size(bpf), 8) == 9
+      assert div(byte_size(bpf), 8) == 11
     end
 
     test "rule with action == default reuses the default RET" do
       # default :kill_process, rule action :kill_process — no extra RET.
-      # 3 + 1 + 1 + 1 = 6 insns
+      # 3 + 1 + 2 + 1 + 1 = 8 insns
       {:ok, bpf} =
         Compiler.compile([{:kill_process, :ptrace}], :kill_process, :x86_64)
 
-      assert div(byte_size(bpf), 8) == 6
+      assert div(byte_size(bpf), 8) == 8
     end
   end
 
@@ -999,8 +1036,11 @@ defmodule Linx.SeccompTest do
   # that does PR_SET_NO_NEW_PRIVS + seccomp(SECCOMP_SET_MODE_FILTER, …)
   # on a fork()ed child, then exits with 0 on acceptance / errno on
   # rejection. The same syscall path Linx will use from
-  # c_src/linx_process.c in S2. Tagged :integration because they
-  # depend on python3 being on PATH and spawn an external process.
+  # c_src/linx_process.c in S2. They need NO privilege (NNP makes
+  # seccomp(2) work unprivileged) — only python3 on PATH — so they run
+  # in the default suite and in CI, where they are the only guard
+  # against a fail-open miscompile (e.g. a missing x32 trap). Skipped,
+  # not excluded, when python3 is absent.
 
   @moduletag_helper Path.join([
                       File.cwd!(),
@@ -1008,7 +1048,9 @@ defmodule Linx.SeccompTest do
                     ])
 
   describe "kernel acceptance (compiled filter installs cleanly)" do
-    @describetag :integration
+    if System.find_executable("python3") == nil do
+      @describetag skip: "python3 not on PATH"
+    end
 
     test "an allow-list with exit_group installs successfully" do
       # exit_group must be allowed so the child can return 0 cleanly
@@ -1074,15 +1116,13 @@ defmodule Linx.SeccompTest do
   # These run a workload under a Linx-built seccomp filter and observe
   # the kernel honouring it. The cap-flow analogue lives in
   # test/linx/capabilities_test.exs's "K2 — actually applying caps on
-  # a real workload" describe. Tagged :integration because they touch
-  # PR_SET_NO_NEW_PRIVS + seccomp(2), which without NNP need
-  # CAP_SYS_ADMIN — so sudotest.sh is the intended runner. (NNP is
-  # auto-set by the agent inside child_read_command if not on, so the
-  # tests work whether or not the user passed `no_new_privs: true`.)
+  # a real workload" describe. No privilege needed: the agent auto-sets
+  # PR_SET_NO_NEW_PRIVS inside child_read_command if it isn't on, and
+  # with NNP seccomp(2) works unprivileged — so these run in the
+  # default suite and in CI. Only the caps-composition test below
+  # stays :integration (cap_drop_bounding needs root).
 
   describe "end-to-end: install/2 against a real workload" do
-    @describetag :integration
-
     alias Linx.Process, as: P
 
     test "malformed BPF surfaces as :seccomp_install with EINVAL" do
@@ -1165,6 +1205,8 @@ defmodule Linx.SeccompTest do
       assert_receive {:linx_process, :exited, 0}, 5_000
     end
 
+    # Root-only: cap_drop_bounding needs CAP_SETPCAP.
+    @tag :integration
     test "composition with K2 caps — drop bounding + install, both apply" do
       # Verifies the K2 + S2 stack at the same checkpoint: cap_drop
       # and seccomp_install share the await_proceed dispatch, so a

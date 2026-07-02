@@ -450,7 +450,7 @@ defmodule Linx.Netfilter.Encoder do
   """
   @spec set_elements(Set.t() | NMap.t(), Table.family(), keyword()) :: Message.t() | nil
   def set_elements(set_or_map, family, opts \\ []) when is_atom(family) and is_list(opts) do
-    {table, name, key_type, data_type, _flags, elements, _, _, _, _} =
+    {table, name, key_type, data_type, flags, elements, _, _, _, _} =
       extract_set_fields(set_or_map)
 
     case elements do
@@ -458,7 +458,8 @@ defmodule Linx.Netfilter.Encoder do
         nil
 
       _ ->
-        elements_bin = encode_set_elements(elements, key_type, data_type)
+        elements_bin =
+          encode_set_elements(elements, key_type, data_type, :interval in flags)
 
         attrs = [
           {nfta_set_elem_list_table(), [table, 0]},
@@ -478,31 +479,87 @@ defmodule Linx.Netfilter.Encoder do
     end
   end
 
-  defp encode_set_elements(elements, key_type, data_type) do
+  defp encode_set_elements(elements, key_type, data_type, interval?) do
     elements
-    |> Enum.map(fn elem -> encode_one_set_elem(elem, key_type, data_type) end)
+    |> Enum.flat_map(fn elem -> encode_one_set_elem(elem, key_type, data_type, interval?) end)
     |> Attr.encode()
   end
 
-  defp encode_one_set_elem(elem, key_type, data_type) do
+  # One element term becomes one NFTA_LIST_ELEM entry — or, in an interval
+  # set, two: the kernel's rbtree represents the interval [lo, hi] as a
+  # start element keyed `lo` plus an element keyed `hi+1` flagged
+  # NFT_SET_ELEM_INTERVAL_END (the encoding nft/libnftnl use for plain,
+  # non-concatenated interval sets — it works on every kernel, unlike the
+  # newer NFTA_SET_ELEM_KEY_END, which needs >= 5.6). A *scalar* member of
+  # an interval set is the degenerate interval [v, v+1) and needs its end
+  # marker too — a bare start key would otherwise match everything up to
+  # the next element.
+  defp encode_one_set_elem(elem, key_type, data_type, interval?) do
     {key_term, data_term} =
       case data_type do
         nil -> {elem, nil}
         _ -> elem
       end
 
-    key_bin = encode_key_value(key_term, key_type)
+    data_attrs =
+      case data_type do
+        nil -> []
+        _ -> [{nfta_set_elem_data(), encode_set_elem_data(data_term, data_type)}]
+      end
 
+    case {normalize_key(key_term, key_type), interval?} do
+      {{:scalar, key_bin}, false} ->
+        [set_elem_entry(key_bin, data_attrs, false)]
+
+      {{:scalar, key_bin}, true} ->
+        [set_elem_entry(key_bin, data_attrs, false) | interval_end_entries(key_bin)]
+
+      {{:range, lo_bin, hi_bin}, true} ->
+        [set_elem_entry(lo_bin, data_attrs, false) | interval_end_entries(hi_bin)]
+
+      {{:range, _, _}, false} ->
+        raise ArgumentError,
+              "range/CIDR set element #{inspect(key_term)} requires a set with the " <>
+                ":interval flag"
+    end
+  end
+
+  # The end-of-interval marker: key = hi + 1 (the end bound is exclusive on
+  # the wire). When hi is the type's maximum the interval runs to the end of
+  # the keyspace and no marker is needed (incrementing would wrap).
+  defp interval_end_entries(hi_bin) do
+    case increment_key(hi_bin) do
+      :overflow -> []
+      end_bin -> [set_elem_entry(end_bin, [], true)]
+    end
+  end
+
+  defp set_elem_entry(key_bin, data_attrs, interval_end?) do
     # NFTA_SET_ELEM_KEY = nested NFTA_DATA_VALUE
     key_nla = Attr.encode([{nfta_data_value(), key_bin}])
 
     inner_attrs =
       [{nfta_set_elem_key(), key_nla}]
-      |> maybe_add(data_type != nil, fn ->
-        {nfta_set_elem_data(), encode_set_elem_data(data_term, data_type)}
+      |> Kernel.++(data_attrs)
+      |> maybe_add(interval_end?, fn ->
+        {nfta_set_elem_flags(), Wire.u32_be(nft_set_elem_interval_end())}
       end)
 
     {nfta_list_elem(), Attr.encode(inner_attrs)}
+  end
+
+  # Big-endian +1 over the full key width. All range-capable key types
+  # (addresses, ports) are network-order, so this is also memcmp order —
+  # the order the kernel's interval backends compare keys in.
+  defp increment_key(bin) do
+    size = byte_size(bin) * 8
+    <<n::size(size)>> = bin
+
+    if n == (1 <<< size) - 1 do
+      :overflow
+    else
+      <<n + 1::size(size)>>
+    end
   end
 
   defp encode_set_elem_data(%Verdict{} = v, :verdict) do
@@ -515,11 +572,50 @@ defmodule Linx.Netfilter.Encoder do
     Attr.encode([{nfta_data_value(), bin}])
   end
 
+  # Classifies one key term as a scalar or a range and renders the wire
+  # bytes for its bound(s). Range shapes: `{:range, lo, hi}` (the ~NFT
+  # compiler's form), a bare `{lo, hi}` integer pair (accepted by
+  # `Set.Element.check/2` for ports), and textual CIDR ("10.0.0.0/8").
+  defp normalize_key({:range, lo, hi}, type),
+    do: {:range, encode_key_value(lo, type), encode_key_value(hi, type)}
+
+  defp normalize_key({lo, hi}, :inet_service) when is_integer(lo) and is_integer(hi),
+    do: {:range, encode_key_value(lo, :inet_service), encode_key_value(hi, :inet_service)}
+
+  defp normalize_key(value, type) when type in [:ipv4_addr, :ipv6_addr] and is_binary(value) do
+    case String.contains?(value, "/") and Linx.IP.Subnet.parse(value) do
+      {:ok, %Linx.IP.Subnet{} = subnet} ->
+        {:range, subnet_first(subnet), subnet_last(subnet)}
+
+      _ ->
+        {:scalar, encode_key_value(value, type)}
+    end
+  end
+
+  defp normalize_key(value, type), do: {:scalar, encode_key_value(value, type)}
+
+  # First / last address covered by a CIDR prefix, as raw key bytes.
+  defp subnet_first(%Linx.IP.Subnet{address: %Linx.IP{bytes: bytes}, prefix: prefix}) do
+    size = byte_size(bytes) * 8
+    <<n::size(size)>> = bytes
+    mask = ((1 <<< prefix) - 1) <<< (size - prefix)
+    <<n &&& mask::size(size)>>
+  end
+
+  defp subnet_last(%Linx.IP.Subnet{address: %Linx.IP{bytes: bytes}, prefix: prefix}) do
+    size = byte_size(bytes) * 8
+    <<n::size(size)>> = bytes
+    mask = ((1 <<< prefix) - 1) <<< (size - prefix)
+    host = (1 <<< (size - prefix)) - 1
+    <<(n &&& mask) ||| host::size(size)>>
+  end
+
+  # Renders one scalar value as its wire bytes, directed by the set's
+  # declared key/data type. Binaries of exactly the key width pass through
+  # verbatim (the raw escape hatch); other strings are *parsed* — a textual
+  # "1.2.3.4" must become 4 address bytes, never its 7 ASCII bytes.
   defp encode_key_value(value, type) do
     cond do
-      is_binary(value) ->
-        value
-
       type == :ipv4_addr and is_tuple(value) and tuple_size(value) == 4 ->
         {a, b, c, d} = value
         <<a, b, c, d>>
@@ -527,6 +623,9 @@ defmodule Linx.Netfilter.Encoder do
       type == :ipv6_addr and is_tuple(value) and tuple_size(value) == 8 ->
         {a, b, c, d, e, f, g, h} = value
         <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
+
+      type in [:ipv4_addr, :ipv6_addr] and is_binary(value) ->
+        encode_addr_key(value, type)
 
       type == :ether_addr and is_tuple(value) and tuple_size(value) == 6 ->
         {a, b, c, d, e, f} = value
@@ -538,12 +637,49 @@ defmodule Linx.Netfilter.Encoder do
       type == :inet_proto and is_integer(value) ->
         <<value>>
 
+      # Marks (and the other fwmark-like u32s) live in host byte order in
+      # the kernel: the lookup register is a raw native u32, so the key
+      # bytes must be native too — big-endian keys would only match on
+      # big-endian hosts.
       type == :mark and is_integer(value) ->
-        <<value::big-32>>
+        <<value::native-32>>
+
+      # The declared key length for :ifname is IFNAMSIZ (16); the kernel
+      # compares the full width, so pad with NULs like nft does.
+      type == :ifname and is_binary(value) and byte_size(value) < 16 ->
+        value <> :binary.copy(<<0>>, 16 - byte_size(value))
+
+      is_binary(value) ->
+        value
 
       true ->
         raise ArgumentError,
               "cannot encode set element #{inspect(value)} for type #{inspect(type)}"
+    end
+  end
+
+  # A binary key for an address type is either raw key bytes (exact width)
+  # or a textual address. Parse first: no valid textual IPv4 is 4 bytes
+  # long, and a 16-byte raw IPv6 key that also parses as a textual address
+  # is practically impossible (use the tuple form to be explicit).
+  defp encode_addr_key(value, type) do
+    width = if type == :ipv4_addr, do: 4, else: 16
+
+    case Linx.IP.parse(value) do
+      {:ok, %Linx.IP{bytes: bytes}} when byte_size(bytes) == width ->
+        bytes
+
+      {:ok, %Linx.IP{}} ->
+        raise ArgumentError,
+              "address #{inspect(value)} does not match set key type #{inspect(type)}"
+
+      {:error, _} when byte_size(value) == width ->
+        value
+
+      {:error, _} ->
+        raise ArgumentError,
+              "cannot encode set element #{inspect(value)} for type #{inspect(type)}: " <>
+                "not a parseable address and not #{width} raw bytes"
     end
   end
 
@@ -603,6 +739,10 @@ defmodule Linx.Netfilter.Encoder do
   @doc """
   Builds a `DELSETELEM` message that removes the given elements
   from a set by raw element values.
+
+  `interval?` must mirror the parent set's `:interval` flag so ranges (and
+  scalar members of interval sets) delete the same start/end element pair
+  they were added as.
   """
   @spec delete_set_elements(
           Table.family(),
@@ -610,12 +750,21 @@ defmodule Linx.Netfilter.Encoder do
           String.t(),
           [term()],
           atom(),
-          atom() | nil
+          atom() | nil,
+          boolean()
         ) :: Message.t()
-  def delete_set_elements(family, table_name, set_name, elements, key_type, data_type)
+  def delete_set_elements(
+        family,
+        table_name,
+        set_name,
+        elements,
+        key_type,
+        data_type,
+        interval? \\ false
+      )
       when is_atom(family) and is_binary(table_name) and is_binary(set_name) and
              is_list(elements) and is_atom(key_type) do
-    elements_bin = encode_set_elements(elements, key_type, data_type)
+    elements_bin = encode_set_elements(elements, key_type, data_type, interval?)
 
     attrs = [
       {nfta_set_elem_list_table(), [table_name, 0]},
@@ -814,30 +963,58 @@ defmodule Linx.Netfilter.Encoder do
     [delete_set(family, table_name, set_name)]
   end
 
+  # Element ops carry the parent set's declared types (and interval flag)
+  # in their sixth position — the diff layer has the set struct in hand and
+  # threads them through, so the encoder never has to guess.
+  defp op_to_messages(
+         {:add_set_elements, family, table_name, set_name, elements,
+          {key_type, data_type, interval?}}
+       ) do
+    [
+      set_elements_message(
+        family,
+        table_name,
+        set_name,
+        elements,
+        key_type,
+        data_type,
+        interval?
+      )
+    ]
+  end
+
+  defp op_to_messages(
+         {:delete_set_elements, family, table_name, set_name, elements,
+          {key_type, data_type, interval?}}
+       ) do
+    [
+      delete_set_elements(
+        family,
+        table_name,
+        set_name,
+        elements,
+        key_type,
+        data_type,
+        interval?
+      )
+    ]
+  end
+
+  # Legacy 5-tuple element ops (hand-built patches). Without declared
+  # types the encoder must infer from value shape — ambiguous for
+  # integers (a low port such as 22 is indistinguishable from a protocol
+  # number), so prefer the 6-tuple form above.
   defp op_to_messages({:add_set_elements, family, table_name, set_name, elements}) do
-    # We need the key/data type to encode elements correctly. The
-    # diff layer carries them implicitly via the set struct, but
-    # the patch op only has raw element terms. Take the per-batch
-    # convention: peek at the first element's shape — but that
-    # doesn't work for, e.g., a port-int that could be inet_service
-    # or just an integer.
-    #
-    # Solution: the diff emits :add_set_elements with the parent
-    # set's reference. We need to enrich the op shape: attach
-    # `(key_type, data_type)` via a helper that
-    # peeks at the original set in the patch. As a workaround,
-    # assume :inet_service for integer keys, :ipv4_addr for 4-tuples,
-    # etc.
     {key_type, data_type} = infer_types(elements)
 
     [
-      set_elements_message(family, table_name, set_name, elements, key_type, data_type)
+      set_elements_message(family, table_name, set_name, elements, key_type, data_type, false)
     ]
   end
 
   defp op_to_messages({:delete_set_elements, family, table_name, set_name, elements}) do
     {key_type, data_type} = infer_types(elements)
-    [delete_set_elements(family, table_name, set_name, elements, key_type, data_type)]
+    [delete_set_elements(family, table_name, set_name, elements, key_type, data_type, false)]
   end
 
   defp op_to_messages({:create_rule, family, table_name, chain_name, %Rule{} = r, position}) do
@@ -852,8 +1029,16 @@ defmodule Linx.Netfilter.Encoder do
     [delete_rule(family, table_name, chain_name, handle)]
   end
 
-  defp set_elements_message(family, table_name, set_name, elements, key_type, data_type) do
-    elements_bin = encode_set_elements(elements, key_type, data_type)
+  defp set_elements_message(
+         family,
+         table_name,
+         set_name,
+         elements,
+         key_type,
+         data_type,
+         interval?
+       ) do
+    elements_bin = encode_set_elements(elements, key_type, data_type, interval?)
 
     attrs = [
       {nfta_set_elem_list_table(), [table_name, 0]},
@@ -1145,6 +1330,15 @@ defmodule Linx.Netfilter.Encoder do
 
   defp encode_data_verdict(%Verdict{kind: kind, target: target}) do
     code_int = Wire.verdict_code(kind)
+
+    # NF_QUEUE carries its queue number in the high 16 bits of the
+    # verdict code (the kernel's NF_QUEUE_NR(n) = (n << 16) | NF_QUEUE);
+    # a bare NF_QUEUE silently queues to 0.
+    code_int =
+      case {kind, target} do
+        {:queue, num} when is_integer(num) -> num <<< 16 ||| code_int
+        _ -> code_int
+      end
 
     inner =
       [{nfta_verdict_code(), Wire.s32_be(code_int)}]

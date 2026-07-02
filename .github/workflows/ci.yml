@@ -14,8 +14,8 @@ permissions:
 
 jobs:
   test:
-    name: test (elixir ${{ matrix.elixir }} / otp ${{ matrix.otp }})
-    runs-on: ubuntu-24.04
+    name: test (elixir ${{ matrix.elixir }} / otp ${{ matrix.otp }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -24,12 +24,20 @@ jobs:
           # ~> 1.18 / OTP 28: Linx.Tty drives the OTP-28 prim_tty internals).
           - elixir: "1.18"
             otp: "28"
+            os: ubuntu-24.04
           # Latest — mirrors the pinned dev toolchain (.tool-versions).
           # Formatter output is version-sensitive, so the format check
           # runs only on this cell.
           - elixir: "1.19"
             otp: "28"
+            os: ubuntu-24.04
             lint: true
+          # aarch64 — the aarch64 seccomp syscall table (and every other
+          # arch-sensitive path) is otherwise never exercised on real
+          # hardware. GitHub's arm runners are free for public repos.
+          - elixir: "1.19"
+            otp: "28"
+            os: ubuntu-24.04-arm
     env:
       MIX_ENV: test
     steps:
@@ -47,9 +55,9 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-${{ hashFiles('mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-
+            ${{ runner.os }}-${{ runner.arch }}-otp${{ matrix.otp }}-elixir${{ matrix.elixir }}-
 
       - name: Install dependencies
         run: mix deps.get
@@ -63,6 +71,49 @@ jobs:
 
       # The :integration tests (root / privileged kernel access) are
       # excluded by default in test_helper.exs, so this runs the
-      # non-privileged suite. A privileged job is a planned follow-up.
+      # non-privileged suite. The privileged job below covers the rest.
       - name: Run tests
         run: mix test --warnings-as-errors
+
+  # The kernel-mutating paths (rtnl writes, nf_tables commits, mount /
+  # user-ns / capabilities apply, Linx.Reconcile) only execute under
+  # root — without this job a release can ship green with a regressed
+  # encoder. GitHub's runners grant passwordless sudo; deps compile as
+  # the runner user first so root only executes, mirroring sudotest.sh.
+  privileged:
+    name: test (privileged, elixir 1.19 / otp 28)
+    runs-on: ubuntu-24.04
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-otp28-elixir1.19-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-otp28-elixir1.19-
+
+      - name: Install dependencies
+        run: |
+          mix local.hex --force
+          mix deps.get
+
+      - name: Compile
+        run: mix compile
+
+      # HOME is preserved so root finds the runner's ~/.mix (the Hex
+      # archive provides the SCM for hex deps — without it even `mix
+      # test` on already-fetched deps fails to load the project).
+      - name: Run full suite as root (includes :integration)
+        run: sudo --preserve-env=PATH,HOME,MIX_ENV,MIX_HOME env "PATH=$PATH" "$(which mix)" test --include integration

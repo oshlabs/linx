@@ -345,7 +345,7 @@ defmodule Linx.NFT.Parser do
   defp parse_priority_alias(name, meta, tokens) do
     case tokens do
       [{:dash, _}, {:integer, n, _} | rest] -> {{:alias, name, -n, meta}, rest}
-      [{:identifier, "+", _}, {:integer, n, _} | rest] -> {{:alias, name, n, meta}, rest}
+      [{:plus, _}, {:integer, n, _} | rest] -> {{:alias, name, n, meta}, rest}
       _ -> {{:alias, name, 0, meta}, tokens}
     end
   end
@@ -1302,6 +1302,7 @@ defmodule Linx.NFT.Parser do
   defp render_kind(:colon), do: ":"
   defp render_kind(:assign), do: "="
   defp render_kind(:dash), do: "-"
+  defp render_kind(:plus), do: "+"
   defp render_kind(:slash), do: "/"
   defp render_kind(:star), do: "*"
   defp render_kind(:at), do: "@"

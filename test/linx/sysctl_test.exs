@@ -38,14 +38,17 @@ defmodule Linx.SysctlTest do
     end
 
     test "rejects path-traversal attempts via `..` segment" do
-      # The regex requires segments to be [A-Za-z0-9_-]+; `..` is
-      # rejected because the segment is empty.
-      assert {:error, {:bad_key, "net.ipv4.../etc/passwd"}} =
-               Sysctl.read("net.ipv4.../etc/passwd")
-    end
+      # Dot form: `..` produces an empty segment → rejected. Slash
+      # form: a `..` segment is all-dots → rejected. Traversal needs a
+      # standalone `..` path segment, so both forms are closed.
+      assert {:error, {:bad_key, _}} = Sysctl.read("net..ipv4.ip_forward")
+      assert {:error, {:bad_key, _}} = Sysctl.read("net/../../etc/passwd")
 
-    test "rejects keys containing slashes" do
-      assert {:error, {:bad_key, "net/ipv4/ip_forward"}} = Sysctl.read("net/ipv4/ip_forward")
+      # Odd but harmless: slash form with a dotted segment that is NOT
+      # `..` is a literal (nonexistent) filename under /proc/sys — it
+      # cannot traverse, so it surfaces as a read error, not an escape.
+      assert {:error, %Linx.Sysctl.Error{operation: :read, errno: :enoent}} =
+               Sysctl.read("net.ipv4.../etc/passwd")
     end
 
     test "rejects keys with spaces" do
@@ -70,6 +73,39 @@ defmodule Linx.SysctlTest do
       assert {:error, {:bad_key, ""}} = Sysctl.read_int("")
       assert {:error, {:bad_key, ""}} = Sysctl.read_ints("")
       assert {:error, {:bad_key, ""}} = Sysctl.write("", 1)
+    end
+  end
+
+  describe "slash-form keys (M14 — dotted interface names)" do
+    # sysctl(8) convention: a key containing `/` is slash form, where
+    # dots are literal. The only way to address a VLAN sub-interface
+    # like `eth0.100` — the dot form would mistranslate
+    # `net.ipv4.conf.eth0.100.forwarding` to .../eth0/100/forwarding.
+
+    test "accepts a slash-form key (equivalent to the dot form)" do
+      # Same knob both ways; both must pass validation and read the
+      # same value.
+      assert {:ok, dot} = Sysctl.read("net.ipv4.ip_forward")
+      assert {:ok, slash} = Sysctl.read("net/ipv4/ip_forward")
+      assert dot == slash
+    end
+
+    test "dots inside slash-form segments are literal" do
+      # `lo.999` almost certainly doesn't exist — the point is that
+      # validation passes and the error is :read (ENOENT), proving the
+      # dots were not turned into path separators.
+      result = Sysctl.read("net/ipv4/conf/lo.999/forwarding")
+      refute match?({:error, {:bad_key, _}}, result)
+      assert {:error, %Linx.Sysctl.Error{operation: :read}} = result
+    end
+
+    test "rejects traversal and empty segments in slash form" do
+      assert {:error, {:bad_key, _}} = Sysctl.read("net/../etc/passwd")
+      assert {:error, {:bad_key, _}} = Sysctl.read("net//ipv4")
+      assert {:error, {:bad_key, _}} = Sysctl.read("/net/ipv4/ip_forward")
+      assert {:error, {:bad_key, _}} = Sysctl.read("net/ipv4/")
+      assert {:error, {:bad_key, _}} = Sysctl.read("net/./ipv4")
+      assert {:error, {:bad_key, _}} = Sysctl.read("net/.../ipv4")
     end
   end
 

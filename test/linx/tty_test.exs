@@ -102,6 +102,21 @@ defmodule Linx.TtyTest do
       assert {:error, :no_process} = Tty.attach(:controlling, session)
     end
 
+    test "refuses a checkpoint-stage session with {:not_running, stage} (M10)" do
+      # At :ready the agent rejects PTY input as a protocol error — the
+      # first keystroke would kill the parked workload — and an abort/1
+      # racing the attach would strand the pump. Refuse at the door.
+      {:ok, session} = Linx.Process.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      assert {:error, {:not_running, :ready}} = Tty.attach(:group_leader, session)
+      assert {:error, {:not_running, :ready}} = Tty.attach(:controlling, session)
+
+      # The refusal must leave the session untouched.
+      :ok = Linx.Process.abort(session)
+      assert_receive {:linx_process, :aborted}, 2_000
+    end
+
     test "refuses with :no_process when the session pid is gone" do
       # A non-Linx-Process pid that exits immediately. info/1 catches
       # the GenServer.call exit and returns :no_process.
@@ -371,28 +386,49 @@ defmodule Linx.TtyTest do
       :ok = Linx.Process.proceed(session)
       assert_receive {:linx_process, :running}, 2_000
 
-      gl = fake_gl(self())
+      test_pid = self()
+
+      # Watcher: receives the fake gl's write events and terminates the
+      # workload the moment the full echo has been observed — a readiness
+      # signal instead of a wall-clock sleep, so a loaded host can't miss
+      # the window. The 10s `after` is a can't-hang backstop, not a
+      # timing assumption. Cat's echo may fragment across writes, hence
+      # the accumulation.
+      watcher =
+        spawn_link(fn ->
+          collect = fn collect, acc ->
+            receive do
+              {:fake_gl_wrote, bytes} ->
+                acc = acc <> bytes
+
+                if acc =~ "hello" do
+                  :ok = Linx.Process.signal(session, 15)
+                  send(test_pid, {:echoed, acc})
+                else
+                  collect.(collect, acc)
+                end
+
+              _other ->
+                collect.(collect, acc)
+            after
+              10_000 -> send(test_pid, {:echo_timeout, acc})
+            end
+          end
+
+          collect.(collect, "")
+        end)
+
+      gl = fake_gl(watcher)
       reader = spawn_link(fn -> Process.sleep(:infinity) end)
 
       # Pre-seed the pump's mailbox with input bytes; the pump forwards
       # them to cat, which echoes back as :pty_out, which the pump
-      # writes to the fake gl.
+      # writes to the fake gl (and thus the watcher).
       send(self(), {:linx_tty_gl, :data, "hello\n"})
 
-      # Helper to terminate the pump after cat has had time to echo.
-      # 1s is comfortably longer than the actual round-trip on any
-      # plausible test host but keeps the test snappy.
-      spawn_link(fn ->
-        Process.sleep(1_000)
-        :ok = Linx.Process.signal(session, 15)
-      end)
-
       assert {:ok, {:signaled, 15}} = Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil)
-
-      # Cat's echo gets fragmented across multiple writes; collect
-      # them all and assert "hello" appears in the concatenation
-      # rather than in any single write.
-      assert collect_fake_writes() =~ "hello"
+      assert_receive {:echoed, echoed}, 1_000
+      assert echoed =~ "hello"
     end
 
     test "returns {:ok, {:exited, code}} on natural session exit" do
@@ -470,10 +506,12 @@ defmodule Linx.TtyTest do
       send(self(), {:EXIT, gl, :interrupt})
 
       # Backup terminator in case the PTY line discipline doesn't
-      # actually deliver SIGINT (defensive; should never fire).
+      # actually deliver SIGINT (defensive; should never fire). Generous
+      # so a loaded CI host can't beat a slow-but-working SIGINT chain
+      # to it and flip the result to {:signaled, 15}.
       spawn_link(fn ->
-        Process.sleep(1_000)
-        :ok = Linx.Process.signal(session, 15)
+        Process.sleep(10_000)
+        _ = Linx.Process.signal(session, 15)
       end)
 
       assert {:ok, {:signaled, 2}} = Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil)
@@ -504,24 +542,42 @@ defmodule Linx.TtyTest do
       :ok = Linx.Process.proceed(session)
       assert_receive {:linx_process, :running}, 2_000
 
-      gl = fake_gl(self(), geometry: %{columns: 132, rows: 42})
+      test_pid = self()
+
+      # Watcher: terminate the pump only after it has actually polled
+      # the geometry (both axes) — a readiness signal instead of a
+      # fixed sleep that a loaded host could miss.
+      watcher =
+        spawn_link(fn ->
+          wait = fn wait, seen ->
+            receive do
+              {:fake_gl_geometry, what} ->
+                seen = MapSet.put(seen, what)
+
+                if MapSet.member?(seen, :columns) and MapSet.member?(seen, :rows) do
+                  :ok = Linx.Process.signal(session, 15)
+                  send(test_pid, :geometry_polled)
+                else
+                  wait.(wait, seen)
+                end
+
+              _other ->
+                wait.(wait, seen)
+            after
+              10_000 -> send(test_pid, :geometry_poll_timeout)
+            end
+          end
+
+          wait.(wait, MapSet.new())
+        end)
+
+      gl = fake_gl(watcher, geometry: %{columns: 132, rows: 42})
       reader = spawn_link(fn -> Process.sleep(:infinity) end)
 
-      # Terminate the pump quickly so the test doesn't drag.
-      spawn_link(fn ->
-        Process.sleep(300)
-        :ok = Linx.Process.signal(session, 15)
-      end)
-
-      # poll_ms = 50 → multiple polls before the signal arrives.
-      # last_ws starts nil → first poll forwards; subsequent polls are
-      # no-ops because geometry doesn't change.
+      # poll_ms = 50 → the first poll forwards (last_ws starts nil);
+      # the watcher then ends the pump.
       assert {:ok, {:signaled, 15}} = Linx.Tty.__pump_gl__(reader, gl, session, 50, nil)
-
-      # The fake gl logs each geometry query; we expect at least 2
-      # (columns + rows) on the first poll.
-      assert_received {:fake_gl_geometry, :columns}
-      assert_received {:fake_gl_geometry, :rows}
+      assert_receive :geometry_polled, 1_000
     end
 
     test "the detach sequence returns {:ok, :detached} and leaves the workload running" do

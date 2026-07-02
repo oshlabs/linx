@@ -347,6 +347,10 @@ defmodule Linx.NFT.Tokenizer do
       <<"-", rest::binary>> ->
         emit_punct(state, :dash, rest, 1)
 
+      # `+` appears only in priority offsets (`priority filter + 10`).
+      <<"+", rest::binary>> ->
+        emit_punct(state, :plus, rest, 1)
+
       <<"/", rest::binary>> ->
         emit_punct(state, :slash, rest, 1)
 

@@ -78,8 +78,14 @@ defmodule Linx.Netlink.Nfnl do
   surface here too, attributed to the inner message that triggered
   them.
 
-  Each call allocates fresh sequence numbers from the socket's
-  counter, so concurrent users of the same socket cannot collide.
+  Each call allocates fresh sequence numbers from the socket's counter,
+  so a stale or unrelated reply is never *misattributed* to this batch.
+  That does not make one socket safe for **concurrent** callers: each
+  reply datagram is delivered to exactly one `recv`-er, so caller A can
+  consume (and discard as unsolicited) the ACK caller B is blocked on,
+  leaving B waiting forever. Drive a given `%Socket{}` from one process
+  at a time — open one socket per concurrent user, or serialise access
+  through an owning process.
   """
   @spec batch(Socket.t(), [Message.t()], atom() | 0..255, keyword()) ::
           :ok | {:error, {non_neg_integer(), Error.t()} | term()}
@@ -145,7 +151,9 @@ defmodule Linx.Netlink.Nfnl do
   defp collect_batch_responses(_socket, pending) when pending == %{}, do: :ok
 
   defp collect_batch_responses(socket, pending) do
-    case :socket.recv(socket.socket) do
+    # Explicit 64 KiB read — :socket.recv/1's 8 KiB default would silently
+    # truncate a large response datagram (see Socket.recv_datagram/1).
+    case Socket.recv_datagram(socket) do
       {:ok, data} ->
         process_responses(Message.decode(data), socket, pending)
 

@@ -6,8 +6,14 @@ defmodule Linx.Netfilter.TableTest do
 
   describe "new/3" do
     test "builds a table with the given family + name" do
-      assert {:ok, %Table{family: :inet, name: "myapp", flags: [], chains: %{}}} =
+      # flags defaults to [:owner] (M13): the documented "sockets own
+      # their tables" guarantee applies to the Ruleset/push path too.
+      assert {:ok, %Table{family: :inet, name: "myapp", flags: [:owner], chains: %{}}} =
                Table.new(:inet, "myapp")
+    end
+
+    test "flags: [] opts out of the :owner default" do
+      assert {:ok, %Table{flags: []}} = Table.new(:inet, "myapp", flags: [])
     end
 
     test "accepts all valid families" do

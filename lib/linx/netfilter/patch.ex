@@ -21,8 +21,13 @@ defmodule Linx.Netfilter.Patch do
     * `{:create_set, family, %Set{} | %Map{}}` — covers maps and
       vmaps too (dispatch on struct).
     * `{:delete_set, family, table_name, set_name}`.
-    * `{:add_set_elements, family, table_name, set_name, [elem]}`.
-    * `{:delete_set_elements, family, table_name, set_name, [elem]}`.
+    * `{:add_set_elements, family, table_name, set_name, [elem], types}` —
+      `types` is `{key_type, data_type | nil, interval? :: boolean}`, the
+      parent set's declared types, so the encoder never guesses them from
+      element shape. The legacy 5-tuple (no `types`) is still accepted and
+      falls back to shape-based inference — ambiguous for integer keys.
+    * `{:delete_set_elements, family, table_name, set_name, [elem], types}`
+      — same shape and same legacy fallback.
     * `{:create_rule, family, table_name, chain_name, %Rule{}, position}`
       — `position` is `:append` | `{:after, handle}` |
       `{:before, handle}` | `{:at_index, n}`.
@@ -67,6 +72,9 @@ defmodule Linx.Netfilter.Patch do
           | {:before, pos_integer()}
           | {:at_index, non_neg_integer()}
 
+  @typedoc "The parent set's declared `{key_type, data_type, interval?}`."
+  @type elem_types :: {atom(), atom() | nil, boolean()}
+
   @type op ::
           {:create_table, atom(), Linx.Netfilter.Table.t()}
           | {:delete_table, atom(), String.t()}
@@ -74,6 +82,8 @@ defmodule Linx.Netfilter.Patch do
           | {:delete_chain, atom(), String.t(), String.t()}
           | {:create_set, atom(), Linx.Netfilter.Set.t() | Linx.Netfilter.Map.t()}
           | {:delete_set, atom(), String.t(), String.t()}
+          | {:add_set_elements, atom(), String.t(), String.t(), [term()], elem_types()}
+          | {:delete_set_elements, atom(), String.t(), String.t(), [term()], elem_types()}
           | {:add_set_elements, atom(), String.t(), String.t(), [term()]}
           | {:delete_set_elements, atom(), String.t(), String.t(), [term()]}
           | {:create_rule, atom(), String.t(), String.t(), Linx.Netfilter.Rule.t(), position()}
@@ -106,6 +116,7 @@ defmodule Linx.Netfilter.Patch do
   # preserve their input order (Enum.sort_by is stable).
   defp op_order_key({:delete_rule, _, _, _, _}), do: 1
   defp op_order_key({:delete_set_elements, _, _, _, _}), do: 2
+  defp op_order_key({:delete_set_elements, _, _, _, _, _}), do: 2
   defp op_order_key({:delete_chain, _, _, _}), do: 3
   defp op_order_key({:delete_set, _, _, _}), do: 4
   defp op_order_key({:delete_table, _, _}), do: 5
@@ -113,6 +124,7 @@ defmodule Linx.Netfilter.Patch do
   defp op_order_key({:create_set, _, _}), do: 7
   defp op_order_key({:create_chain, _, _, _}), do: 8
   defp op_order_key({:add_set_elements, _, _, _, _}), do: 9
+  defp op_order_key({:add_set_elements, _, _, _, _, _}), do: 9
   defp op_order_key({:replace_rule, _, _, _, _, _}), do: 10
   defp op_order_key({:create_rule, _, _, _, _, _}), do: 11
 
@@ -132,6 +144,8 @@ defmodule Linx.Netfilter.Patch do
             {:delete_rule, _, _, _, _} -> %{acc | deletes: acc.deletes + 1}
             {:add_set_elements, _, _, _, _} -> %{acc | elems: acc.elems + 1}
             {:delete_set_elements, _, _, _, _} -> %{acc | elems: acc.elems + 1}
+            {:add_set_elements, _, _, _, _, _} -> %{acc | elems: acc.elems + 1}
+            {:delete_set_elements, _, _, _, _, _} -> %{acc | elems: acc.elems + 1}
           end
         end)
 

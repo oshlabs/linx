@@ -20,6 +20,24 @@ defmodule Linx.IPTest do
     test "rejects malformed input" do
       assert {:error, {:bad_address, "not an ip"}} = IP.parse("not an ip")
     end
+
+    test "rejects classful IPv4 shorthand (m3 — strict parsing)" do
+      # :inet.parse_address/1 would accept these as 10.0.0.0 / 10.0.0.1 —
+      # a typo'd address must error, not install a valid-but-wrong one.
+      assert {:error, {:bad_address, "10.0.0"}} = IP.parse("10.0.0")
+      assert {:error, {:bad_address, "10.1"}} = IP.parse("10.1")
+      assert {:error, {:bad_address, "10"}} = IP.parse("10")
+    end
+  end
+
+  describe "decode/1" do
+    test "returns nil for short/odd byte widths (m4)" do
+      # A zero-length or truncated attribute in a kernel dump must not
+      # crash the decoder.
+      assert IP.decode(<<>>) == nil
+      assert IP.decode(<<1, 2>>) == nil
+      assert %IP{family: :inet} = IP.decode(<<1, 2, 3, 4>>)
+    end
   end
 
   describe "to_string/1" do

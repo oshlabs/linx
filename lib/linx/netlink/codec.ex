@@ -187,9 +187,16 @@ defmodule Linx.Netlink.Codec do
 
   defp decode_header([], rest, acc), do: {Enum.reverse(acc), rest}
 
-  defp decode_header([{:pad, n} | rest], bin, acc) do
+  defp decode_header([{:pad, n} | rest], bin, acc) when byte_size(bin) >= n do
     <<_::binary-size(n), tail::binary>> = bin
     decode_header(rest, tail, acc)
+  end
+
+  # Truncated body: consume what's left and let the remaining fields
+  # decode to nil (see the unscalar/2 fallback) instead of MatchError-ing
+  # the caller.
+  defp decode_header([{:pad, _n} | rest], _short, acc) do
+    decode_header(rest, <<>>, acc)
   end
 
   defp decode_header([{:field, name, type} | rest], bin, acc) do
@@ -255,6 +262,11 @@ defmodule Linx.Netlink.Codec do
   defp unscalar(:s8, <<v::native-signed-8, r::binary>>), do: {v, r}
   defp unscalar(:s16, <<v::native-signed-16, r::binary>>), do: {v, r}
   defp unscalar(:s32, <<v::native-signed-32, r::binary>>), do: {v, r}
+  # A zero-length or short attribute (malformed kernel message, or a
+  # truncated buffer) decodes to nil instead of a FunctionClauseError —
+  # a crash here takes down whatever holds the decoder, e.g. a monitor
+  # GenServer, over one bad attribute. Mirrors Linx.MAC.decode/1.
+  defp unscalar(_type, short), do: {nil, short}
 
   defp encode_value(type, v) when type in @scalars, do: scalar(type, v)
   # netlink string attributes are NUL-terminated.

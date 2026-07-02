@@ -112,6 +112,20 @@ defmodule Linx.NFT.CompilerTest do
       assert chain.priority == -10
     end
 
+    test "named priority alias with + offset (m8)" do
+      # `+` needed its own tokenizer rule — the parser accepted the shape
+      # but every `+` used to die in the tokenizer as an unexpected char.
+      rs =
+        compile!("""
+        table inet t {
+          chain input { type filter hook input priority filter + 10 }
+        }
+        """)
+
+      chain = rs |> fetch_table!(:inet, "t") |> fetch_chain!("input")
+      assert chain.priority == 10
+    end
+
     test "unknown priority alias is an error" do
       err =
         compile_err("""
@@ -260,6 +274,71 @@ defmodule Linx.NFT.CompilerTest do
 
       assert byte_size(ifname) == 16
       assert :binary.part(ifname, 0, 4) == "eth0"
+    end
+
+    test "meta mark compares host-byte-order bytes (M2)" do
+      # The kernel stores the mark host-order and memcmps the native
+      # register against the cmp value — big-endian bytes would never
+      # match on a little-endian machine.
+      rs =
+        compile!("""
+        table inet t {
+          chain c { meta mark 0x1234 accept }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :meta, data: %{key: :mark}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<0x1234::native-32>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+    end
+
+    test "meta protocol stays network order (a __be16 field)" do
+      rs =
+        compile!("""
+        table inet t {
+          chain c { meta protocol 0x0800 accept }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :meta, data: %{key: :protocol}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<0x0800::big-16>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+    end
+
+    test "ct mark compares host-byte-order bytes (M2)" do
+      rs =
+        compile!("""
+        table inet t {
+          chain c { ct mark 7 accept }
+        }
+        """)
+
+      [rule] = (rs |> fetch_table!(:inet, "t") |> fetch_chain!("c")).rules
+
+      assert [
+               %Expr{name: :ct, data: %{key: :mark}},
+               %Expr{name: :cmp, data: %{op: :eq, value: <<7::native-32>>}},
+               %Expr{name: :immediate, data: %Verdict{kind: :accept}}
+             ] = rule.expressions
+    end
+
+    test "a range over a host-order field is refused, not mis-encoded" do
+      err =
+        compile_err("""
+        table inet t {
+          chain c { meta mark 10-20 accept }
+        }
+        """)
+
+      assert err.message =~ "host-byte-order"
     end
 
     test "ct state established accept (single state → bitwise + cmp_neq_0)" do

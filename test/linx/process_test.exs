@@ -460,6 +460,48 @@ defmodule Linx.ProcessTest do
       assert {:ok, {:exited, 0}} = P.wait(session, 2_000)
     end
 
+    test "pty_write/2 refuses with :not_running at the checkpoint (M9)" do
+      {:ok, session} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      # The agent's await_proceed treats {:pty_in, _} as a protocol error
+      # and kills the parked workload — the session must refuse instead.
+      assert {:error, :not_running} = P.pty_write(session, "x")
+
+      # And the refusal must leave the session fully usable.
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+      :ok = P.pty_write(session, "hello\n")
+      assert_pty_out_contains(session, "hello", 2_000)
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 2_000
+    end
+
+    test "pty_write/2 splits large writes below the agent frame ceiling (M7)" do
+      {:ok, session} = P.spawn(argv: ["/bin/cat"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # 64 KiB in 1 KiB lines — twice the agent's 32 KiB frame ceiling and
+      # far past the ~4 KiB tty input queue. Before chunking + the agent's
+      # write buffer this either went out as one oversized frame (agent
+      # declares :command_too_big and SIGKILLs the workload) or lost the
+      # tail on EAGAIN. Lines stay under the 4095-byte canonical-mode
+      # line limit so the tty itself never discards input.
+      line = String.duplicate("a", 1023) <> "\n"
+      :ok = P.pty_write(session, String.duplicate(line, 64))
+
+      refute_receive {:linx_process, :error, _, :command_too_big}, 200
+
+      # The workload is still alive and interactive after the flood.
+      :ok = P.pty_write(session, "marker\n")
+      assert_pty_out_contains(session, "marker", 10_000)
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 5_000
+    end
+
     test "pty_write/2 refuses with :no_process after the workload has terminated" do
       {:ok, session} = P.spawn(argv: ["/bin/true"], stdio: :pty)
       assert_receive {:linx_process, :ready, _}, 2_000

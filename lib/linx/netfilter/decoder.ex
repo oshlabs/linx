@@ -13,6 +13,7 @@ defmodule Linx.Netfilter.Decoder do
   **big-endian**, attribute IDs are namespaced.
   """
 
+  import Bitwise
   import Linx.Netfilter.Wire
 
   alias Linx.Netfilter.{Chain, Event, Expr, Rule, Ruleset, Set, Table, Verdict, Wire}
@@ -184,7 +185,7 @@ defmodule Linx.Netfilter.Decoder do
 
         new_acc =
           case type do
-            @udata_rule_linx_tag -> {String.to_atom(str), comment}
+            @udata_rule_linx_tag -> {decode_tag(str), comment}
             @udata_rule_comment -> {tag, str}
             _ -> {tag, comment}
           end
@@ -194,6 +195,18 @@ defmodule Linx.Netfilter.Decoder do
       _ ->
         {tag, comment}
     end
+  end
+
+  # Rule userdata comes from the kernel, and any writer in the netns
+  # controls it — interning it unconditionally would let a co-tenant
+  # writing many distinct tag TLVs grow the (permanent) atom table until
+  # the VM dies. Only tags whose atom already exists (i.e. ones this
+  # application actually uses) come back as atoms; foreign tags stay
+  # binaries.
+  defp decode_tag(str) do
+    String.to_existing_atom(str)
+  rescue
+    ArgumentError -> str
   end
 
   defp decode_expressions(binary) do
@@ -385,8 +398,26 @@ defmodule Linx.Netfilter.Decoder do
     attrs = Attr.decode(bin)
     code = get_s32_be(attrs, nfta_verdict_code(), 0)
     chain = get_string(attrs, nfta_verdict_chain())
+
+    # NF_QUEUE embeds its queue number in the high 16 bits of the code
+    # (NF_QUEUE_NR); mask it off before the kind lookup and surface it
+    # as the verdict's target so Verdict.queue(n) round-trips.
+    {code, queue_num} =
+      if code >= 0 and (code &&& 0xFF) == Wire.verdict_code(:queue) do
+        {code &&& 0xFF, code >>> 16}
+      else
+        {code, nil}
+      end
+
     kind = Wire.verdict_atom(code)
-    target = if kind in [:jump, :goto], do: chain, else: nil
+
+    target =
+      cond do
+        kind in [:jump, :goto] -> chain
+        kind == :queue -> queue_num
+        true -> nil
+      end
+
     %Verdict{kind: kind, target: target}
   end
 
@@ -540,23 +571,37 @@ defmodule Linx.Netfilter.Decoder do
           nil
       end
 
-    case List.keyfind(attrs, nfta_set_elem_data(), 0) do
-      {_, data_nla} ->
-        data_attrs = Attr.decode(data_nla)
+    # Interval sets carry their range ends as separate elements flagged
+    # NFT_SET_ELEM_INTERVAL_END; surface them as tagged markers so
+    # materialize_elements/4 can pair them back into `{:range, lo, hi}`.
+    if (elem_flags(attrs) &&& nft_set_elem_interval_end()) != 0 do
+      {:interval_end, key_bin}
+    else
+      case List.keyfind(attrs, nfta_set_elem_data(), 0) do
+        {_, data_nla} ->
+          data_attrs = Attr.decode(data_nla)
 
-        data_value =
-          cond do
-            verdict_bin = get_binary(data_attrs, nfta_data_verdict()) ->
-              decode_verdict(verdict_bin)
+          data_value =
+            cond do
+              verdict_bin = get_binary(data_attrs, nfta_data_verdict()) ->
+                decode_verdict(verdict_bin)
 
-            true ->
-              get_binary(data_attrs, nfta_data_value())
-          end
+              true ->
+                get_binary(data_attrs, nfta_data_value())
+            end
 
-        {key_bin, data_value}
+          {key_bin, data_value}
 
-      nil ->
-        key_bin
+        nil ->
+          key_bin
+      end
+    end
+  end
+
+  defp elem_flags(attrs) do
+    case List.keyfind(attrs, nfta_set_elem_flags(), 0) do
+      {_, <<flags::big-32>>} -> flags
+      _ -> 0
     end
   end
 
@@ -565,14 +610,78 @@ defmodule Linx.Netfilter.Decoder do
   the value shape the parent set expects. Plain sets keep raw key
   binaries (the codec doesn't know to expand `<<10, 0, 0, 5>>` back
   to `{10, 0, 0, 5}` without context). Maps preserve `{key, value}`.
+
+  When `interval?` is `true` (the parent set has the `:interval` flag),
+  `{:interval_end, key}` markers are paired with the preceding start
+  element into `{:range, lo, hi}` (`hi` = marker key − 1, matching the
+  encoder's exclusive-end convention); a width-1 interval collapses back
+  to its scalar, and a start with no marker runs to the type's maximum.
   """
-  @spec materialize_elements([{binary(), term()} | binary()], atom(), atom() | nil) ::
-          [term()]
-  def materialize_elements(elements, key_type, data_type) do
+  @spec materialize_elements(
+          [{binary(), term()} | binary() | {:interval_end, binary()}],
+          atom(),
+          atom() | nil,
+          boolean()
+        ) :: [term()]
+  def materialize_elements(elements, key_type, data_type, interval? \\ false)
+
+  def materialize_elements(elements, key_type, data_type, false) do
     Enum.map(elements, fn
+      # Tolerate stray end markers on a set not flagged :interval.
+      {:interval_end, k} -> decode_key(k, key_type)
       {k, v} -> {decode_key(k, key_type), decode_data(v, data_type)}
       k -> decode_key(k, key_type)
     end)
+  end
+
+  def materialize_elements(elements, key_type, data_type, true) do
+    materialize_intervals(elements, key_type, data_type)
+  end
+
+  defp materialize_intervals([], _kt, _dt), do: []
+
+  defp materialize_intervals([elem, {:interval_end, end_key} | rest], kt, dt)
+       when not is_nil(end_key) do
+    {key_bin, data} = split_raw_elem(elem)
+    hi_bin = decrement_key(end_key)
+    [interval_elem(key_bin, hi_bin, data, kt, dt) | materialize_intervals(rest, kt, dt)]
+  end
+
+  # A stray end marker with no preceding start (e.g. dump artifacts) —
+  # nothing to pair it with; drop it.
+  defp materialize_intervals([{:interval_end, _} | rest], kt, dt),
+    do: materialize_intervals(rest, kt, dt)
+
+  # A start with no end marker: the interval runs to the end of the
+  # keyspace (the encoder omits the marker when hi is the type max).
+  defp materialize_intervals([elem | rest], kt, dt) do
+    {key_bin, data} = split_raw_elem(elem)
+    hi_bin = :binary.copy(<<0xFF>>, byte_size(key_bin))
+    [interval_elem(key_bin, hi_bin, data, kt, dt) | materialize_intervals(rest, kt, dt)]
+  end
+
+  defp split_raw_elem({k, v}), do: {k, v}
+  defp split_raw_elem(k), do: {k, nil}
+
+  defp interval_elem(key_bin, hi_bin, data, kt, dt) do
+    key_term =
+      if hi_bin == key_bin do
+        decode_key(key_bin, kt)
+      else
+        {:range, decode_key(key_bin, kt), decode_key(hi_bin, kt)}
+      end
+
+    case data do
+      nil -> key_term
+      _ -> {key_term, decode_data(data, dt)}
+    end
+  end
+
+  # Big-endian −1 over the full key width (inverse of the encoder's +1).
+  defp decrement_key(bin) do
+    size = byte_size(bin) * 8
+    <<n::size(size)>> = bin
+    <<n - 1::size(size)>>
   end
 
   defp decode_key(<<a, b, c, d>>, :ipv4_addr), do: {a, b, c, d}
@@ -583,7 +692,9 @@ defmodule Linx.Netfilter.Decoder do
   defp decode_key(<<a, b, c, d, e, f>>, :ether_addr), do: {a, b, c, d, e, f}
   defp decode_key(<<port::big-16>>, :inet_service), do: port
   defp decode_key(<<proto>>, :inet_proto), do: proto
-  defp decode_key(<<mark::big-32>>, :mark), do: mark
+  # Marks are host byte order on the wire (the kernel memcmps them against
+  # a native u32 register); the encoder writes them native-endian too.
+  defp decode_key(<<mark::native-32>>, :mark), do: mark
   defp decode_key(bin, :ifname), do: String.trim_trailing(bin, <<0>>)
   defp decode_key(bin, _), do: bin
 
@@ -669,13 +780,24 @@ defmodule Linx.Netfilter.Decoder do
           cond do
             Map.has_key?(t.sets, set_name) ->
               %Set{} = set = Map.fetch!(t.sets, set_name)
-              materialised = materialize_elements(raw_elems, set.key_type, nil)
+
+              materialised =
+                materialize_elements(raw_elems, set.key_type, nil, :interval in set.flags)
+
               updated_set = %Set{set | elements: set.elements ++ materialised}
               Map.put(acc, key, %Table{t | sets: Map.put(t.sets, set_name, updated_set)})
 
             Map.has_key?(t.maps, set_name) ->
               %NMap{} = map = Map.fetch!(t.maps, set_name)
-              materialised = materialize_elements(raw_elems, map.key_type, map.data_type)
+
+              materialised =
+                materialize_elements(
+                  raw_elems,
+                  map.key_type,
+                  map.data_type,
+                  :interval in map.flags
+                )
+
               updated_map = %NMap{map | elements: map.elements ++ materialised}
               Map.put(acc, key, %Table{t | maps: Map.put(t.maps, set_name, updated_map)})
 

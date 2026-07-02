@@ -377,7 +377,9 @@ defmodule Linx.NFT.Formatter do
          ],
          acc
        ) do
-    rhs = :binary.decode_unsigned(v)
+    # ct mark is a host-byte-order u32 on the wire (see the compiler's
+    # ct_kind/1); the other numeric ct keys are 1-byte or network order.
+    rhs = if key == :mark, do: decode_uint_native(v), else: :binary.decode_unsigned(v)
     do_format_exprs(rest, [stmt("ct #{key}", render_op(op), Integer.to_string(rhs)) | acc])
   end
 
@@ -547,10 +549,24 @@ defmodule Linx.NFT.Formatter do
   defp render_meta_value(:iifname, v) when is_binary(v), do: ~s/"#{trim_ifname(v)}"/
   defp render_meta_value(:oifname, v) when is_binary(v), do: ~s/"#{trim_ifname(v)}"/
 
+  # Host-byte-order meta fields (see the compiler's meta_kind/1) — the cmp
+  # value bytes are native-endian, so decode them that way.
+  @host_order_meta [:mark, :iif, :oif, :length, :skuid, :skgid]
+
+  defp render_meta_value(field, v)
+       when field in @host_order_meta and is_binary(v) and byte_size(v) <= 8,
+       do: Integer.to_string(decode_uint_native(v))
+
   defp render_meta_value(_, v) when is_binary(v) and byte_size(v) <= 8,
     do: Integer.to_string(:binary.decode_unsigned(v))
 
   defp render_meta_value(_, v) when is_binary(v), do: inspect(v)
+
+  defp decode_uint_native(v) do
+    size = byte_size(v) * 8
+    <<n::native-size(size)>> = v
+    n
+  end
 
   defp trim_ifname(v) do
     v |> String.replace_trailing(<<0>>, "") |> String.trim_trailing(<<0>>)

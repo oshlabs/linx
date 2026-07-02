@@ -125,6 +125,54 @@ defmodule Linx.ProcessSupervisionTest do
 
       assert await_gone("/proc/#{host_pid}", 100)
     end
+
+    test "supervisor :shutdown (an exit signal, not GenServer.stop) reaps" do
+      {:ok, sup} = start_supervised({DynamicSupervisor, strategy: :one_for_one})
+
+      spec = P.child_spec(argv: ["/bin/sleep", "60"], owner: self(), auto_proceed: true)
+      {:ok, s} = DynamicSupervisor.start_child(sup, spec)
+
+      assert_receive {:linx_process, :running}, 2_000
+      {:ok, host_pid} = P.host_pid(s)
+      assert File.dir?("/proc/#{host_pid}")
+
+      # terminate_child delivers exit(:shutdown) — only a trap_exit'ing
+      # session runs terminate/2 (and thus reaps) on this path.
+      :ok = DynamicSupervisor.terminate_child(sup, s)
+
+      assert await_gone("/proc/#{host_pid}", 100)
+    end
+
+    test "a crashing linked spawn/1 caller reaps (no orphan)" do
+      parent = self()
+
+      helper =
+        spawn(fn ->
+          {:ok, s} = P.spawn(argv: ["/bin/sleep", "60"], auto_proceed: true)
+
+          receive do
+            {:linx_process, :running} -> :ok
+          end
+
+          {:ok, host_pid} = P.host_pid(s)
+          send(parent, {:session, s, host_pid})
+
+          receive do
+            :crash -> exit(:boom)
+          end
+        end)
+
+      assert_receive {:session, s, host_pid}, 2_000
+      assert File.dir?("/proc/#{host_pid}")
+
+      ref = Process.monitor(s)
+      send(helper, :crash)
+
+      # The caller's exit signal propagates over the link; the session must
+      # terminate with the same reason *after* reaping the workload.
+      assert_receive {:DOWN, ^ref, :process, ^s, :boom}, 2_000
+      assert await_gone("/proc/#{host_pid}", 100)
+    end
   end
 
   describe "under a DynamicSupervisor" do

@@ -149,6 +149,12 @@ static char *binary_to_cstr(ErlNifEnv *env, ERL_NIF_TERM term)
 	if (!enif_inspect_binary(env, term, &bin))
 		return NULL;
 
+	/* Reject embedded NUL bytes: the result is used as a C path, so
+	 * "<validated>\0<smuggled>" would silently truncate at the NUL and
+	 * defeat any string-based validation done on the Elixir side. */
+	if (memchr(bin.data, '\0', bin.size) != NULL)
+		return NULL;
+
 	char *s = enif_alloc(bin.size + 1);
 	if (!s)
 		return NULL;
@@ -212,7 +218,17 @@ struct ns_job_result {
 
 /* Open every ns_path in the BEAM's namespace and stash the fds in
  * out_fds (which must be sized for `n` entries). On failure, closes
- * any already-opened fds, sets r->{err,stage}, returns -1. */
+ * any already-opened fds, sets r->{err,stage}, returns -1.
+ *
+ * The paths are typically /proc/<pid>/ns/<kind>, built by the Elixir
+ * side from one target pid. Opening them one by one races pid reuse:
+ * if the target dies mid-loop and the pid is recycled, the tail of the
+ * loop opens the *imposter's* namespaces. The paths are opaque here
+ * (a future caller may pass bind-mounted netns files), so instead of
+ * pinning a /proc/<pid> dirfd we re-verify after the loop: every path
+ * must still resolve to the same namespace object as the fd we hold,
+ * proving all fds came from one consistent snapshot. A recycled pid
+ * surfaces as an inode mismatch (or a stat failure) -> ESRCH. */
 static int open_ns_fds(struct ns_job_result *r, char **ns_paths, int n, int *out_fds)
 {
 	for (int i = 0; i < n; i++) {
@@ -225,6 +241,19 @@ static int open_ns_fds(struct ns_job_result *r, char **ns_paths, int n, int *out
 			return -1;
 		}
 		out_fds[i] = fd;
+	}
+
+	for (int i = 0; i < n; i++) {
+		struct stat now, held;
+		if (stat(ns_paths[i], &now) < 0 ||
+		    fstat(out_fds[i], &held) < 0 ||
+		    now.st_ino != held.st_ino || now.st_dev != held.st_dev) {
+			r->err = ESRCH;
+			r->stage = "open_ns";
+			for (int j = 0; j < n; j++)
+				close(out_fds[j]);
+			return -1;
+		}
 	}
 	return 0;
 }
@@ -727,12 +756,20 @@ static ERL_NIF_TERM nif_list(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]
 		if (job.r.err) {
 			result = make_error(env, job.r.stage, job.r.err);
 		} else {
+			/* Track conversion failure locally: job.r.err is the
+			 * WORKER's error channel and stays 0 here, so keying
+			 * the {:ok, _} wrap off it would wrap the ENOMEM error
+			 * tuple as {:ok, {:error, ...}} — a shape no caller
+			 * matches. */
+			int conv_failed = 0;
+
 			result = enif_make_list(env, 0);
 			for (struct list_node *n = job.entries; n; n = n->next) {
 				ErlNifBinary path_bin;
 				size_t plen = strlen(n->path);
 				if (!enif_alloc_binary(plen, &path_bin)) {
 					result = make_error(env, "list", ENOMEM);
+					conv_failed = 1;
 					break;
 				}
 				memcpy(path_bin.data, n->path, plen);
@@ -741,6 +778,7 @@ static ERL_NIF_TERM nif_list(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]
 				if (!enif_alloc_binary(n->value_len, &value_bin)) {
 					enif_release_binary(&path_bin);
 					result = make_error(env, "list", ENOMEM);
+					conv_failed = 1;
 					break;
 				}
 				memcpy(value_bin.data, n->value, n->value_len);
@@ -752,7 +790,7 @@ static ERL_NIF_TERM nif_list(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[]
 				result = enif_make_list_cell(env, tuple, result);
 			}
 
-			if (!job.r.err) {
+			if (!conv_failed) {
 				/* Wrap successful list in {:ok, list}. */
 				result = enif_make_tuple2(env, ok_atom(env), result);
 			}

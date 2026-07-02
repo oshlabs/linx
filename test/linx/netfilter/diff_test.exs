@@ -213,13 +213,19 @@ defmodule Linx.Netfilter.DiffTest do
       patch = Diff.diff(from, to)
       ops = patch.ops
 
-      add_op = Enum.find(ops, &match?({:add_set_elements, :inet, "fw", "blk", _}, &1))
-      del_op = Enum.find(ops, &match?({:delete_set_elements, :inet, "fw", "blk", _}, &1))
+      add_op = Enum.find(ops, &match?({:add_set_elements, :inet, "fw", "blk", _, _}, &1))
+      del_op = Enum.find(ops, &match?({:delete_set_elements, :inet, "fw", "blk", _, _}, &1))
 
-      assert {:add_set_elements, :inet, "fw", "blk", added} = add_op
+      # Element ops carry the parent set's declared types so the encoder
+      # never infers them from element shape (M12).
+      assert {:add_set_elements, :inet, "fw", "blk", added, {:inet_service, nil, false}} =
+               add_op
+
       assert MapSet.new(added) == MapSet.new([8080])
 
-      assert {:delete_set_elements, :inet, "fw", "blk", removed} = del_op
+      assert {:delete_set_elements, :inet, "fw", "blk", removed, {:inet_service, nil, false}} =
+               del_op
+
       assert MapSet.new(removed) == MapSet.new([80, 443])
     end
 

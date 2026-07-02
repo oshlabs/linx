@@ -44,10 +44,15 @@ defmodule Linx.IP do
 
   @doc """
   Parses a string into an `Linx.IP` — IPv4 or IPv6.
+
+  Strict: IPv4 must be a full dotted quad. The classful shorthands
+  `:inet.parse_address/1` accepts (`"10.0.0"` → `10.0.0.0`, `"10.1"` →
+  `10.0.0.1`) are rejected — a typo'd address handed to `Address.add`
+  or `Route.add` must error, not install a valid-but-wrong address.
   """
   @spec parse(binary) :: {:ok, t} | {:error, term}
   def parse(string) when is_binary(string) do
-    case :inet.parse_address(String.to_charlist(string)) do
+    case :inet.parse_strict_address(String.to_charlist(string)) do
       {:ok, {a, b, c, d}} ->
         {:ok, %__MODULE__{family: :inet, bytes: <<a, b, c, d>>}}
 
@@ -103,9 +108,14 @@ defmodule Linx.IP do
   def encode(%__MODULE__{bytes: bytes}), do: bytes
 
   @doc false
-  @spec decode(binary) :: t
+  # 4 or 16 bytes decode to an address. Anything else — a zero-length or
+  # truncated attribute in a kernel dump — decodes to nil rather than
+  # crashing the decoder (mirrors Linx.MAC.decode/1; callers treat nil
+  # as "no address").
+  @spec decode(binary) :: t | nil
   def decode(<<_::32>> = bytes), do: %__MODULE__{family: :inet, bytes: bytes}
   def decode(<<_::128>> = bytes), do: %__MODULE__{family: :inet6, bytes: bytes}
+  def decode(_other), do: nil
 
   defimpl Inspect do
     def inspect(ip, _opts), do: ~s|~IP"#{Linx.IP.to_string(ip)}"|

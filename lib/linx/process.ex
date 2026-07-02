@@ -96,8 +96,10 @@ defmodule Linx.Process do
       `{:spawn, _}` / `{:enter, _}` request. `errno` is `EINVAL` (22).
     * `:request_too_big` — the request exceeded the agent's 32 KiB
       buffer. `errno` is `EMSGSIZE` (90).
-    * `:command_too_big` — a post-`:running` command exceeded the
-      buffer; the session is torn down. `errno` is `EMSGSIZE`.
+    * `:command_too_big` — a command exceeded the agent's 32 KiB
+      per-command buffer (at the checkpoint or post-`:running`); the
+      session is torn down. `errno` is `EMSGSIZE`. (PTY input never
+      triggers this — `pty_write/2` chunks below the ceiling.)
     * `:ready_frame` — couldn't read the `{:ready, _}` frame from
       the child (child died early, internal pipe broke). `errno` is
       the underlying I/O error or `EIO` on EOF.
@@ -138,15 +140,25 @@ defmodule Linx.Process do
   # atom in the term to already exist in the BEAM — so this list exists
   # solely to ensure these atoms are loaded at module compile time. (Naming
   # mirrors what the agent emits: `setns_<ns>` / `open_ns_<ns>` per type.)
+  #
+  # This list MUST cover every emit site in c_src/linx_process.c: an atom
+  # missing here makes safe_decode/1 drop the frame in a fresh VM, and the
+  # owner sees a misleading :agent_died instead of the real stage. A test
+  # greps the C source and asserts the whitelist is complete
+  # (process_error_stages_test.exs) — extend both together.
   @error_stages [
     :execve,
     :clone,
     :fork,
     :stdio,
+    :chdir,
     :posix_openpt,
     :ptsetup,
     :ptsname,
     :pts_open,
+    :pipe2,
+    :signalfd,
+    :sigprocmask,
     :setns_user,
     :setns_mount,
     :setns_uts,
@@ -163,8 +175,19 @@ defmodule Linx.Process do
     :open_ns_net,
     :open_ns_time,
     :open_ns_pid,
+    :open_ns_proc,
+    :cap_drop_bounding,
+    :cap_set_thread,
+    :cap_set_ambient,
     :seccomp_install,
-    :seccomp_no_new_privs
+    :seccomp_no_new_privs,
+    :malformed_request,
+    :request_too_big,
+    :command_too_big,
+    :ready_frame,
+    :malformed_ready,
+    :exec_outcome,
+    :unknown
   ]
 
   @doc false
@@ -352,6 +375,11 @@ defmodule Linx.Process do
   @spec proceed(t()) :: :ok | {:error, term}
   def proceed(session) when is_pid(session) do
     GenServer.call(session, :proceed)
+  catch
+    # With linger: false the session stops at the terminal event, so a late
+    # verb races the shutdown; map the :noproc exit to the documented error
+    # instead of crashing the caller (same treatment as wait/1 and info/1).
+    :exit, _ -> {:error, :no_process}
   end
 
   @doc """
@@ -366,10 +394,17 @@ defmodule Linx.Process do
   has been handed to the agent (or buffered), without waiting for the
   kernel to deliver it. Use `wait/1` to observe the workload's
   response.
+
+  `signum` must be in `1..64` (the Linux signal range) — the guard
+  mirrors the agent's own bound, so a signal that would be silently
+  dropped on the far side never reports `:ok` here.
   """
-  @spec signal(t(), pos_integer) :: :ok | {:error, term}
-  def signal(session, signum) when is_pid(session) and is_integer(signum) and signum > 0 do
+  @spec signal(t(), 1..64) :: :ok | {:error, term}
+  def signal(session, signum)
+      when is_pid(session) and is_integer(signum) and signum in 1..64 do
     GenServer.call(session, {:signal, signum})
+  catch
+    :exit, _ -> {:error, :no_process}
   end
 
   @doc """
@@ -415,6 +450,8 @@ defmodule Linx.Process do
   @spec abort(t()) :: :ok | {:error, :running | :no_process}
   def abort(session) when is_pid(session) do
     GenServer.call(session, :abort)
+  catch
+    :exit, _ -> {:error, :no_process}
   end
 
   @doc """
@@ -517,10 +554,15 @@ defmodule Linx.Process do
   input on its stdin.
 
   Returns `{:error, :no_pty}` if the session was not started with
-  `stdio: :pty`; `{:error, :no_process}` if the workload has already
+  `stdio: :pty`; `{:error, :not_running}` before the workload passes the
+  `:ready` checkpoint (the agent accepts PTY input only once the workload
+  is `:running`); `{:error, :no_process}` if the workload has already
   terminated (reached any of `:exited` / `:signaled` / `:aborted` /
   `:errored`) — the call refuses immediately rather than firing a
   Port.command at an agent that's been collected or is about to be.
+
+  Large writes are split into frames below the agent's 32 KiB command
+  ceiling, so there is no upper bound on `bytes` beyond memory.
 
   Fire-and-forget on the happy path — bytes are handed to the agent
   (and from there to the PTY); there is no acknowledgement.
@@ -528,6 +570,8 @@ defmodule Linx.Process do
   @spec pty_write(t(), iodata()) :: :ok | {:error, term}
   def pty_write(session, bytes) when is_pid(session) do
     GenServer.call(session, {:pty_write, IO.iodata_to_binary(bytes)})
+  catch
+    :exit, _ -> {:error, :no_process}
   end
 
   @doc """
@@ -564,6 +608,8 @@ defmodule Linx.Process do
              is_integer(xpix) and is_integer(ypix) and
              rows >= 0 and cols >= 0 and xpix >= 0 and ypix >= 0 do
     GenServer.call(session, {:pty_winsize, {rows, cols, xpix, ypix}})
+  catch
+    :exit, _ -> {:error, :no_process}
   end
 
   def pty_set_winsize(session, %{rows: r, cols: c, xpixel: xp, ypixel: yp}) do
@@ -785,6 +831,13 @@ defmodule Linx.Process do
     if not File.exists?(binary) do
       {:stop, {:missing_binary, binary}}
     else
+      # Trap exits so terminate/2 (and thus reap/1) runs on exit *signals*,
+      # not just on GenServer.stop: a supervisor :shutdown and a crashing
+      # linked spawn/1 caller must both reap the workload instead of
+      # orphaning it. Without this flag the child_spec/1 shutdown timeout
+      # is meaningless and a supervisor restart duplicates the workload.
+      Process.flag(:trap_exit, true)
+
       port =
         Port.open(
           {:spawn_executable, binary},
@@ -1029,14 +1082,25 @@ defmodule Linx.Process do
     {:reply, {:error, :no_process}, state}
   end
 
-  def handle_call({:pty_write, bytes}, _from, %{pty?: true, port: port} = state)
-      when port != nil do
-    Port.command(port, :erlang.term_to_binary({:pty_in, bytes}))
-    {:reply, :ok, state}
-  end
-
   def handle_call({:pty_write, _bytes}, _from, %{pty?: false} = state) do
     {:reply, {:error, :no_pty}, state}
+  end
+
+  # PTY input is only valid once the workload is :running. Before that the
+  # agent sits in await_proceed, which treats a {:pty_in, _} frame as a
+  # protocol error and exits — killing the parked child with a misleading
+  # :agent_died. Refuse here instead.
+  def handle_call({:pty_write, _bytes}, _from, %{running?: false} = state) do
+    {:reply, {:error, :not_running}, state}
+  end
+
+  def handle_call({:pty_write, bytes}, _from, %{port: port} = state)
+      when port != nil do
+    Enum.each(pty_chunks(bytes), fn chunk ->
+      Port.command(port, :erlang.term_to_binary({:pty_in, chunk}))
+    end)
+
+    {:reply, :ok, state}
   end
 
   def handle_call({:pty_write, _bytes}, _from, state) do
@@ -1135,6 +1199,22 @@ defmodule Linx.Process do
     {:noreply, %{state | port: nil}}
   end
 
+  # We trap exits (see init/1), so linked exits arrive as messages. The
+  # port's own exit signal is redundant with the {:exit_status, _} message
+  # handled above -- drop it.
+  def handle_info({:EXIT, port, _reason}, state) when is_port(port) do
+    {:noreply, state}
+  end
+
+  # Exit signal from a linked process. The OTP parent's signal never lands
+  # here (gen_server intercepts it and calls terminate/2 directly); this is
+  # any *other* link -- e.g. an owner that linked itself. Mirror untrapped
+  # link semantics -- ignore :normal, die on abnormal -- except that dying
+  # via {:stop, ...} runs terminate/2, so the workload is reaped instead of
+  # orphaned.
+  def handle_info({:EXIT, _pid, :normal}, state), do: {:noreply, state}
+  def handle_info({:EXIT, _pid, reason}, state), do: {:stop, reason, state}
+
   # Catch-all for stray messages: misroutes, late timer refs, monitor
   # notifications we didn't ask for, etc. Log and drop -- a bare
   # function_clause crash would take the session down and lose any
@@ -1202,6 +1282,22 @@ defmodule Linx.Process do
     {:noreply, %{state | running?: true, pending_signals: []}}
   end
 
+  # A terminal event is delivered exactly once (moduledoc promise). The
+  # agent can legitimately produce a second terminal-shaped frame — e.g.
+  # {:error, EMSGSIZE, :command_too_big} is followed by the reaped
+  # {:status, :signaled, 9} — so once `result` is set, later terminal
+  # frames are dropped instead of re-notifying the owner and overwriting
+  # the recorded result.
+  defp handle_agent_frame({:status, kind, _}, %{result: result} = state)
+       when result != nil and kind in [:exited, :signaled, :aborted] do
+    {:noreply, state}
+  end
+
+  defp handle_agent_frame({:error, _, _}, %{result: result} = state)
+       when result != nil do
+    {:noreply, state}
+  end
+
   defp handle_agent_frame({:status, :exited, code}, state) do
     send(state.owner, {:linx_process, :exited, code})
     terminal(state, {:exited, code})
@@ -1227,6 +1323,15 @@ defmodule Linx.Process do
     {:noreply, state}
   end
 
+  # The agent's PTY input buffer hit its cap (the workload isn't reading
+  # its terminal) and `n` bytes were dropped. Non-terminal — surface it so
+  # the owner knows the input was not delivered instead of losing it
+  # silently.
+  defp handle_agent_frame({:pty_in_dropped, n}, state) do
+    send(state.owner, {:linx_process, :pty_in_dropped, n})
+    {:noreply, state}
+  end
+
   defp handle_agent_frame(other, state) do
     Logger.warning("Linx.Process: unrecognised agent frame: #{inspect(other)}")
     {:noreply, state}
@@ -1249,10 +1354,12 @@ defmodule Linx.Process do
   # :abort. The command bytes reach the agent's pipe before the port closes,
   # so the agent kills + waitpids the child before it ever sees EOF.
   #
-  # This is the graceful path (GenServer.stop / supervisor shutdown, where
-  # terminate runs). A brutal `Process.exit(pid, :kill)` skips terminate, and
-  # the agent then lets the orphan finish — so use a graceful shutdown (the
-  # default for supervised children) when reaping must be guaranteed.
+  # This is the graceful path. Because init/1 traps exits, it covers
+  # GenServer.stop, supervisor :shutdown, and a crashing linked caller --
+  # terminate/2 runs for all of them. Only a brutal `Process.exit(pid,
+  # :kill)` skips terminate, and the agent then lets the orphan finish --
+  # so avoid :kill when reaping must be guaranteed (supervisors only use
+  # it after the :shutdown timeout expires).
   defp reap(%{result: result}) when result != nil, do: :ok
   defp reap(%{port: nil}), do: :ok
 
@@ -1267,6 +1374,17 @@ defmodule Linx.Process do
   end
 
   defp reap(_state), do: :ok
+
+  # The agent's frame buffer is 32 KiB; a {:pty_in, _} frame over that
+  # desyncs the wire and the agent SIGKILLs the workload (command_too_big).
+  # Split large writes well below the ceiling — the external-term envelope
+  # adds a few dozen bytes on top of the payload.
+  @pty_chunk_bytes 16_384
+
+  defp pty_chunks(bytes) when byte_size(bytes) <= @pty_chunk_bytes, do: [bytes]
+
+  defp pty_chunks(<<chunk::binary-size(@pty_chunk_bytes), rest::binary>>),
+    do: [chunk | pty_chunks(rest)]
 
   # Drain pending_signals to the agent in the order they were queued.
   defp flush_pending_signals(%{port: port, pending_signals: signals}) do

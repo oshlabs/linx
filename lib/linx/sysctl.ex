@@ -33,6 +33,17 @@ defmodule Linx.Sysctl do
       kernel.hostname      ->  /proc/sys/kernel/hostname
       vm.swappiness        ->  /proc/sys/vm/swappiness
 
+  Interface names may themselves contain dots (`eth0.100`, a VLAN
+  sub-interface), which the dot form cannot address. Following
+  `sysctl(8)`'s convention, a key containing a `/` is taken in
+  **slash form**, where dots are literal:
+
+      net/ipv4/conf/eth0.100/forwarding
+        ->  /proc/sys/net/ipv4/conf/eth0.100/forwarding
+
+  `list/0..2` emit slash-form keys for exactly those entries, so
+  every listed key feeds back into `read/2` / `write/3` unchanged.
+
   Reads return the file's contents (kernel always appends a `\\n`,
   which we trim). Writes accept integers, strings, and lists of
   integers (for space-separated tuple-shaped knobs like
@@ -136,6 +147,13 @@ defmodule Linx.Sysctl do
   # trailing / consecutive dots and the `..` path-traversal case).
   @key_regex ~r/\A[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*\z/
 
+  # Slash-form keys (sysctl(8) convention, used when a path segment
+  # contains a literal dot — VLAN interfaces like `eth0.100`): each
+  # `/`-separated segment may include dots, but `.` / `..` segments
+  # are ruled out because a segment must contain at least one
+  # [A-Za-z0-9_-] character.
+  @slash_segment_regex ~r/\A[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*\z/
+
   # Canonical namespace order for setns. user first so an unprivileged
   # caller would gain CAP_SYS_ADMIN in the target user ns before
   # trying to enter mount; for our typical root-BEAM case the order
@@ -144,8 +162,10 @@ defmodule Linx.Sysctl do
 
   @typedoc """
   A sysctl key in dot form, e.g. `"net.ipv4.ip_forward"` or
-  `"kernel.hostname"`. Maps internally to a `/proc/sys/<slashed>`
-  path.
+  `"kernel.hostname"`, or — when it contains a `/` — in `sysctl(8)`'s
+  slash form (`"net/ipv4/conf/eth0.100/forwarding"`), where dots are
+  literal so dotted interface names are addressable. Maps internally
+  to a `/proc/sys/<slashed>` path.
   """
   @type key :: String.t()
 
@@ -377,12 +397,32 @@ defmodule Linx.Sysctl do
     end
   end
 
-  # Dot-form key → /proc/sys/.../slash/path. The regex check
-  # rules out anything that could escape /proc/sys/ via traversal,
-  # so the Path.join below is safe.
+  # Key → /proc/sys/.../slash/path. A key containing `/` is slash form
+  # (dots literal — the only way to address a dotted interface name);
+  # otherwise dot form. Both validations rule out empty segments and
+  # `.`/`..`, so nothing can escape /proc/sys/ via traversal and the
+  # Path.join below is safe.
   defp resolve_key(key) do
+    if String.contains?(key, "/") do
+      resolve_slash_key(key)
+    else
+      resolve_dot_key(key)
+    end
+  end
+
+  defp resolve_dot_key(key) do
     if Regex.match?(@key_regex, key) do
       {:ok, Path.join(@procsys, String.replace(key, ".", "/"))}
+    else
+      {:error, {:bad_key, key}}
+    end
+  end
+
+  defp resolve_slash_key(key) do
+    segments = String.split(key, "/")
+
+    if segments != [] and Enum.all?(segments, &Regex.match?(@slash_segment_regex, &1)) do
+      {:ok, Path.join([@procsys | segments])}
     else
       {:error, {:bad_key, key}}
     end
@@ -667,9 +707,16 @@ defmodule Linx.Sysctl do
     end
   end
 
+  # Inverse of resolve_key/1, choosing the form that round-trips: dot
+  # form normally, slash form when any segment contains a literal dot
+  # (a dotted interface name — the dot form would mistranslate it).
   defp path_to_key(path) do
-    path
-    |> Path.relative_to(@procsys)
-    |> String.replace("/", ".")
+    rel = Path.relative_to(path, @procsys)
+
+    if rel |> String.split("/") |> Enum.any?(&String.contains?(&1, ".")) do
+      rel
+    else
+      String.replace(rel, "/", ".")
+    end
   end
 end

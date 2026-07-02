@@ -289,8 +289,15 @@ defmodule Linx.Netfilter do
   end
 
   defp do_reconcile(sock, ruleset, retries_left, total_retries) do
-    with {:ok, current} <- pull(sock),
-         {:ok, gen} <- Linx.Netlink.Nfnl.Codec.get_gen(sock) do
+    # Read the generation counter BEFORE the snapshot. Reading it after
+    # opens a race: a commit landing between the pull and the gen read
+    # yields a gen matching *newer* state while `current` is older, so
+    # the CAS "succeeds" against stale data instead of restarting. With
+    # gen-first, a commit in the window makes the kernel's ERESTART
+    # check fire — the retry loop below re-pulls, which is the safe
+    # direction to be wrong in.
+    with {:ok, gen} <- Linx.Netlink.Nfnl.Codec.get_gen(sock),
+         {:ok, current} <- pull(sock) do
       patch = Linx.Netfilter.Diff.diff(current, ruleset)
 
       if Linx.Netfilter.Patch.empty?(patch) do

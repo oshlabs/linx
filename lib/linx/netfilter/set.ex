@@ -207,6 +207,13 @@ defmodule Linx.Netfilter.Set.Element do
   # Loose element-shape checking — just catches obvious mismatches
   # at construction time. Strict validation is not yet implemented.
 
+  # `{:range, lo, hi}` — an interval element (the ~NFT compiler's form for
+  # `22-25` / CIDR-in-set). Both bounds must pass the scalar check; the
+  # encoder emits the start/end pair.
+  def check({:range, lo, hi}, type) do
+    with :ok <- check(lo, type), do: check(hi, type)
+  end
+
   def check(el, :ipv4_addr) do
     cond do
       is_binary(el) and byte_size(el) == 4 ->

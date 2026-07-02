@@ -52,6 +52,16 @@ defmodule Linx.Netlink.Attr do
   defp encode_one({type, value}) when type in 0..0xFFFF do
     payload = IO.iodata_to_binary(value)
     len = 4 + byte_size(payload)
+
+    # nla_len is 16 bits. Writing a larger length would silently wrap and
+    # emit a corrupt header the kernel misparses the rest of the message
+    # by (libmnl errors EINVAL here too).
+    if len > 0xFFFF do
+      raise ArgumentError,
+            "netlink attribute payload of #{byte_size(payload)} bytes exceeds " <>
+              "the 16-bit nla_len limit (65531 payload bytes)"
+    end
+
     pad = padding(len)
     <<len::native-16, type::native-16>> <> payload <> <<0::size(pad * 8)>>
   end

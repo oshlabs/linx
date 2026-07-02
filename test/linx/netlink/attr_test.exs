@@ -43,4 +43,15 @@ defmodule Linx.Netlink.AttrTest do
       Attr.decode(<<99::native-16, 1::native-16, "x">>)
     end
   end
+
+  test "encode raises on a payload past the 16-bit nla_len limit (m5)" do
+    # 65531 payload bytes is the max (65535 - 4-byte header); one more
+    # would silently wrap the length field and desync the whole message.
+    max = :binary.copy(<<0>>, 65_531)
+    assert is_binary(Attr.encode([{1, max}]))
+
+    assert_raise ArgumentError, ~r/nla_len/, fn ->
+      Attr.encode([{1, max <> <<0>>}])
+    end
+  end
 end

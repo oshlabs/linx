@@ -16,14 +16,28 @@ defmodule Linx.Seccomp.Compiler do
   #     1: jeq  AUDIT_ARCH, jt=1, jf=0
   #     2: ret  KILL_PROCESS   ; arch mismatch (fall-through from 1)
   #     3: ld   [0]            ; load seccomp_data.nr into A
-  #     4..3+N: per-rule JEQ block
+  #     (x86_64 only — x32-ABI guard, see below:)
+  #     4: jge  0x40000000, jt=0, jf=1
+  #     5: ret  KILL_PROCESS   ; x32 syscall (or negative nr)
+  #     then: per-rule JEQ block
   #         jeq  nr_i, jt=offset_to_action_i, jf=0
   #         (falls through to the next JEQ on miss; jumps forward to
   #          the action RET on hit)
-  #     4+N: ret default       ; nothing matched
-  #     4+N+1...: one RET per unique non-default action, in source
-  #              order (rules whose action equals the default reuse
-  #              the default RET to save instructions)
+  #     then: ret default      ; nothing matched
+  #     then: one RET per unique non-default action, in source
+  #           order (rules whose action equals the default reuse
+  #           the default RET to save instructions)
+  #
+  # ## x32-ABI guard (x86_64 only)
+  #
+  # The x32 ABI shares AUDIT_ARCH_X86_64 but sets __X32_SYSCALL_BIT
+  # (0x40000000) in `nr`, so a bare `jeq nr` never matches an x32
+  # entry and the program falls through to the default. For a
+  # deny-list (default :allow) that is a fail-open bypass: `ptrace`
+  # via x32 is `0x40000000 | 101`. Mirror libseccomp: after loading
+  # `nr`, kill when `nr >= 0x40000000` unsigned — that traps both
+  # x32 calls and negative `nr` values. aarch64 has no x32 ABI, so
+  # its prologue omits the guard.
   #
   # `struct seccomp_data` field offsets (from `linux/seccomp.h`):
   # nr=0 (s32), arch=4 (u32), instruction_pointer=8 (u64),
@@ -52,6 +66,9 @@ defmodule Linx.Seccomp.Compiler do
   # struct seccomp_data offsets.
   @nr_offset 0
   @arch_offset 4
+
+  # __X32_SYSCALL_BIT — set in seccomp_data.nr for x32-ABI entries.
+  @x32_syscall_bit 0x40000000
 
   # 8-bit jt/jf upper bound.
   @max_jump 255
@@ -123,8 +140,9 @@ defmodule Linx.Seccomp.Compiler do
   defp emit(resolved, default_action, audit_arch_value) do
     arch_check_size = 3
     load_nr_size = 1
+    x32_guard_size = x32_guard_size(audit_arch_value)
     jeq_count = length(resolved)
-    default_index = arch_check_size + load_nr_size + jeq_count
+    default_index = arch_check_size + load_nr_size + x32_guard_size + jeq_count
 
     # Walk the rules in source order, assigning a RET-index to each
     # unique action. The default action already lives at
@@ -150,7 +168,7 @@ defmodule Linx.Seccomp.Compiler do
       resolved
       |> Enum.with_index()
       |> Enum.map(fn {{action, _syscall, nr}, i} ->
-        pos = arch_check_size + load_nr_size + i
+        pos = arch_check_size + load_nr_size + x32_guard_size + i
         target = Map.fetch!(action_to_index, action)
         {nr, target - pos - 1}
       end)
@@ -164,6 +182,22 @@ defmodule Linx.Seccomp.Compiler do
     end
   end
 
+  # The x32 guard is two instructions (JGE + RET) on x86_64, absent
+  # elsewhere. Keep this in sync with x32_guard/1.
+  defp x32_guard_size(audit_arch_value) do
+    if audit_arch_value == Constants.audit_arch_x86_64(), do: 2, else: 0
+  end
+
+  # jt=0 falls into the KILL RET when A >= __X32_SYSCALL_BIT (unsigned,
+  # so negative nr also trips it); jf=1 skips over it.
+  defp x32_guard(audit_arch_value, kill_u32) do
+    if audit_arch_value == Constants.audit_arch_x86_64() do
+      [bpf_jge_k(@x32_syscall_bit, 0, 1), bpf_ret_k(kill_u32)]
+    else
+      []
+    end
+  end
+
   defp encode(jeq_specs, action_list, default_action, audit_arch_value) do
     kill_u32 = Constants.action_to_u32(:kill_process)
     default_u32 = Constants.action_to_u32(default_action)
@@ -173,6 +207,7 @@ defmodule Linx.Seccomp.Compiler do
       bpf_jeq_k(audit_arch_value, 1, 0),
       bpf_ret_k(kill_u32),
       bpf_ld_word_abs(@nr_offset)
+      | x32_guard(audit_arch_value, kill_u32)
     ]
 
     jeq_insns = Enum.map(jeq_specs, fn {nr, jt} -> bpf_jeq_k(nr, jt, 0) end)
@@ -198,6 +233,11 @@ defmodule Linx.Seccomp.Compiler do
 
   defp bpf_jeq_k(k, jt, jf) do
     code = Constants.bpf_jmp() ||| Constants.bpf_jeq() ||| Constants.bpf_k()
+    insn(code, jt, jf, k)
+  end
+
+  defp bpf_jge_k(k, jt, jf) do
+    code = Constants.bpf_jmp() ||| Constants.bpf_jge() ||| Constants.bpf_k()
     insn(code, jt, jf, k)
   end
 

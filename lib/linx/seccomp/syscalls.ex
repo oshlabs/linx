@@ -236,6 +236,9 @@ defmodule Linx.Seccomp.Syscalls do
     getcpu: 309,
     process_vm_readv: 310,
     process_vm_writev: 311,
+    # The modern fd-based module loader — a "no modules" deny-list built
+    # on init_module alone leaves this path open (aarch64 already has it).
+    finit_module: 313,
     renameat2: 316,
     seccomp: 317,
     getrandom: 318,

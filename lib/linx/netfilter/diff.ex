@@ -149,8 +149,16 @@ defmodule Linx.Netfilter.Diff do
   defp set_elements_op(_family, %{elements: []}), do: nil
 
   defp set_elements_op(family, %{elements: els} = set_or_map) do
-    {:add_set_elements, family, entity_table(set_or_map), set_or_map.name, els}
+    {:add_set_elements, family, entity_table(set_or_map), set_or_map.name, els,
+     elem_types(set_or_map)}
   end
+
+  # The declared-type triple carried in element ops, so the encoder never
+  # infers key/data types (a low port int is indistinguishable from a
+  # protocol number by shape) and knows whether to emit interval end
+  # markers.
+  defp elem_types(%Set{key_type: k, flags: flags}), do: {k, nil, :interval in flags}
+  defp elem_types(%NMap{key_type: k, data_type: d, flags: flags}), do: {k, d, :interval in flags}
 
   defp entity_table(%Set{table: t}), do: t
   defp entity_table(%NMap{table: t}), do: t
@@ -345,7 +353,10 @@ defmodule Linx.Netfilter.Diff do
           if set_or_map.elements == [] do
             []
           else
-            [{:add_set_elements, family, table_name, name, set_or_map.elements}]
+            [
+              {:add_set_elements, family, table_name, name, set_or_map.elements,
+               elem_types(set_or_map)}
+            ]
           end
 
         [{:create_set, family, set_or_map}] ++ elem_op
@@ -369,7 +380,7 @@ defmodule Linx.Netfilter.Diff do
           if to.elements == [] do
             []
           else
-            [{:add_set_elements, family, table_name, name, to.elements}]
+            [{:add_set_elements, family, table_name, name, to.elements, elem_types(to)}]
           end
 
         [
@@ -378,7 +389,7 @@ defmodule Linx.Netfilter.Diff do
         ] ++ elem_op
 
       true ->
-        diff_set_elements(family, table_name, name, from.elements, to.elements)
+        diff_set_elements(family, table_name, name, from.elements, to.elements, elem_types(to))
     end
   end
 
@@ -392,7 +403,7 @@ defmodule Linx.Netfilter.Diff do
     end
   end
 
-  defp diff_set_elements(family, table_name, name, from_elems, to_elems) do
+  defp diff_set_elements(family, table_name, name, from_elems, to_elems, types) do
     from_set = MapSet.new(from_elems)
     to_set = MapSet.new(to_elems)
 
@@ -400,8 +411,8 @@ defmodule Linx.Netfilter.Diff do
     dels = from_set |> MapSet.difference(to_set) |> Enum.to_list()
 
     []
-    |> append_op(adds != [], {:add_set_elements, family, table_name, name, adds})
-    |> append_op(dels != [], {:delete_set_elements, family, table_name, name, dels})
+    |> append_op(adds != [], {:add_set_elements, family, table_name, name, adds, types})
+    |> append_op(dels != [], {:delete_set_elements, family, table_name, name, dels, types})
   end
 
   defp append_op(ops, true, op), do: ops ++ [op]

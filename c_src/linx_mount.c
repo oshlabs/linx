@@ -47,6 +47,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/stat.h>    /* lstat / S_ISLNK -- ensure_target_file hardening */
 #include <sys/syscall.h> /* SYS_pivot_root (no glibc wrapper) */
 #include <sys/wait.h>    /* waitpid -- reap the pidns mount fork */
 #include <unistd.h>
@@ -107,6 +108,12 @@ static char *binary_to_cstr(ErlNifEnv *env, ERL_NIF_TERM term)
 {
 	ErlNifBinary bin;
 	if (!enif_inspect_binary(env, term, &bin))
+		return NULL;
+
+	/* Reject embedded NUL bytes: the result is used as a C path, so
+	 * "<validated>\0<smuggled>" would silently truncate at the NUL and
+	 * defeat any string-based validation done on the Elixir side. */
+	if (memchr(bin.data, '\0', bin.size) != NULL)
 		return NULL;
 
 	char *s = enif_alloc(bin.size + 1);
@@ -211,15 +218,28 @@ static int enter_target_ns(struct ns_job_result *r, const char *ns_path)
  * already entered the target mount namespace, so the file lands on
  * the in-container tmpfs (a host-side creat would land on the dir
  * underneath the tmpfs, invisible in the container). Returns 0 on
- * success or if it already exists, otherwise an errno. */
+ * success or if it already exists, otherwise an errno.
+ *
+ * Hardening: we run as root inside a mount namespace whose directories
+ * may be container-writable, so a symlink at `target` must not redirect
+ * the create (or the subsequent bind mount) to an attacker-chosen path.
+ * O_EXCL|O_NOFOLLOW refuses a symlink at the final component; a
+ * pre-existing symlink is reported as ELOOP rather than accepted.
+ * (Symlinked *parent* directories would need openat2 with
+ * RESOLVE_BENEATH/RESOLVE_NO_SYMLINKS — worth adding if this is ever
+ * used against live, adversarial containers; the typical call here
+ * precedes the workload.) */
 static int ensure_target_file(const char *target)
 {
-	if (access(target, F_OK) == 0)
-		return 0;
+	struct stat st;
+	if (lstat(target, &st) == 0)
+		return S_ISLNK(st.st_mode) ? ELOOP : 0;
 
-	int fd = open(target, O_CREAT | O_WRONLY | O_CLOEXEC, 0644);
+	int fd = open(target,
+		      O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC,
+		      0644);
 	if (fd < 0)
-		return errno;
+		return errno == EEXIST ? 0 : errno;
 
 	close(fd);
 	return 0;

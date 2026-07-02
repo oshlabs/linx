@@ -362,6 +362,12 @@ defmodule Linx.Netfilter.Wire do
   Maps a set-flags atom list to the u32 bitmask. The encoder may
   add `:map` / `:eval` automatically based on the set's
   `:data_type` / `:dynamic` shape.
+
+  `:eval` is an accepted alias for `:dynamic` — both name the same
+  kernel bit (`NFT_SET_EVAL`, `0x20`; the uapi header keeps the old
+  `EVAL` name, the nft language calls it `dynamic`). Round-trips
+  normalise to `:dynamic`: `set_flags_atoms/1` never emits `:eval`,
+  so pull a set pushed with `:eval` and you'll read `:dynamic` back.
   """
   @spec set_flags_int([atom()]) :: non_neg_integer()
   def set_flags_int(flags) when is_list(flags) do

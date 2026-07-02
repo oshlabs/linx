@@ -1,6 +1,8 @@
 defmodule Linx.Netlink.RequestTest do
   use ExUnit.Case, async: true
 
+  import Bitwise
+
   alias Linx.Netlink.{Attr, Error, Message, Request, Socket}
 
   @netlink_route 0
@@ -40,5 +42,71 @@ defmodule Linx.Netlink.RequestTest do
     assert is_nil(error.message) or is_binary(error.message)
 
     assert :ok = Socket.close(socket)
+  end
+
+  # The terminal classifications below can't be provoked on demand through a
+  # real socket, so they are exercised via consume/3 (a @doc false seam) with
+  # synthesized messages.
+  describe "consume/3 — dump termination edge cases" do
+    # NLMSG_DONE = 3; NLM_F_MULTI = 0x02; NLM_F_DUMP_INTR = 0x10.
+    @nlmsg_done 3
+    @nlm_f_multi 0x02
+    @nlm_f_dump_intr 0x10
+
+    defp data_msg(seq, flags \\ @nlm_f_multi) do
+      %Message{type: @rtm_newlink, flags: flags, seq: seq, payload: <<0::128>>}
+    end
+
+    test "a DONE carrying a negative dump_done_errno is an error, not success" do
+      # -ENOMEM (-12): the kernel aborted the dump partway; the collected
+      # messages are an incomplete snapshot.
+      done = %Message{
+        type: @nlmsg_done,
+        flags: @nlm_f_multi,
+        seq: 7,
+        payload: <<-12::native-signed-32>>
+      }
+
+      assert {:halt, {:error, %Error{errno: :enomem, code: 12}}} =
+               Request.consume([data_msg(7), done], 7, [])
+    end
+
+    test "a DONE with errno 0 terminates the dump successfully" do
+      done = %Message{
+        type: @nlmsg_done,
+        flags: @nlm_f_multi,
+        seq: 7,
+        payload: <<0::native-signed-32>>
+      }
+
+      msg = data_msg(7)
+      assert {:halt, {:ok, [^msg]}} = Request.consume([msg, done], 7, [])
+    end
+
+    test "an empty-payload DONE (old kernels) still terminates successfully" do
+      done = %Message{type: @nlmsg_done, flags: @nlm_f_multi, seq: 7, payload: <<>>}
+
+      msg = data_msg(7)
+      assert {:halt, {:ok, [^msg]}} = Request.consume([msg, done], 7, [])
+    end
+
+    test "NLM_F_DUMP_INTR on a data message aborts with :dump_interrupted" do
+      interrupted = data_msg(7, @nlm_f_multi ||| @nlm_f_dump_intr)
+
+      assert {:halt, {:error, :dump_interrupted}} =
+               Request.consume([data_msg(7), interrupted], 7, [])
+    end
+
+    test "NLM_F_DUMP_INTR on the DONE aborts with :dump_interrupted" do
+      done = %Message{
+        type: @nlmsg_done,
+        flags: @nlm_f_multi ||| @nlm_f_dump_intr,
+        seq: 7,
+        payload: <<0::native-signed-32>>
+      }
+
+      assert {:halt, {:error, :dump_interrupted}} =
+               Request.consume([data_msg(7), done], 7, [])
+    end
   end
 end

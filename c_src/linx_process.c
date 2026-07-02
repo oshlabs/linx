@@ -422,7 +422,9 @@ static void free_request(struct request *r)
 }
 
 /* Decode a binary or string ETF term into a freshly malloc'd NUL-terminated
- * C string. */
+ * C string. Rejects embedded NUL bytes: every consumer treats the result as
+ * a C path/arg, so "<validated>\0<smuggled>" would silently truncate at the
+ * NUL and defeat any string-based validation done on the Elixir side. */
 static int decode_string(const char *buf, int *idx, char **out)
 {
 	int type, sz;
@@ -435,7 +437,8 @@ static int decode_string(const char *buf, int *idx, char **out)
 
 	if (type == ERL_BINARY_EXT) {
 		long got;
-		if (ei_decode_binary(buf, idx, *out, &got) < 0) {
+		if (ei_decode_binary(buf, idx, *out, &got) < 0 ||
+		    memchr(*out, '\0', (size_t)got) != NULL) {
 			free(*out);
 			*out = NULL;
 			return -1;
@@ -445,8 +448,10 @@ static int decode_string(const char *buf, int *idx, char **out)
 	}
 
 	/* A string of all-ASCII bytes can arrive as STRING_EXT (a list of
-	 * small ints in disguise). Decode either way. */
-	if (ei_decode_string(buf, idx, *out) < 0) {
+	 * small ints in disguise). Decode either way. ei_decode_string
+	 * writes sz chars + NUL; an embedded NUL shows as a short strlen. */
+	if (ei_decode_string(buf, idx, *out) < 0 ||
+	    strlen(*out) != (size_t)sz) {
 		free(*out);
 		*out = NULL;
 		return -1;
@@ -739,36 +744,69 @@ static int decode_request(const uint8_t *buf, int len, struct request *req)
 /* The agent and target share a given namespace iff their /proc/<pid>/ns/<type>
  * files point at the same inode. Used to skip no-op setns calls -- entering
  * the namespace you're already in returns EINVAL on some kernels (notably
- * the user namespace), and is wasteful even where it doesn't. */
-static int same_namespace(pid_t target, const char *proc_name)
+ * the user namespace), and is wasteful even where it doesn't. The target's
+ * side resolves through `target_dirfd` (an open fd on /proc/<pid>), so it
+ * cannot race against pid reuse. */
+static int same_namespace(int target_dirfd, const char *proc_name)
 {
-	char self_path[64], target_path[64];
+	char self_path[64], ns_rel[32];
 	snprintf(self_path, sizeof self_path, "/proc/self/ns/%s", proc_name);
-	snprintf(target_path, sizeof target_path, "/proc/%d/ns/%s",
-		 (int)target, proc_name);
+	snprintf(ns_rel, sizeof ns_rel, "ns/%s", proc_name);
 
 	struct stat ss, ts;
-	if (stat(self_path, &ss) < 0 || stat(target_path, &ts) < 0)
+	if (stat(self_path, &ss) < 0 ||
+	    fstatat(target_dirfd, ns_rel, &ts, 0) < 0)
 		return 0;
 	return ss.st_ino == ts.st_ino && ss.st_dev == ts.st_dev;
 }
 
+/* Upper bound on NS_INFO entries (excluding the NULL sentinel). */
+#define NS_MAX 8
+_Static_assert(sizeof(NS_INFO) / sizeof(NS_INFO[0]) - 1 <= NS_MAX,
+	       "NS_MAX must cover every NS_INFO entry");
+
 static int enter_target_namespaces(const struct request *req)
 {
-	for (const struct ns_info *info = NS_INFO; info->atom; info++) {
+	/* Pin the target's identity ONCE: an fd on /proc/<pid> is bound to
+	 * that specific process incarnation. If the target dies and the
+	 * kernel recycles the pid, openat() through this fd fails (ESRCH/
+	 * ENOENT) instead of resolving into the imposter's namespaces.
+	 * Rebuilding "/proc/<pid>/ns/<type>" per iteration had a TOCTOU:
+	 * a mid-loop pid reuse spliced together the namespaces of two
+	 * different processes (silently, in all_ns mode, via the ENOENT
+	 * skip). */
+	char proc_path[64];
+	snprintf(proc_path, sizeof proc_path, "/proc/%d", (int)req->target);
+
+	int dirfd = open(proc_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+	if (dirfd < 0) {
+		emit_error(errno, "open_ns_proc");
+		return -1;
+	}
+
+	/* Phase 1: open every wanted namespace fd before the first setns, so
+	 * a target death mid-sequence can never yield a partial join -- the
+	 * held fds keep the namespaces alive even if the target exits before
+	 * phase 2. */
+	int fds[NS_MAX];
+	for (int i = 0; i < NS_MAX; i++)
+		fds[i] = -1;
+
+	for (int i = 0; i < NS_MAX && NS_INFO[i].atom; i++) {
+		const struct ns_info *info = &NS_INFO[i];
+
 		if (!req->all_ns && !(req->ns_flags & info->flag))
 			continue;
 
 		/* Already in the target's namespace of this type -- no setns
 		 * needed; some kernels return EINVAL for setns-to-self. */
-		if (same_namespace(req->target, info->proc))
+		if (same_namespace(dirfd, info->proc))
 			continue;
 
-		char path[64];
-		snprintf(path, sizeof path, "/proc/%d/ns/%s",
-			 (int)req->target, info->proc);
+		char ns_rel[32];
+		snprintf(ns_rel, sizeof ns_rel, "ns/%s", info->proc);
 
-		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		int fd = openat(dirfd, ns_rel, O_RDONLY | O_CLOEXEC);
 		if (fd < 0) {
 			if (req->all_ns && errno == ENOENT)
 				continue;
@@ -778,20 +816,39 @@ static int enter_target_namespaces(const struct request *req)
 			char stage[32];
 			snprintf(stage, sizeof stage, "open_ns_%s", info->atom);
 			emit_error(errno, stage);
-			return -1;
+			goto fail;
 		}
+		fds[i] = fd;
+	}
 
-		if (setns(fd, 0) < 0) {
-			int err = errno;
-			close(fd);
+	close(dirfd);
+	dirfd = -1;
+
+	/* Phase 2: join, in NS_INFO order -- user first (capabilities for the
+	 * later joins), pid last (applies to the upcoming fork). */
+	for (int i = 0; i < NS_MAX && NS_INFO[i].atom; i++) {
+		if (fds[i] < 0)
+			continue;
+
+		if (setns(fds[i], 0) < 0) {
 			char stage[32];
-			snprintf(stage, sizeof stage, "setns_%s", info->atom);
-			emit_error(err, stage);
-			return -1;
+			snprintf(stage, sizeof stage, "setns_%s",
+				 NS_INFO[i].atom);
+			emit_error(errno, stage);
+			goto fail;
 		}
-		close(fd);
+		close(fds[i]);
+		fds[i] = -1;
 	}
 	return 0;
+
+fail:
+	if (dirfd >= 0)
+		close(dirfd);
+	for (int i = 0; i < NS_MAX; i++)
+		if (fds[i] >= 0)
+			close(fds[i]);
+	return -1;
 }
 
 /* --- the cloned child --------------------------------------------------- */
@@ -1045,12 +1102,12 @@ static int child_read_command(int p2c_r, int c2p_w)
 {
 	/* Buffer needs to accommodate the largest checkpoint command. K2 cap
 	 * commands are tiny (a few u64s); seccomp_install carries a binary
-	 * cBPF blob -- 8 bytes per instruction, hundreds of instructions for
-	 * realistic filters. 8 KiB fits ~1000 instructions including ei
-	 * encoding overhead, well over any practical filter (the hand-
-	 * curated syscall tables have < 250 entries). The matching forward-
-	 * side buffer in await_proceed is the same size. */
-	uint8_t buf[8192];
+	 * cBPF blob -- 8 bytes per instruction. 32 KiB fits ~4000
+	 * instructions including ei encoding overhead, well over any
+	 * practical filter (the hand-curated syscall tables have < 250
+	 * entries), and matches the documented per-command ceiling and the
+	 * forward-side buffer in await_proceed. */
+	uint8_t buf[32768];
 	ssize_t len = read_frame_fd(p2c_r, buf, sizeof buf);
 	if (len < 0) {
 		/* EOF (errno == 0) means the parent closed p2c without
@@ -1381,13 +1438,19 @@ static int await_proceed(int pty_master, int p2c_w, int c2p_r)
 			continue;
 		}
 
-		/* Same 8 KiB ceiling as child_read_command -- this buffer
+		/* Same 32 KiB ceiling as child_read_command -- this buffer
 		 * has to accommodate {:seccomp_install, <<bpf>>} before
-		 * we forward it verbatim to p2c. */
-		uint8_t buf[8192];
+		 * we forward it verbatim to p2c. On EMSGSIZE the wire is
+		 * desynced (the length header was consumed, the body was
+		 * not), so surface an actionable error before giving up --
+		 * the owner sees :command_too_big instead of :agent_died. */
+		uint8_t buf[32768];
 		ssize_t len = read_frame(buf, sizeof buf);
-		if (len < 0)
+		if (len < 0) {
+			if (errno == EMSGSIZE)
+				emit_error(EMSGSIZE, "command_too_big");
 			return -1;
+		}
 
 		int idx = 0, version;
 		if (ei_decode_version((const char *)buf, &idx, &version) < 0)
@@ -1551,6 +1614,12 @@ static int read_post_running_command(struct post_running_cmd *cmd)
 			return -1;
 		if (type != ERL_BINARY_EXT)
 			return -1;
+		if (sz == 0) {
+			/* Empty write -- a valid no-op. malloc(0) may return
+			 * NULL, which would misclassify this as a bad frame. */
+			cmd->kind = CMD_NONE;
+			return 0;
+		}
 		cmd->bytes = malloc((size_t)sz);
 		if (!cmd->bytes)
 			return -1;
@@ -1605,6 +1674,91 @@ static void emit_pty_out(const uint8_t *bytes, size_t n)
 	emit_buff(&x);
 }
 
+/* Emit {:pty_in_dropped, n} on fd 4 -- the write-buffer cap was hit and
+ * `n` bytes of PTY input were discarded. Non-terminal: the session keeps
+ * running; the BEAM side surfaces it to the owner. */
+static void emit_pty_in_dropped(size_t n)
+{
+	ei_x_buff x;
+	ei_x_new_with_version(&x);
+	ei_x_encode_tuple_header(&x, 2);
+	ei_x_encode_atom(&x, "pty_in_dropped");
+	ei_x_encode_ulong(&x, (unsigned long)n);
+	emit_buff(&x);
+}
+
+/* Pending PTY input: bytes accepted from the BEAM but not yet written to
+ * the master. The tty input queue is only ~4 KiB and the master is
+ * O_NONBLOCK (the read paths need EAGAIN), so a paste larger than the
+ * queue hits EAGAIN mid-write; write_exact used to discard the tail
+ * silently. Buffer instead, and flush on POLLOUT. Capped so a workload
+ * that never reads its terminal can't grow the agent without bound --
+ * overflow drops the *new* bytes and reports {:pty_in_dropped, n}. */
+struct pty_wbuf {
+	uint8_t *data;
+	size_t off; /* first unwritten byte */
+	size_t len; /* bytes past data[off] */
+	size_t cap;
+};
+
+#define PTY_WBUF_MAX (1024 * 1024)
+
+static void pty_wbuf_append(struct pty_wbuf *w, const uint8_t *bytes, size_t n)
+{
+	if (n == 0)
+		return;
+
+	/* Compact first so cap math is on live bytes only. */
+	if (w->off > 0) {
+		memmove(w->data, w->data + w->off, w->len);
+		w->off = 0;
+	}
+
+	if (w->len + n > PTY_WBUF_MAX || w->len + n < w->len) {
+		emit_pty_in_dropped(n);
+		return;
+	}
+
+	if (w->len + n > w->cap) {
+		size_t cap = w->cap ? w->cap : 4096;
+		while (cap < w->len + n)
+			cap *= 2;
+		uint8_t *p = realloc(w->data, cap);
+		if (!p) {
+			emit_pty_in_dropped(n);
+			return;
+		}
+		w->data = p;
+		w->cap = cap;
+	}
+
+	memcpy(w->data + w->len, bytes, n);
+	w->len += n;
+}
+
+/* Write as much buffered input as the master accepts. Returns 0, or -1
+ * when the master is gone (EIO/EPIPE/EBADF) -- the caller stops PTY I/O;
+ * EAGAIN just leaves the rest for the next POLLOUT. */
+static int pty_wbuf_flush(struct pty_wbuf *w, int fd)
+{
+	while (w->len > 0) {
+		ssize_t n = write(fd, w->data + w->off, w->len);
+		if (n < 0) {
+			if (errno == EINTR)
+				continue;
+			if (errno == EAGAIN)
+				return 0;
+			w->len = 0;
+			w->off = 0;
+			return -1;
+		}
+		w->off += (size_t)n;
+		w->len -= (size_t)n;
+	}
+	w->off = 0;
+	return 0;
+}
+
 /* The post-exec supervise loop. Dispatches three kinds of BEAM commands
  * on CTL_IN -- {:signal, n} (forward to the workload), {:pty_in, binary}
  * (write to the PTY master, PTY mode only), and {:pty_winsize, {r, c,
@@ -1628,13 +1782,24 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 		{ .fd = pty_master, .events = POLLIN }, /* fd = -1 when no PTY */
 	};
 
+	/* Freed on every return path below (the workload-exited return and
+	 * the poll-failure return). */
+	struct pty_wbuf wbuf = { 0 };
+
 	for (;;) {
+		/* Ask for writability only while input is pending -- POLLOUT
+		 * on an idle PTY master is a busy loop. */
+		if (pfds[2].fd >= 0)
+			pfds[2].events =
+				POLLIN | (wbuf.len > 0 ? POLLOUT : 0);
+
 		int rc = poll(pfds, 3, -1);
 		if (rc < 0) {
 			if (errno == EINTR)
 				continue;
 			fprintf(stderr, "linx_process: poll: %s\n",
 				strerror(errno));
+			free(wbuf.data);
 			return;
 		}
 
@@ -1651,10 +1816,15 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 					kill(child_pid, cmd.signum);
 					break;
 				case CMD_PTY_IN:
-					if (pty_master >= 0)
-						(void)write_exact(pty_master,
-								  cmd.bytes,
-								  cmd.bytes_len);
+					if (pty_master >= 0 &&
+					    pfds[2].fd >= 0) {
+						pty_wbuf_append(&wbuf,
+								cmd.bytes,
+								cmd.bytes_len);
+						if (pty_wbuf_flush(&wbuf,
+								   pty_master) < 0)
+							pfds[2].fd = -1;
+					}
 					free(cmd.bytes);
 					break;
 				case CMD_PTY_WINSIZE:
@@ -1727,6 +1897,7 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 				else if (WIFSIGNALED(status))
 					emit_status_int("signaled",
 							WTERMSIG(status));
+				free(wbuf.data);
 				return;
 			}
 			/* Spurious SIGCHLD (not our child, or already
@@ -1757,6 +1928,15 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 				break;
 			}
 		}
+
+		/* Room opened in the tty input queue -- flush buffered
+		 * PTY input (see pty_wbuf above). */
+		if (pty_master >= 0 && pfds[2].fd >= 0 &&
+		    (pfds[2].revents & POLLOUT)) {
+			if (pty_wbuf_flush(&wbuf, pty_master) < 0)
+				pfds[2].fd = -1;
+		}
+
 		if (pty_master >= 0 &&
 		    pfds[2].revents & (POLLERR | POLLNVAL))
 			pfds[2].fd = -1;
