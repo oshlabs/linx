@@ -71,6 +71,9 @@ defmodule Linx.NFT.KernelAcceptanceTest do
       tcp dport 443 limit name "slow" accept
       quota over 100 mbytes accept
       limit rate 10/second accept
+      tcp flags syn tcp dport 8080 accept
+      tcp flags & (fin|syn|rst|ack) == syn accept
+      ct mark & 0xff == 0x4 accept
     }
   }
   """
@@ -85,7 +88,7 @@ defmodule Linx.NFT.KernelAcceptanceTest do
     {:ok, pulled} = Linx.Netfilter.pull(sock)
     table = pulled.tables[{:inet, @table}]
     assert table, "pushed table not found on pull"
-    assert length(table.chains["input"].rules) == 10
+    assert length(table.chains["input"].rules) == 13
 
     # The pipapo set survived with its interval+concat flags.
     ranges = table.sets["svc_ranges"]

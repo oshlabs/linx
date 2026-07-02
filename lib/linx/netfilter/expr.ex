@@ -176,6 +176,7 @@ defmodule Linx.Netfilter.Expr do
   defp payload_alias(:ip6_hoplimit), do: {:network, 7, 1}
   defp payload_alias(:tcp_sport), do: {:transport, 0, 2}
   defp payload_alias(:tcp_dport), do: {:transport, 2, 2}
+  defp payload_alias(:tcp_flags), do: {:transport, 13, 1}
   defp payload_alias(:udp_sport), do: {:transport, 0, 2}
   defp payload_alias(:udp_dport), do: {:transport, 2, 2}
   defp payload_alias(:icmp_type), do: {:transport, 0, 1}

@@ -890,6 +890,14 @@ defmodule Linx.NFT.Parser do
         {target, rest2} = parse_vmap_target(rest, state)
         {{:vmap, lhs, target, lhs_meta(lhs)}, rest2}
 
+      # `tcp flags & (syn|ack) == syn` — a masked comparison: the
+      # loaded value is ANDed with the mask before the compare.
+      [{:amp, amp_meta} | rest] ->
+        {mask, rest2} = parse_single_value(rest, state)
+        {op, rest3} = parse_match_op(rest2)
+        {rhs, rest4} = parse_value(rest3, state)
+        {{:match, {:masked, lhs, mask, amp_meta}, op, rhs, lhs_meta(lhs)}, rest4}
+
       _ ->
         {op, rest} = parse_match_op(tokens)
         {rhs, rest2} = parse_value(rest, state)
@@ -968,7 +976,13 @@ defmodule Linx.NFT.Parser do
   defp parse_match_op([{:lte, _} | rest]), do: {:lte, rest}
   defp parse_match_op([{:gt, _} | rest]), do: {:gt, rest}
   defp parse_match_op([{:gte, _} | rest]), do: {:gte, rest}
-  defp parse_match_op(tokens), do: {:eq, tokens}
+
+  # Juxtaposition — nft's OP_IMPLICIT. Semantically equality for
+  # ordinary values, but a BITMASK TEST for flag-like fields
+  # (`tcp flags syn` means "the syn bit is set", while
+  # `tcp flags == syn` means "exactly syn"); the compiler decides
+  # per field kind.
+  defp parse_match_op(tokens), do: {:implicit, tokens}
 
   # ---- specific action statements ----
 
@@ -1209,6 +1223,11 @@ defmodule Linx.NFT.Parser do
         {hi, rest3} = parse_single_value(rest2, state)
         {{:range, head, hi, value_meta(head)}, rest3}
 
+      # Bare OR-combination: `syn|ack` (flag values without parens).
+      [{:pipe, meta} | _] = rest ->
+        {parts, rest2} = parse_or_tail(rest, state, [head])
+        {{:or_list, parts, meta}, rest2}
+
       # Comma-separated list (only at value position; sets use {} braces).
       [{:comma, _} | _] = rest ->
         parse_value_list(head, rest, state)
@@ -1280,6 +1299,20 @@ defmodule Linx.NFT.Parser do
     {{:set_inline, elems, meta}, rest}
   end
 
+  # `(syn|ack)` — a parenthesized OR-combination of flag values
+  # (mask or comparison side of bitwise matches). A single
+  # parenthesized value is just that value.
+  defp parse_single_value([{:lparen, meta} | rest], state) do
+    {first, rest2} = parse_single_value(rest, state)
+    {parts, rest3} = parse_or_tail(rest2, state, [first])
+    rest4 = expect_punct!(rest3, :rparen, state, "`)` to close parenthesized value")
+
+    case parts do
+      [single] -> {single, rest4}
+      many -> {{:or_list, many, meta}, rest4}
+    end
+  end
+
   defp parse_single_value([{:identifier, name, meta} | rest], _state) do
     # Could be a symbolic value (`established`, `tcp`, an interface
     # name like `eth0`) or the start of a more complex value. We
@@ -1295,6 +1328,13 @@ defmodule Linx.NFT.Parser do
   defp parse_single_value([], state) do
     raise_eof!(state, "expected a value")
   end
+
+  defp parse_or_tail([{:pipe, _} | rest], state, acc) do
+    {next, rest2} = parse_single_value(rest, state)
+    parse_or_tail(rest2, state, acc ++ [next])
+  end
+
+  defp parse_or_tail(tokens, _state, acc), do: {acc, tokens}
 
   defp parse_brace_value_list([{:lbrace, _} | rest], state) do
     rest = skip_seps(rest)

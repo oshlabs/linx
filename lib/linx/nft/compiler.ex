@@ -570,8 +570,30 @@ defmodule Linx.NFT.Compiler do
     [load_expr, Expr.dynset(set, op: op, sreg_key: 1, timeout: timeout, exprs: stateful)]
   end
 
+  # Masked comparison: `tcp flags & (syn|ack) == syn`,
+  # `ct mark & 0xff == 0x4` — load, AND with the mask, compare.
+  defp compile_stmt({:match, {:masked, lhs, mask_ast, _}, op, rhs, meta}, _family, state) do
+    {load_expr, kind} = compile_lhs(lhs, state)
+    {width, order} = mask_shape!(kind, meta, state)
+
+    mask = flag_int!(mask_ast, kind, state)
+    value = flag_int!(rhs, kind, state)
+    op = if op == :implicit, do: :eq, else: op
+
+    List.wrap(load_expr) ++
+      [
+        Expr.bitwise(int_bin(mask, width, order), int_bin(0, width, order)),
+        Expr.cmp(op, int_bin(value, width, order))
+      ]
+  end
+
   defp compile_stmt({:match, lhs, op, rhs, _meta}, _family, state) do
     {load_expr, value_kind} = compile_lhs(lhs, state)
+
+    # nft's OP_IMPLICIT: plain equality for ordinary fields; flag
+    # fields get their bitmask-test semantics in compile_rhs.
+    op = if op == :implicit and value_kind not in [:tcp_flags], do: :eq, else: op
+
     cmp_or_lookup = compile_rhs(rhs, op, value_kind, state)
     List.wrap(load_expr) ++ List.wrap(cmp_or_lookup)
   end
@@ -830,7 +852,9 @@ defmodule Linx.NFT.Compiler do
   # Returns {dependency_exprs, updated_ctx} for one rule statement.
   defp proto_deps({:match, lhs, op, rhs, _meta}, ctx, state) do
     {deps, ctx} = lhs_proto_deps(lhs, ctx, state)
-    {deps, pin_from_match(lhs, op, rhs, ctx)}
+    # Implicit juxtaposition pins the context the same as `==`.
+    pin_op = if op == :implicit, do: :eq, else: op
+    {deps, pin_from_match(lhs, pin_op, rhs, ctx)}
   end
 
   defp proto_deps({:vmap, lhs, _target, _meta}, ctx, state),
@@ -840,6 +864,9 @@ defmodule Linx.NFT.Compiler do
     do: lhs_proto_deps(key_lhs, ctx, state)
 
   defp proto_deps(_stmt, ctx, _state), do: {[], ctx}
+
+  defp lhs_proto_deps({:masked, inner, _mask, _meta}, ctx, state),
+    do: lhs_proto_deps(inner, ctx, state)
 
   defp lhs_proto_deps({:concat_lhs, parts, _meta}, ctx, state) do
     Enum.reduce(parts, {[], ctx}, fn part, {deps, ctx} ->
@@ -1014,6 +1041,7 @@ defmodule Linx.NFT.Compiler do
 
   defp payload_dispatch(:tcp, :sport), do: {:ok, :tcp_sport, {:int, 2}}
   defp payload_dispatch(:tcp, :dport), do: {:ok, :tcp_dport, {:int, 2}}
+  defp payload_dispatch(:tcp, :flags), do: {:ok, :tcp_flags, :tcp_flags}
   defp payload_dispatch(:udp, :sport), do: {:ok, :udp_sport, {:int, 2}}
   defp payload_dispatch(:udp, :dport), do: {:ok, :udp_dport, {:int, 2}}
   defp payload_dispatch(:ip, :saddr), do: {:ok, :ip_saddr, :ipv4}
@@ -1054,6 +1082,33 @@ defmodule Linx.NFT.Compiler do
   defp ct_kind(_), do: nil
 
   # ---- RHS ----
+
+  @tcp_flag_names %{
+    "fin" => 0x01,
+    "syn" => 0x02,
+    "rst" => 0x04,
+    "psh" => 0x08,
+    "ack" => 0x10,
+    "urg" => 0x20,
+    "ecn" => 0x40,
+    "cwr" => 0x80
+  }
+
+  # `tcp flags syn` (implicit) — a BITMASK TEST: flags & syn != 0,
+  # exactly nft's OP_IMPLICIT semantics for flag fields.
+  defp compile_rhs(value, :implicit, :tcp_flags, state) do
+    bits = flag_int!(value, :tcp_flags, state)
+
+    [
+      Expr.bitwise(<<bits>>, <<0>>),
+      Expr.cmp(:neq, <<0>>)
+    ]
+  end
+
+  # `tcp flags == syn` (explicit) — an EXACT comparison.
+  defp compile_rhs(value, op, :tcp_flags, state) when op in [:eq, :neq] do
+    Expr.cmp(op, <<flag_int!(value, :tcp_flags, state)>>)
+  end
 
   defp compile_rhs(value, op, :icmp_type, state) do
     value
@@ -1447,6 +1502,46 @@ defmodule Linx.NFT.Compiler do
       "compiler: selector kind #{inspect(kind)} cannot be used in a concatenation"
     )
   end
+
+  # A flag/mask operand: integer, symbolic name (per field kind),
+  # or a `(a|b|c)` OR-combination.
+  defp flag_int!({:integer, n, _}, _kind, _state), do: n
+
+  defp flag_int!({:identifier, name, meta}, kind, state) do
+    table = if kind == :tcp_flags, do: @tcp_flag_names, else: %{}
+
+    case Map.fetch(table, name) do
+      {:ok, bits} ->
+        bits
+
+      :error ->
+        case parse_int_keyword(name) do
+          {:ok, n} -> n
+          :error -> raise_at!(state, meta, "compiler: unknown flag/value `#{name}`")
+        end
+    end
+  end
+
+  defp flag_int!({:or_list, parts, _}, kind, state) do
+    Enum.reduce(parts, 0, fn part, acc -> bor(acc, flag_int!(part, kind, state)) end)
+  end
+
+  defp flag_int!(other, _kind, state) do
+    raise_at!(state, value_meta(other), "compiler: expected a flag value or (a|b) combination")
+  end
+
+  # Byte width and byte order for masked comparisons, per field kind.
+  defp mask_shape!(:tcp_flags, _meta, _state), do: {1, :big}
+  defp mask_shape!({:int, w}, _meta, _state), do: {w, :big}
+  defp mask_shape!({:int, w, :host}, _meta, _state), do: {w, :native}
+  defp mask_shape!(:ct_state, _meta, _state), do: {4, :big}
+
+  defp mask_shape!(kind, meta, state) do
+    raise_at!(state, meta, "compiler: `& mask` is not supported on #{kind_name(kind)} fields")
+  end
+
+  defp int_bin(n, width, :big), do: <<n::big-size(width * 8)>>
+  defp int_bin(n, width, :native), do: <<n::native-size(width * 8)>>
 
   defp ifindex!(name, state, meta) do
     case :net.if_name2index(String.to_charlist(name)) do

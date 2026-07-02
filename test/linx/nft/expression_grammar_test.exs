@@ -128,8 +128,8 @@ defmodule Linx.NFT.ExpressionGrammarTest do
 
       assert [
                {:match,
-                {:concat_lhs, [{:payload, :ip, :daddr, _}, {:payload, :tcp, :dport, _}], _}, :eq,
-                {:set_ref, "svc", _}, _}
+                {:concat_lhs, [{:payload, :ip, :daddr, _}, {:payload, :tcp, :dport, _}], _},
+                :implicit, {:set_ref, "svc", _}, _}
              ] = stmts
     end
 

@@ -263,6 +263,12 @@ defmodule Linx.NFT.RuntimeCompiler do
 
   defp build_stmt({:match, lhs, op, rhs, _meta}, state) do
     {load_quoted, value_kind} = build_lhs(lhs, state)
+    # nft's OP_IMPLICIT juxtaposition is plain equality here (the
+    # interpolation path doesn't cover flag fields). The static
+    # compiler adds protocol-context guards; the runtime path
+    # deliberately doesn't yet — interpolated rulesets stay a thin
+    # value-substitution layer.
+    op = if op == :implicit, do: :eq, else: op
     cmp_quoted = build_rhs(rhs, op, value_kind, state)
     [load_quoted, cmp_quoted]
   end

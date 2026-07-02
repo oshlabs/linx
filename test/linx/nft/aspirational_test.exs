@@ -47,7 +47,8 @@ defmodule Linx.NFT.AspirationalTest do
     "a5_kube_style.nft",
     "a6_ssh_ratelimit.nft",
     "a7_guest_quota.nft",
-    "a8_pipapo_ranges.nft"
+    "a8_pipapo_ranges.nft",
+    "a9_tcp_flags.nft"
   ]
 
   # What each pending fixture is waiting on (kept in sync with

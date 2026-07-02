@@ -138,7 +138,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:payload, :tcp, :dport, _}, :eq, {:integer, 22, _}, _},
+               {:match, {:payload, :tcp, :dport, _}, :implicit, {:integer, 22, _}, _},
                {:verdict, :accept, _}
              ] = stmts
     end
@@ -160,8 +160,8 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:payload, :ip, :saddr, _}, :eq, {:address, :cidr_v4, "10.0.0.0/8", _},
-                _},
+               {:match, {:payload, :ip, :saddr, _}, :implicit,
+                {:address, :cidr_v4, "10.0.0.0/8", _}, _},
                {:verdict, :drop, _}
              ] = stmts
     end
@@ -172,7 +172,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:payload, :tcp, :dport, _}, :eq,
+               {:match, {:payload, :tcp, :dport, _}, :implicit,
                 {:range, {:integer, 8000, _}, {:integer, 9000, _}, _}, _},
                {:verdict, :accept, _}
              ] = stmts
@@ -184,7 +184,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:payload, :tcp, :dport, _}, :eq,
+               {:match, {:payload, :tcp, :dport, _}, :implicit,
                 {:set_inline,
                  [
                    {:integer, 22, _},
@@ -201,7 +201,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:payload, :tcp, :dport, _}, :eq, {:set_ref, "open_ports", _}, _},
+               {:match, {:payload, :tcp, :dport, _}, :implicit, {:set_ref, "open_ports", _}, _},
                {:verdict, :accept, _}
              ] = stmts
     end
@@ -212,7 +212,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:meta, :iifname, _}, :eq, {:string, "lo", _}, _},
+               {:match, {:meta, :iifname, _}, :implicit, {:string, "lo", _}, _},
                {:verdict, :accept, _}
              ] = stmts
     end
@@ -223,7 +223,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:meta, :oifname, _}, :eq, {:string, "eth0", _}, _},
+               {:match, {:meta, :oifname, _}, :implicit, {:string, "eth0", _}, _},
                {:verdict, :accept, _}
              ] = stmts
     end
@@ -234,7 +234,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:meta, :iifname, _}, :eq,
+               {:match, {:meta, :iifname, _}, :implicit,
                 {:set_inline, [{:string, "eth0", _}, {:string, "wg0", _}], _}, _},
                {:verdict, :accept, _}
              ] = stmts
@@ -246,7 +246,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:meta, :iif, _}, :eq, {:string, "eth0", _}, _},
+               {:match, {:meta, :iif, _}, :implicit, {:string, "eth0", _}, _},
                {:verdict, :accept, _}
              ] = stmts
     end
@@ -257,7 +257,7 @@ defmodule Linx.NFT.ParserTest do
       assert [{:table, _, _, [{:chain, _, _, [{:rule, stmts, _, _}], _}], _}] = parse!(src)
 
       assert [
-               {:match, {:ct, :state, _}, :eq,
+               {:match, {:ct, :state, _}, :implicit,
                 {:set_inline, [{:identifier, "established", _}, {:identifier, "related", _}], _},
                 _},
                {:verdict, :accept, _}

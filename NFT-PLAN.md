@@ -144,9 +144,13 @@ official grammar layers precedence structurally (C-style cascade,
 concat → expr`, duplicated for RHS with extra forms. Recursive descent
 mirrors this as one function per layer.
 
-- [ ] Binary operators `&`, `|`, `^`, `<<`, `>>` with the official structural
-  precedence; parenthesized sub-expressions. (Needed for `ct mark & 0xff`,
-  `tcp flags & (syn|ack) == syn`.)
+- [x] Bitwise mask matching (2026-07-02, kernel-verified): `tcp flags syn`
+  (implicit bit test → bitwise+cmp_neq_0), `tcp flags == syn` (exact),
+  `tcp flags & (fin|syn|rst|ack) == syn` and `ct mark & 0xff == 0x4`
+  (masked compare); `(a|b|c)` and bare `a|b` OR-combinations of flag
+  values; tcp-flag and protocol symbolic names. The full `&|^<<>>`
+  arithmetic-expression cascade (folding non-flag binops) is still open,
+  but the load-bearing flag/mask forms real firewalls use now work.
 - [ ] **Implicit relational**: `expr rhs_expr` juxtaposition = `OP_IMPLICIT`
   (we already default to `:eq`; extend to set membership and flag semantics).
 - [ ] Explicit `value/mask` forms (`ct mark 0x4/0xff`).
@@ -183,9 +187,9 @@ mirrors this as one function per layer.
   `hour`, `cgroup`, `pkttype`, `priority`, `random`, `secmark`, …) and full
   `ct` key set (direction-qualified forms: `ct original saddr`, `ct reply
   proto-dst`, `ct helper`, `ct expiration`, `ct count over N`, …).
-- [~] **Typed symbol resolution in the compiler** (started 2026-07-02:
-  icmp/icmpv6 type tables keyed by LHS kind; iif/oif names via
-  if_name2index; ct-state names in vmap keys) — our analog of
+- [~] **Typed symbol resolution in the compiler** (2026-07-02: icmp/icmpv6
+  type tables keyed by LHS kind; iif/oif names via if_name2index; ct-state
+  names in vmap keys; tcp-flag names) — our analog of
   `symbol_parse` against the contextual datatype: service names (`ssh`,
   `https` — decide: ship a frozen table or read `/etc/services`), icmp type/
   code names, ct states/statuses, dscp/ecn names, priority class names,

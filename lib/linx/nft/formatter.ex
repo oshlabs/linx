@@ -358,6 +358,20 @@ defmodule Linx.NFT.Formatter do
     end
   end
 
+  # ---- tcp flags exact: payload(transport+13) + cmp (no mask).
+  # Must precede the generic payload+cmp clause below. ----
+  defp do_format_exprs(
+         [
+           %Expr{name: :payload, data: %{base: :transport, offset: 13, len: 1}},
+           %Expr{name: :cmp, data: %{op: op, value: <<value>>}}
+           | rest
+         ],
+         acc
+       ) do
+    text = "tcp flags #{render_op(op) || "=="} #{render_tcp_flags(value)}"
+    do_format_exprs(rest, [text | acc])
+  end
+
   # ---- payload + cmp ----
   defp do_format_exprs(
          [
@@ -371,6 +385,30 @@ defmodule Linx.NFT.Formatter do
     rhs = render_payload_value(v, b, o, l)
     stmt = stmt(field, render_op(op), rhs)
     do_format_exprs(rest, [stmt | acc])
+  end
+
+  # ---- tcp flags: payload(transport+13) + bitwise + cmp ----
+  defp do_format_exprs(
+         [
+           %Expr{name: :payload, data: %{base: :transport, offset: 13, len: 1}},
+           %Expr{name: :bitwise, data: %{mask: <<mask>>}},
+           %Expr{name: :cmp, data: %{op: cmp_op, value: <<value>>}}
+           | rest
+         ],
+         acc
+       ) do
+    text =
+      case {single_tcp_flag(mask), cmp_op, value} do
+        # flags & BIT != 0 — the implicit bit-test form.
+        {flag, :neq, 0} when is_binary(flag) ->
+          "tcp flags #{flag}"
+
+        _ ->
+          "tcp flags & #{render_tcp_flags(mask)} #{render_op(cmp_op) || "=="} " <>
+            render_tcp_flags(value)
+      end
+
+    do_format_exprs(rest, [text | acc])
   end
 
   # ---- payload + bitwise + cmp → CIDR ----
@@ -542,6 +580,33 @@ defmodule Linx.NFT.Formatter do
     states = bits_to_ct_states(bits)
     rhs = if length(states) == 1, do: Enum.at(states, 0), else: "{ #{Enum.join(states, ", ")} }"
     do_format_exprs(rest, [stmt("ct state", render_op(op), rhs) | acc])
+  end
+
+  # ---- ct <key> & mask op value (non-state; state has its own
+  # bitmask clause above) ----
+  defp do_format_exprs(
+         [
+           %Expr{name: :ct, data: %{key: key}},
+           %Expr{name: :bitwise, data: %{mask: mask}},
+           %Expr{name: :cmp, data: %{op: op, value: v}}
+           | rest
+         ],
+         acc
+       )
+       when key != :state do
+    # ct mark is host-byte-order on the wire.
+    {m, val} =
+      if key == :mark do
+        {decode_uint_native(mask), decode_uint_native(v)}
+      else
+        {:binary.decode_unsigned(mask), :binary.decode_unsigned(v)}
+      end
+
+    text =
+      "ct #{key} & 0x#{Integer.to_string(m, 16)} #{render_op(op) || "=="} " <>
+        "0x#{Integer.to_string(val, 16)}"
+
+    do_format_exprs(rest, [text | acc])
   end
 
   defp do_format_exprs(
@@ -740,6 +805,40 @@ defmodule Linx.NFT.Formatter do
        ["#{rate}/#{unit}"] ++
        if(burst != default_burst, do: ["burst #{burst} #{type}"], else: []))
     |> Enum.join(" ")
+  end
+
+  @tcp_flag_bits [
+    {"fin", 0x01},
+    {"syn", 0x02},
+    {"rst", 0x04},
+    {"psh", 0x08},
+    {"ack", 0x10},
+    {"urg", 0x20},
+    {"ecn", 0x40},
+    {"cwr", 0x80}
+  ]
+
+  defp single_tcp_flag(mask) do
+    case Enum.find(@tcp_flag_bits, fn {_n, b} -> b == mask end) do
+      {name, _} -> name
+      nil -> nil
+    end
+  end
+
+  defp render_tcp_flags(bits) do
+    names = for {name, bit} <- @tcp_flag_bits, Bitwise.band(bits, bit) != 0, do: name
+    covered = Enum.reduce(@tcp_flag_bits, 0, fn {_n, b}, acc -> Bitwise.bor(acc, b) end)
+
+    cond do
+      bits == 0 or Bitwise.band(bits, Bitwise.bnot(covered)) != 0 ->
+        "0x" <> Integer.to_string(bits, 16)
+
+      length(names) == 1 ->
+        hd(names)
+
+      true ->
+        "(" <> Enum.join(names, "|") <> ")"
+    end
   end
 
   defp render_log_flags(sorted) do
