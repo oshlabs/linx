@@ -383,6 +383,41 @@ defmodule Linx.Netfilter.Expr do
   end
 
   @doc """
+  Quota expression (`nft_quota`) — an inline per-rule byte quota.
+  With `over: false` (the default, nft's `until`) the rule matches
+  while consumption is under `:bytes`; with `over: true` it starts
+  matching once the quota is exceeded.
+
+  Options:
+
+    * `:bytes` — the quota, in bytes (required).
+    * `:over` — invert the match sense (default `false`).
+    * `:used` — initial consumed bytes (default `0`), useful when
+      restoring state.
+
+  For a quota shared across rules, declare a
+  `Linx.Netfilter.Object` of kind `:quota` and reference it with
+  `objref/2` instead.
+  """
+  @spec quota(keyword()) :: t()
+  def quota(opts) when is_list(opts) do
+    bytes = Keyword.fetch!(opts, :bytes)
+
+    unless is_integer(bytes) and bytes > 0 do
+      raise ArgumentError, "quota :bytes must be a positive integer, got: #{inspect(bytes)}"
+    end
+
+    %__MODULE__{
+      name: :quota,
+      data: %{
+        bytes: bytes,
+        over: Keyword.get(opts, :over, false),
+        used: Keyword.get(opts, :used, 0)
+      }
+    }
+  end
+
+  @doc """
   Dynamic-set update expression (`nft_dynset`) — adds, updates, or
   deletes an element in a `dynamic`-flagged set at packet-match
   time, keyed by whatever a preceding load expression put in

@@ -239,12 +239,14 @@ meta-set, ct-set (partial), reject, queue (bare).
 
 ## Phase 3 — table-level objects & declarations
 
-- [~] Named objects (2026-07-02): `counter` objects land end-to-end —
-  declaration → `%Object{}` in the table, NEWOBJ batch encoding, `counter
-  name "x"` → new `Expr.objref/2` (nft_objref). Still open: `quota`
-  (incl. `over`/`until`, used bytes), `limit`, `secmark`, `synproxy`,
-  `ct helper`, `ct timeout`, `ct expectation` — per-kind grammars,
-  NFTA_OBJ_DATA encodings, and validation.
+- [~] Named objects (2026-07-02): `counter`, `quota` (over/until, used,
+  1024-based units — nft accepts only bytes/kbytes/mbytes, verified against
+  v1.1.6; gbytes stays a parse-side convenience), and `limit` objects land
+  end-to-end with kind-specific body grammars, NFTA_OBJ_DATA encodings,
+  `Expr.objref/2` references (`quota name`/`limit name`/`counter name`),
+  and the inline `quota [over] N <unit>` statement (`Expr.quota/1`,
+  nft_quota) — all kernel-verified. Still open: `secmark`, `synproxy`,
+  `ct helper`, `ct timeout`, `ct expectation`.
 - [ ] Flowtables: full body (`hook … priority …; devices = {…}; flags
   offload; counter`) + compiler lowering + `flow add @ft` statement.
 - [ ] Set/map declarations: missing options — `policy performance|memory`,
@@ -268,12 +270,12 @@ glob(3) expansion, directories skipped, FIFOs rejected); `define` binds an
 scopes opened by table/chain blocks) and `$var` resolves at parse time, with
 did-you-mean suggestions.
 
-- [ ] `include`: resolve in `parse_file/1` relative to the including file,
-  add `:include_paths` option, glob support, depth cap 16, cycle detection
-  (nft only has the depth cap — we can do better), errors located at the
-  `include` line. Sigil mode: either forbid (clear error, current behavior)
-  or resolve relative to the `.ex` file — decide during implementation;
-  forbidding is the safe default.
+- [x] `include` (2026-07-02): resolved during `parse/2`/`parse_file/2` —
+  relative to the including file's directory, then `:include_paths`; glob
+  support (empty wildcard OK, missing literal path is a located error);
+  depth cap 16; cycle detection; errors inside included files point at the
+  included file; defines flow across include boundaries in file order.
+  Sigil mode forbids includes with a clear error.
 - [~] `define` (2026-07-02): top-level defines with parse-time substitution,
   order-dependent references, duplicate-define errors, use-site error
   locations, and did-you-mean on unknown `$var`. Still open: `redefine`/

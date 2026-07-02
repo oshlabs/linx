@@ -45,7 +45,8 @@ defmodule Linx.NFT.AspirationalTest do
     "a3_server_vmap.nft",
     "a4_nat_router.nft",
     "a5_kube_style.nft",
-    "a6_ssh_ratelimit.nft"
+    "a6_ssh_ratelimit.nft",
+    "a7_guest_quota.nft"
   ]
 
   # What each pending fixture is waiting on (kept in sync with

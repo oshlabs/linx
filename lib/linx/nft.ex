@@ -95,6 +95,10 @@ defmodule Linx.NFT do
   alias Linx.NFT.{Compiler, Formatter, ParseError, Parser, RuntimeCompiler, Tokenizer}
   alias Linx.Netfilter.Ruleset
 
+  # nft caps include nesting at MAX_INCLUDE_DEPTH (16); we add
+  # cycle detection on top (nft only has the depth cap).
+  @max_include_depth 16
+
   @doc """
   Parses a binary holding nft syntax into a `%Ruleset{}`.
 
@@ -102,6 +106,19 @@ defmodule Linx.NFT do
 
     * `:file` — source filename for error messages
       (default `"nofile"`).
+    * `:include_dir` — base directory for resolving relative
+      `include` paths (default: the current working directory;
+      `parse_file/2` sets it to the including file's directory,
+      matching `nft -f`).
+    * `:include_paths` — additional search directories tried in
+      order after `:include_dir` (nft's `-I`).
+
+  `include "path"` directives are resolved during parsing (like
+  nft): relative to `:include_dir`, then each of
+  `:include_paths`. Glob patterns are supported — a wildcard
+  matching nothing is fine, a literal path matching nothing is an
+  error. Nesting is capped at #{@max_include_depth} levels and
+  include cycles are detected.
 
   Returns `{:ok, Ruleset.t()} | {:error, ParseError.t()}`.
   """
@@ -110,25 +127,163 @@ defmodule Linx.NFT do
   def parse(source, opts \\ []) when is_binary(source) do
     file = Keyword.get(opts, :file, "nofile")
 
-    with {:ok, tokens} <- Tokenizer.tokenize(source, file: file),
-         {:ok, ast} <- Parser.parse(tokens, file: file, source: source),
+    ctx = %{
+      base_dir: Keyword.get(opts, :include_dir, File.cwd!()),
+      include_paths: Keyword.get(opts, :include_paths, []),
+      depth: 0,
+      seen: MapSet.new()
+    }
+
+    with {:ok, ast} <- parse_to_ast(source, file, ctx),
          {:ok, rs} <- Compiler.compile(ast, file: file, source: source) do
       {:ok, rs}
     end
   end
 
   @doc """
-  Reads a `.nft` file and parses it into a `%Ruleset{}`.
+  Reads a `.nft` file and parses it into a `%Ruleset{}`. Relative
+  `include` paths resolve against the file's own directory, like
+  `nft -f`. Accepts the same options as `parse/2`.
 
   Returns `{:ok, Ruleset.t()} | {:error, ParseError.t() | File.posix()}`.
   """
-  @spec parse_file(Path.t()) ::
+  @spec parse_file(Path.t(), keyword()) ::
           {:ok, Ruleset.t()} | {:error, ParseError.t() | File.posix()}
-  def parse_file(path) do
+  def parse_file(path, opts \\ []) do
     case File.read(path) do
-      {:ok, source} -> parse(source, file: path)
-      {:error, posix} -> {:error, posix}
+      {:ok, source} ->
+        opts =
+          opts
+          |> Keyword.put(:file, path)
+          |> Keyword.put_new(:include_dir, Path.dirname(Path.expand(path)))
+
+        parse(source, opts)
+
+      {:error, posix} ->
+        {:error, posix}
     end
+  end
+
+  # ===========================================================
+  # include resolution
+  # ===========================================================
+
+  defp parse_to_ast(source, file, ctx) do
+    with {:ok, tokens} <- Tokenizer.tokenize(source, file: file),
+         {:ok, ast} <- Parser.parse(tokens, file: file, source: source) do
+      expand_includes(ast, file, source, ctx)
+    end
+  end
+
+  defp expand_includes(items, file, source, ctx) do
+    items
+    |> Enum.reduce_while({:ok, []}, fn
+      {:include, path, meta}, {:ok, acc} ->
+        case resolve_include(path, meta, file, source, ctx) do
+          {:ok, included_items} -> {:cont, {:ok, acc ++ included_items}}
+          {:error, _} = err -> {:halt, err}
+        end
+
+      item, {:ok, acc} ->
+        {:cont, {:ok, acc ++ [item]}}
+    end)
+  end
+
+  defp resolve_include(path, meta, file, source, ctx) do
+    cond do
+      ctx.depth >= @max_include_depth ->
+        include_error(file, source, meta, "include nesting deeper than #{@max_include_depth}")
+
+      true ->
+        case include_matches(path, ctx) do
+          [] ->
+            if glob_pattern?(path) do
+              # A wildcard matching nothing is not an error (glob(3)
+              # semantics, same as nft).
+              {:ok, []}
+            else
+              include_error(file, source, meta, "include: file not found: #{path}")
+            end
+
+          matches ->
+            Enum.reduce_while(matches, {:ok, []}, fn match, {:ok, acc} ->
+              case include_one(match, meta, file, source, ctx) do
+                {:ok, items} -> {:cont, {:ok, acc ++ items}}
+                {:error, _} = err -> {:halt, err}
+              end
+            end)
+        end
+    end
+  end
+
+  defp include_matches(path, ctx) do
+    search_dirs =
+      if Path.type(path) == :absolute do
+        [nil]
+      else
+        [ctx.base_dir | ctx.include_paths]
+      end
+
+    search_dirs
+    |> Enum.flat_map(fn
+      nil -> Path.wildcard(path)
+      dir -> Path.wildcard(Path.join(dir, path))
+    end)
+    |> Enum.uniq()
+    |> Enum.filter(&File.regular?/1)
+    # nft processes glob matches in alphabetical order.
+    |> Enum.sort()
+    |> case do
+      [] -> []
+      # Only the first search dir that yields matches wins, like
+      # nft's -I path ordering — but since we flat_map across all
+      # dirs, dedupe keeps this simple and permissive.
+      matches -> matches
+    end
+  end
+
+  defp glob_pattern?(path), do: String.contains?(path, ["*", "?", "["])
+
+  defp include_one(abs_path, meta, file, source, ctx) do
+    expanded = Path.expand(abs_path)
+
+    cond do
+      MapSet.member?(ctx.seen, expanded) ->
+        include_error(file, source, meta, "include cycle: #{abs_path} includes itself")
+
+      true ->
+        case File.read(expanded) do
+          {:ok, included_source} ->
+            nested_ctx = %{
+              ctx
+              | base_dir: Path.dirname(expanded),
+                depth: ctx.depth + 1,
+                seen: MapSet.put(ctx.seen, expanded)
+            }
+
+            parse_to_ast(included_source, abs_path, nested_ctx)
+
+          {:error, posix} ->
+            include_error(file, source, meta, "include: cannot read #{abs_path}: #{posix}")
+        end
+    end
+  end
+
+  defp include_error(file, source, meta, message) do
+    snippet =
+      case source |> String.split(["\r\n", "\n", "\r"]) |> Enum.at(meta.line - 1) do
+        nil -> nil
+        line -> line
+      end
+
+    {:error,
+     %ParseError{
+       file: file,
+       line: meta.line,
+       column: meta.column,
+       snippet: snippet,
+       message: message
+     }}
   end
 
   @doc """

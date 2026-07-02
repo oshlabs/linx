@@ -240,6 +240,12 @@ defmodule Linx.Netfilter.Encoder do
             {nfta_counter_packets(), Wire.u64_be(Map.get(data, :packets, 0))}
           ]
 
+        {:quota, data} when is_map(data) ->
+          encode_expr_data(:quota, data)
+
+        {:limit, data} when is_map(data) ->
+          encode_expr_data(:limit, data)
+
         {kind, _} ->
           raise ArgumentError,
                 "NEWOBJ encoding for #{inspect(kind)} objects is not implemented yet"
@@ -1300,6 +1306,16 @@ defmodule Linx.Netfilter.Encoder do
     ]
     |> maybe_add(not is_nil(effective_code), fn ->
       {nfta_reject_icmp_code(), <<effective_code::8>>}
+    end)
+  end
+
+  defp encode_expr_data(:quota, %{bytes: bytes, over: over, used: used}) do
+    [{nfta_quota_bytes(), Wire.u64_be(bytes)}]
+    |> maybe_add(used > 0, fn ->
+      {nfta_quota_consumed(), Wire.u64_be(used)}
+    end)
+    |> maybe_add(over, fn ->
+      {nfta_quota_flags(), Wire.u32_be(nft_quota_f_inv())}
     end)
   end
 

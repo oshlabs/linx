@@ -707,15 +707,76 @@ defmodule Linx.NFT.CompilerTest do
              end)
     end
 
-    test "named quota objects still raise a clear error" do
-      err =
-        compile_err("""
+    test "named quota objects land with byte amounts normalised" do
+      rs =
+        compile!("""
         table inet t {
-          quota q { }
+          quota monthly {
+            over 500 mbytes used 1 kbytes
+          }
+          chain c {
+            quota name "monthly" drop
+          }
         }
         """)
 
-      assert err.message =~ "named `quota` objects"
+      table = rs.tables[{:inet, "t"}]
+      obj = table.objects[{:quota, "monthly"}]
+      assert obj.data == %{bytes: 500 * 1024 * 1024, over: true, used: 1024}
+
+      [rule] = table.chains["c"].rules
+
+      assert Enum.any?(rule.expressions, fn
+               %Linx.Netfilter.Expr{name: :objref, data: %{name: "monthly", kind: :quota}} ->
+                 true
+
+               _ ->
+                 false
+             end)
+    end
+
+    test "named limit objects land with the limit-statement data shape" do
+      rs =
+        compile!("""
+        table inet t {
+          limit slow {
+            rate 10/second burst 9 packets
+          }
+          chain c {
+            limit name "slow" accept
+          }
+        }
+        """)
+
+      table = rs.tables[{:inet, "t"}]
+      obj = table.objects[{:limit, "slow"}]
+      assert obj.data == %{rate: 10, per: 1, burst: 9, type: :packets, over: false}
+
+      [rule] = table.chains["c"].rules
+
+      assert Enum.any?(rule.expressions, fn
+               %Linx.Netfilter.Expr{name: :objref, data: %{name: "slow", kind: :limit}} -> true
+               _ -> false
+             end)
+    end
+
+    test "inline quota statement lowers to an nft_quota expression" do
+      rs =
+        compile!("""
+        table inet t {
+          chain c { quota over 1 gbytes drop }
+        }
+        """)
+
+      [rule] = rs.tables[{:inet, "t"}].chains["c"].rules
+
+      assert Enum.any?(rule.expressions, fn
+               %Linx.Netfilter.Expr{name: :quota, data: %{bytes: 1_073_741_824, over: true}} ->
+                 true
+
+               _ ->
+                 false
+             end)
     end
 
     test "flowtable raises a clear error" do

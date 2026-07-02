@@ -184,11 +184,16 @@ defmodule Linx.NFT.Compiler do
     Enum.reduce(body, rs, &compile_table_item(&1, family, name, &2, state))
   end
 
+  # Includes are resolved (and spliced out) by `Linx.NFT.parse/2`
+  # before compilation; one reaching the compiler means the sigil
+  # path, where a file include inside inline Elixir source has no
+  # sensible base directory.
   defp compile_top({:include, _path, meta}, _rs, state) do
     raise_at!(
       state,
       meta,
-      "compiler: `include` is not yet supported (use `parse_file/1`)"
+      "compiler: `include` is not supported inside the ~NFT sigil — " <>
+        "use Linx.NFT.parse_file/2 for file-based rulesets"
     )
   end
 
@@ -368,6 +373,38 @@ defmodule Linx.NFT.Compiler do
     )
   end
 
+  defp compile_table_item({:object, :quota, name, opts, meta}, family, table_name, rs, state) do
+    data = %{
+      bytes: Keyword.fetch!(opts, :bytes),
+      over: Keyword.get(opts, :over, false),
+      used: Keyword.get(opts, :used, 0)
+    }
+
+    {:ok, obj} = Linx.Netfilter.Object.new(:quota, name, data)
+
+    wrap_add!(
+      rs,
+      fn rs -> Ruleset.add_object!(rs, {family, table_name}, obj) end,
+      meta,
+      state,
+      "add_object"
+    )
+  end
+
+  defp compile_table_item({:object, :limit, name, opts, meta}, family, table_name, rs, state) do
+    limit_stmt = Keyword.fetch!(opts, :limit)
+    [%Expr{name: :limit, data: data}] = compile_stmt(limit_stmt, family, state)
+    {:ok, obj} = Linx.Netfilter.Object.new(:limit, name, data)
+
+    wrap_add!(
+      rs,
+      fn rs -> Ruleset.add_object!(rs, {family, table_name}, obj) end,
+      meta,
+      state,
+      "add_object"
+    )
+  end
+
   defp compile_table_item({:object, kind, _name, _opts, meta}, _family, _table_name, _rs, state) do
     raise_at!(
       state,
@@ -525,6 +562,23 @@ defmodule Linx.NFT.Compiler do
     {load_expr, value_kind} = compile_lhs(lhs, state)
     cmp_or_lookup = compile_rhs(rhs, op, value_kind, state)
     List.wrap(load_expr) ++ List.wrap(cmp_or_lookup)
+  end
+
+  # `quota name "obj"` / `limit name "obj"` — table-level object
+  # references (counter name goes through its own clause below).
+  defp compile_stmt({:objref, kind, name, _meta}, _family, _state) do
+    [Expr.objref(name, kind)]
+  end
+
+  # Inline (per-rule) quota: `quota over 500 mbytes drop`.
+  defp compile_stmt({:quota, opts, _meta}, _family, _state) do
+    [
+      Expr.quota(
+        bytes: Keyword.fetch!(opts, :bytes),
+        over: Keyword.get(opts, :over, false),
+        used: Keyword.get(opts, :used, 0)
+      )
+    ]
   end
 
   # `counter name "hits"` — reference to a table-level named

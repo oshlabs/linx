@@ -117,9 +117,40 @@ defmodule Linx.NFT.Formatter do
     "counter #{name} {\n  packets #{packets} bytes #{bytes}\n}"
   end
 
+  defp format_object(%Linx.Netfilter.Object{kind: :quota, name: name, data: data}) do
+    "quota #{name} {\n  #{render_quota_body(data)}\n}"
+  end
+
+  defp format_object(%Linx.Netfilter.Object{kind: :limit, name: name, data: data}) do
+    "limit #{name} {\n  #{render_limit_body(data)}\n}"
+  end
+
   defp format_object(%Linx.Netfilter.Object{kind: kind, name: name}) do
     "# <unsupported object: #{kind} #{name}>"
   end
+
+  # `[over ]N <unit>[ used N <unit>]` — nft's quota body/statement
+  # form (1024-based units; largest unit that divides evenly).
+  defp render_quota_body(%{bytes: bytes} = data) do
+    over = if data[:over], do: "over ", else: ""
+    used = Map.get(data, :used, 0)
+    used_text = if used > 0, do: " used #{render_bytes(used)}", else: ""
+    "#{over}#{render_bytes(bytes)}#{used_text}"
+  end
+
+  # nft's quota grammar accepts only bytes/kbytes/mbytes (no
+  # gbytes — verified against nft v1.1.6), so mbytes is the
+  # largest unit ever emitted; `gbytes` stays a parse-side
+  # convenience.
+  defp render_bytes(n) when is_integer(n) and n > 0 do
+    cond do
+      rem(n, 1024 ** 2) == 0 -> "#{div(n, 1024 ** 2)} mbytes"
+      rem(n, 1024) == 0 -> "#{div(n, 1024)} kbytes"
+      true -> "#{n} bytes"
+    end
+  end
+
+  defp render_bytes(n), do: "#{n} bytes"
 
   # ===========================================================
   # Chains
@@ -562,27 +593,12 @@ defmodule Linx.NFT.Formatter do
 
   # ---- limit ----
   defp do_format_exprs([%Expr{name: :limit, data: data} | rest], acc) do
-    %{rate: rate, per: per, burst: burst, type: type, over: over} = data
+    do_format_exprs(rest, ["limit #{render_limit_body(data)}" | acc])
+  end
 
-    unit =
-      case per do
-        1 -> "second"
-        60 -> "minute"
-        3600 -> "hour"
-        86_400 -> "day"
-        604_800 -> "week"
-        other -> "#{other}s"
-      end
-
-    default_burst = if type == :packets, do: 5, else: 0
-
-    text =
-      ["limit rate"] ++
-        if(over, do: ["over"], else: []) ++
-        ["#{rate}/#{unit}"] ++
-        if(burst != default_burst, do: ["burst #{burst} #{type}"], else: [])
-
-    do_format_exprs(rest, [Enum.join(text, " ") | acc])
+  # ---- quota (inline) ----
+  defp do_format_exprs([%Expr{name: :quota, data: data} | rest], acc) do
+    do_format_exprs(rest, ["quota #{render_quota_body(data)}" | acc])
   end
 
   # ---- reject ----
@@ -673,6 +689,28 @@ defmodule Linx.NFT.Formatter do
   end
 
   defp render_vmap_key(key, kt), do: render_set_element(key, kt)
+
+  # `rate [over] N/unit [burst B packets|bytes]` — shared between
+  # the limit statement and limit-object bodies.
+  defp render_limit_body(%{rate: rate, per: per, burst: burst, type: type, over: over}) do
+    unit =
+      case per do
+        1 -> "second"
+        60 -> "minute"
+        3600 -> "hour"
+        86_400 -> "day"
+        604_800 -> "week"
+        other -> "#{other}s"
+      end
+
+    default_burst = if type == :packets, do: 5, else: 0
+
+    (["rate"] ++
+       if(over, do: ["over"], else: []) ++
+       ["#{rate}/#{unit}"] ++
+       if(burst != default_burst, do: ["burst #{burst} #{type}"], else: []))
+    |> Enum.join(" ")
+  end
 
   defp render_log_flags(sorted) do
     cond do

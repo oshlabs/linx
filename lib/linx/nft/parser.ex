@@ -458,7 +458,7 @@ defmodule Linx.NFT.Parser do
 
     case rest do
       [{:lbrace, _} | rest2] ->
-        {opts, rest3} = parse_object_body(skip_seps(rest2), state, [])
+        {opts, rest3} = parse_object_kind_body(kind, skip_seps(rest2), state)
         rest4 = expect_punct!(rest3, :rbrace, state, "`}` to close #{kind} body")
         {{:object, kind, name, opts, meta}, rest4}
 
@@ -467,6 +467,71 @@ defmodule Linx.NFT.Parser do
         # the statement separator.
         {opts, rest2} = parse_object_inline(rest, state, [])
         {{:object, kind, name, opts, meta}, rest2}
+    end
+  end
+
+  # Object bodies are kind-specific grammars in nft, not key/value
+  # soup: `quota { over 500 mbytes used 0 bytes }`,
+  # `limit { rate 10/second burst 5 packets }`. Counter keeps the
+  # generic key/value form (`packets N bytes N`).
+  defp parse_object_kind_body(:quota, tokens, state) do
+    {opts, rest} = parse_quota_spec(tokens, state)
+    {opts, skip_seps(rest)}
+  end
+
+  defp parse_object_kind_body(:limit, [{:identifier, "rate", _} | _] = tokens, state) do
+    meta = peek_meta(tokens)
+    {stmt, rest} = parse_limit_stmt(tokens, meta, state)
+    {[limit: stmt], skip_seps(rest)}
+  end
+
+  defp parse_object_kind_body(:limit, [tok | _], state) do
+    raise_unexpected!(state, tok, "expected `rate` in limit object body")
+  end
+
+  defp parse_object_kind_body(_kind, tokens, state) do
+    parse_object_body(tokens, state, [])
+  end
+
+  # `[over|until] N <unit> [used N <unit>]` — shared by quota
+  # objects and inline quota statements. Amounts normalise to
+  # bytes (1024-based multipliers, like nft). Consumes no
+  # statement separators: in rule position a newline ends the
+  # statement, so the `used` clause must sit on the same line.
+  defp parse_quota_spec(tokens, state) do
+    {over, tokens} =
+      case tokens do
+        [{:identifier, "over", _} | r] -> {true, r}
+        [{:identifier, "until", _} | r] -> {false, r}
+        _ -> {false, tokens}
+      end
+
+    {bytes, tokens} = parse_byte_amount(tokens, state)
+
+    {used, tokens} =
+      case tokens do
+        [{:identifier, "used", _} | r] ->
+          parse_byte_amount(r, state)
+
+        _ ->
+          {0, tokens}
+      end
+
+    {[over: over, bytes: bytes, used: used], tokens}
+  end
+
+  @byte_units %{"bytes" => 1, "kbytes" => 1024, "mbytes" => 1024 ** 2, "gbytes" => 1024 ** 3}
+
+  defp parse_byte_amount(tokens, state) do
+    {n, rest} = expect_integer!(tokens, state, "byte amount")
+
+    case rest do
+      [{:identifier, unit, _} | rest2] when is_map_key(@byte_units, unit) ->
+        {n * Map.fetch!(@byte_units, unit), rest2}
+
+      _ ->
+        # Bare integer means bytes.
+        {n, rest}
     end
   end
 
@@ -632,8 +697,27 @@ defmodule Linx.NFT.Parser do
   defp parse_stmt([{:identifier, "log", meta} | rest], state),
     do: parse_log_stmt(rest, meta, state)
 
+  # `limit name "obj"` — reference to a named limit object;
+  # `limit rate ...` — inline limit.
+  defp parse_stmt([{:identifier, "limit", meta}, {:identifier, "name", _} | rest], state) do
+    {ref, rest2} = expect_object_name!(rest, state, "limit object name")
+    {{:objref, :limit, ref, meta}, rest2}
+  end
+
   defp parse_stmt([{:identifier, "limit", meta} | rest], state),
     do: parse_limit_stmt(rest, meta, state)
+
+  # `quota name "obj"` — reference to a named quota object;
+  # `quota [over|until] N <unit>` — inline quota.
+  defp parse_stmt([{:identifier, "quota", meta}, {:identifier, "name", _} | rest], state) do
+    {ref, rest2} = expect_object_name!(rest, state, "quota object name")
+    {{:objref, :quota, ref, meta}, rest2}
+  end
+
+  defp parse_stmt([{:identifier, "quota", meta} | rest], state) do
+    {opts, rest2} = parse_quota_spec(rest, state)
+    {{:quota, opts, meta}, rest2}
+  end
 
   defp parse_stmt([{:identifier, "dnat", meta} | rest], state),
     do: parse_nat_stmt(rest, :dnat, meta, state)
@@ -1304,6 +1388,16 @@ defmodule Linx.NFT.Parser do
 
       [] ->
         raise_eof!(state, "expected #{what}")
+    end
+  end
+
+  # An object-reference name: `counter name "hits"` / `quota name q`.
+  defp expect_object_name!(tokens, state, what) do
+    case tokens do
+      [{:string, name, _} | rest] -> {name, rest}
+      [{:identifier, name, _} | rest] -> {name, rest}
+      [tok | _] -> raise_unexpected!(state, tok, "expected #{what}")
+      [] -> raise_eof!(state, "expected #{what}")
     end
   end
 

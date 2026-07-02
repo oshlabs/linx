@@ -235,6 +235,14 @@ defmodule Linx.Netfilter.Wire do
   defmacro nft_object_ct_expect, do: 9
   defmacro nft_object_synproxy, do: 10
 
+  # NFTA_QUOTA_* (nft_quota expression / quota objects)
+  defmacro nfta_quota_bytes, do: 1
+  defmacro nfta_quota_flags, do: 2
+  defmacro nfta_quota_consumed, do: 4
+
+  # NFT_QUOTA_F_*
+  defmacro nft_quota_f_inv, do: 1
+
   # NFTA_DYNSET_* (nft_dynset expression — runtime set updates)
   defmacro nfta_dynset_set_name, do: 1
   defmacro nfta_dynset_set_id, do: 2

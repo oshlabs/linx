@@ -28,6 +28,14 @@ defmodule Linx.NFT.KernelAcceptanceTest do
       packets 0 bytes 0
     }
 
+    quota monthly {
+      over 500 mbytes
+    }
+
+    limit slow {
+      rate 10/second burst 9 packets
+    }
+
     set svc {
       type ipv4_addr . inet_service
       elements = { 10.96.0.1 . 443, 10.96.0.10 . 53 }
@@ -52,6 +60,9 @@ defmodule Linx.NFT.KernelAcceptanceTest do
       ip daddr . tcp dport @svc counter accept
       tcp dport 22 ct state new add @ratelimit { ip saddr limit rate over 3/minute } drop
       tcp dport 22 counter name "hits" accept
+      tcp dport 80 quota name "monthly" drop
+      tcp dport 443 limit name "slow" accept
+      quota over 100 mbytes accept
       limit rate 10/second accept
     }
   }
@@ -67,7 +78,7 @@ defmodule Linx.NFT.KernelAcceptanceTest do
     {:ok, pulled} = Linx.Netfilter.pull(sock)
     table = pulled.tables[{:inet, @table}]
     assert table, "pushed table not found on pull"
-    assert length(table.chains["input"].rules) == 6
+    assert length(table.chains["input"].rules) == 9
 
     # Cleanup: push an empty replacement... deleting the table is
     # enough — replace-mode push of a ruleset without the table

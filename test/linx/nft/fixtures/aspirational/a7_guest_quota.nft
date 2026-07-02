@@ -1,0 +1,25 @@
+#!/usr/sbin/nft -f
+# Guest-network accounting: shared quota and limit objects.
+flush ruleset
+
+table inet guest {
+	quota monthly {
+		over 10240 mbytes
+	}
+
+	limit uploads {
+		rate 1024/second burst 9 packets
+	}
+
+	counter guest_total {
+		packets 0 bytes 0
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		iifname "guest0" counter name "guest_total" accept
+		iifname "guest0" quota name "monthly" drop
+		oifname "guest0" limit name "uploads" accept
+		iifname "guest0" quota over 100 mbytes log prefix "guest heavy: " accept
+	}
+}
