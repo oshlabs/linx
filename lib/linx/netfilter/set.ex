@@ -7,7 +7,7 @@ defmodule Linx.Netfilter.Set do
   saying "if source IP is in @blocklist drop" hashes once into the
   set rather than scanning a hundred individual rules.
   Concatenations, dynamic sets, and intervals are not yet
-  implemented (see `docs/netfilter/DESIGN.md`).
+  implemented (see `docs/netfilter/netfilter-overview.md`).
 
   ## Fields
 

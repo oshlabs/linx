@@ -74,12 +74,12 @@ defmodule Linx do
   Several subsystems expose the `pull` / `diff` / `push(mode: :reconcile)` /
   `subscribe` template: describe desired kernel state and converge onto it,
   idempotent and self-healing across drift, crashes, and reboots. `Linx.Reconcile`
-  is the thin opt-in loop on top; see `docs/reconcile/EXAMPLES.md`.
+  is the thin opt-in loop on top; see `docs/reconcile/reconcile-examples.md`.
 
   ## Getting started
 
   The [README](readme.html) has installation and the headline composition;
-  each subsystem's `docs/<subsystem>/EXAMPLES.md` has runnable, copy-paste
+  each subsystem's `docs/<subsystem>/<subsystem>-examples.md` has runnable, copy-paste
   recipes.
   """
 end

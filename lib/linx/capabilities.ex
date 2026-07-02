@@ -69,7 +69,7 @@ defmodule Linx.Capabilities do
   would otherwise grant more, because `:cap_setpcap` was dropped
   from `:bounding` too.
 
-  See `docs/capabilities/EXAMPLES.md` for end-to-end recipes.
+  See `docs/capabilities/capabilities-examples.md` for end-to-end recipes.
   """
 
   require Logger
