@@ -1357,8 +1357,8 @@ defmodule Linx.NFT.Compiler do
 
   defp literal_for_set!({:identifier, s, _}, _, _), do: s
 
-  defp literal_for_set!({:range, lo, hi, _}, _, _state),
-    do: {:range, literal_int!(lo), literal_int!(hi)}
+  defp literal_for_set!({:range, lo, hi, _}, _key_type, state),
+    do: {:range, literal_bound!(lo, state), literal_bound!(hi, state)}
 
   # Concatenated element against a concatenated key type: resolve
   # each part against its field's type. The stored element is a
@@ -1472,11 +1472,30 @@ defmodule Linx.NFT.Compiler do
   defp kind_name(:ct_state), do: "a ct state"
   defp kind_name(other), do: inspect(other)
 
+  # A range bound: integer ports/marks, or addresses
+  # (`10.0.0.1-10.0.0.9`); the encoder turns address strings into
+  # key bytes.
+  defp literal_bound!({:integer, n, _}, _state), do: n
+  defp literal_bound!({:time, n, _}, _state), do: n
+  defp literal_bound!({:address, :ipv4, addr, _}, _state), do: addr
+  defp literal_bound!({:address, :ipv6, addr, _}, _state), do: addr
+
+  defp literal_bound!(node, state) do
+    raise_at!(state, value_meta(node), "compiler: unsupported range bound")
+  end
+
   defp literal_int!({:integer, n, _}), do: n
   defp literal_int!({:time, n, _}), do: n
 
   defp literal_int!(node),
     do: raise_at!(%{file: "?", original_source: ""}, value_meta(node), "expected integer literal")
+
+  # Resolved-element (post-literal_for_set!) interval detection:
+  # {:range, lo, hi} tuples, CIDR strings, or concat parts thereof.
+  defp interval_element?({:range, _, _}), do: true
+  defp interval_element?(v) when is_binary(v), do: String.contains?(v, "/")
+  defp interval_element?(parts) when is_list(parts), do: Enum.any?(parts, &interval_element?/1)
+  defp interval_element?(_), do: false
 
   defp range_or_cidr?({:range, _, _, _}), do: true
   defp range_or_cidr?({:address, :cidr_v4, _, _}), do: true
@@ -1507,6 +1526,17 @@ defmodule Linx.NFT.Compiler do
       opts
       |> Keyword.get(:elements, [])
       |> Enum.map(&literal_for_set!(&1, type, state))
+
+    # nft's evaluation rejects range/CIDR elements in sets without
+    # the interval flag ("interval expression not allowed") — the
+    # kernel-side backends need to know up front.
+    if :interval not in flags and Enum.any?(elements, &interval_element?/1) do
+      raise_at!(
+        state,
+        meta,
+        "compiler: set `#{name}` has range/CIDR elements — add `flags interval`"
+      )
+    end
 
     Set.new!(name,
       key_type: type,

@@ -154,9 +154,8 @@ mirrors this as one function per layer.
   (`type ipv4_addr . inet_service`), elements (`10.96.0.1 . 443`), and
   rule-side selectors (`ip daddr . tcp dport @svc` → consecutive reg32
   loads from register 8 + lookup) land end-to-end, kernel-verified.
-  Interval parts inside concatenations (pipapo ranges, KEY_END,
-  DESC_CONCAT + NFT_SET_CONCAT flag) remain open — rejected with a clear
-  error (Phase 6).
+  Interval concatenations (pipapo) landed later the same day — see the
+  Phase 6 entry.
 - [ ] **Prefix as generic operator**: `expr / NUM` beyond address CIDR
   (string prefixes come via wildcard strings; see below).
 - [ ] Ranges over any ordered type, including symbolic ranges deferred to the
@@ -318,8 +317,15 @@ accepted syntax reaches the kernel. Includes the two items parked in
 
 - [ ] Ranges over host-byte-order fields (`meta mark 10-20`) — byteorder
   conversion before range/set lookup.
-- [ ] Concatenated set types + pipapo-backed concatenated ranges
-  (`NFTA_SET_ELEM_KEY_END`, kernel ≥ 5.6).
+- [x] Concatenated set types + pipapo-backed concatenated ranges
+  (2026-07-02, kernel-verified): `flags interval` concat sets emit
+  NFT_SET_CONCAT + NFTA_SET_DESC_CONCAT field bounds, and each interval
+  element is a single entry carrying NFTA_SET_ELEM_KEY (per-field start
+  bounds) + NFTA_SET_ELEM_KEY_END (end bounds), 4-byte-padded per field —
+  `10.0.0.0/24 . 80-443` works end-to-end (kernel ≥ 5.6). Address ranges
+  (`10.0.0.1-10.0.0.9`) now work as elements and concat parts too, and the
+  compiler enforces nft's "range elements need `flags interval`" rule with
+  a located error.
 - [x] **Protocol-context dependency generation** (2026-07-02): per-rule
   proto context in the compiler — transport matches materialise a
   `meta l4proto` guard (fixing a REAL bug: `tcp dport 22` previously also

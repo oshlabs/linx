@@ -233,25 +233,21 @@ defmodule Linx.Netfilter.Set.Element do
   end
 
   # Concatenated key element: one part per field, each checked
-  # against its field's type. Interval parts inside concatenations
-  # (pipapo ranges) are not supported yet.
+  # against its field's type. Range/CIDR parts are fine — with the
+  # `:interval` flag they become pipapo intervals (the encoder
+  # emits NFTA_SET_ELEM_KEY_END bounds).
   def check(parts, {:concat, types}) when is_list(parts) do
-    cond do
-      length(parts) != length(types) ->
-        {:error, {:concat_arity, length(parts), length(types)}}
-
-      Enum.any?(parts, &match?({:range, _, _}, &1)) ->
-        {:error, :concat_interval_not_supported}
-
-      true ->
-        parts
-        |> Enum.zip(types)
-        |> Enum.reduce_while(:ok, fn {part, type}, :ok ->
-          case check(part, type) do
-            :ok -> {:cont, :ok}
-            {:error, reason} -> {:halt, {:error, reason}}
-          end
-        end)
+    if length(parts) != length(types) do
+      {:error, {:concat_arity, length(parts), length(types)}}
+    else
+      parts
+      |> Enum.zip(types)
+      |> Enum.reduce_while(:ok, fn {part, type}, :ok ->
+        case check(part, type) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
     end
   end
 

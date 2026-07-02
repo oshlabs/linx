@@ -211,7 +211,7 @@ defmodule Linx.NFT.ExpressionGrammarTest do
              end)
     end
 
-    test "interval parts inside concatenations are still rejected" do
+    test "interval parts require the interval flag (nft's eval rule)" do
       src = """
       table inet t {
         set svc {
@@ -221,7 +221,47 @@ defmodule Linx.NFT.ExpressionGrammarTest do
       }
       """
 
-      assert {:error, %ParseError{}} = Linx.NFT.parse(src)
+      assert {:error, %ParseError{} = err} = Linx.NFT.parse(src)
+      assert Exception.message(err) =~ "flags interval"
+    end
+
+    test "interval concatenations (pipapo) parse and compile with mixed part shapes" do
+      src = """
+      table inet t {
+        set svc {
+          type ipv4_addr . inet_service
+          flags interval
+          elements = { 10.0.0.0/24 . 80-443, 192.168.1.5 . 22 }
+        }
+      }
+      """
+
+      {:ok, rs} = Linx.NFT.parse(src)
+      set = rs.tables[{:inet, "t"}].sets["svc"]
+
+      assert set.key_type == {:concat, [:ipv4_addr, :inet_service]}
+      assert :interval in set.flags
+
+      assert set.elements == [
+               ["10.0.0.0/24", {:range, 80, 443}],
+               ["192.168.1.5", 22]
+             ]
+    end
+
+    test "address ranges work as set elements and concat parts" do
+      src = """
+      table inet t {
+        set spans {
+          type ipv4_addr
+          flags interval
+          elements = { 10.0.0.1-10.0.0.9 }
+        }
+      }
+      """
+
+      {:ok, rs} = Linx.NFT.parse(src)
+      set = rs.tables[{:inet, "t"}].sets["spans"]
+      assert set.elements == [{:range, "10.0.0.1", "10.0.0.9"}]
     end
   end
 

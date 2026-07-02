@@ -41,6 +41,12 @@ defmodule Linx.NFT.KernelAcceptanceTest do
       elements = { 10.96.0.1 . 443, 10.96.0.10 . 53 }
     }
 
+    set svc_ranges {
+      type ipv4_addr . inet_service
+      flags interval
+      elements = { 10.0.0.0/24 . 80-443, 192.168.1.5 . 8000-9000 }
+    }
+
     set ratelimit {
       type ipv4_addr
       flags dynamic, timeout
@@ -58,6 +64,7 @@ defmodule Linx.NFT.KernelAcceptanceTest do
       ct state vmap { established : accept, invalid : drop }
       tcp dport vmap @dispatch
       ip daddr . tcp dport @svc counter accept
+      ip daddr . tcp dport @svc_ranges accept
       tcp dport 22 ct state new add @ratelimit { ip saddr limit rate over 3/minute } drop
       tcp dport 22 counter name "hits" accept
       tcp dport 80 quota name "monthly" drop
@@ -78,7 +85,12 @@ defmodule Linx.NFT.KernelAcceptanceTest do
     {:ok, pulled} = Linx.Netfilter.pull(sock)
     table = pulled.tables[{:inet, @table}]
     assert table, "pushed table not found on pull"
-    assert length(table.chains["input"].rules) == 9
+    assert length(table.chains["input"].rules) == 10
+
+    # The pipapo set survived with its interval+concat flags.
+    ranges = table.sets["svc_ranges"]
+    assert :interval in ranges.flags
+    assert :concat in ranges.flags
 
     # Cleanup: push an empty replacement... deleting the table is
     # enough — replace-mode push of a ruleset without the table

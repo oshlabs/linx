@@ -448,10 +448,18 @@ defmodule Linx.Netfilter.Encoder do
 
     {key_id, key_len} = Wire.set_type_info(key_type)
 
-    # Auto-set flags based on shape
+    # Auto-set flags based on shape. Interval sets over
+    # concatenated keys additionally need NFT_SET_CONCAT — the
+    # kernel picks the pipapo backend from INTERVAL|CONCAT plus the
+    # DESC_CONCAT field bounds (and rejects DESC_CONCAT without the
+    # flag). Plain concat sets stay ordinary hash sets: no flag, no
+    # desc (nft does exactly the same, evaluate.c:5300).
+    interval_concat? = match?({:concat, _}, key_type) and :interval in flags
+
     auto_flags =
       flags
       |> maybe_append_atom(data_type != nil, :map)
+      |> maybe_append_atom(interval_concat?, :concat)
 
     flags_int = Wire.set_flags_int(auto_flags)
 
@@ -496,17 +504,28 @@ defmodule Linx.Netfilter.Encoder do
       |> maybe_add(not is_nil(gc_interval), fn ->
         {nfta_set_gc_interval(), Wire.u32_be(gc_interval)}
       end)
-      |> maybe_add(not is_nil(size), fn ->
-        # Note on concatenated keys: nft sends NFTA_SET_DESC_CONCAT
-        # (+ the NFT_SET_CONCAT flag) ONLY for interval concat sets
-        # (evaluate.c:5300, pipapo ranges). A plain concat set is
-        # just a hash set whose key length is the padded sum of the
-        # fields — the kernel EINVALs a DESC_CONCAT without the
-        # flag. We only support non-interval concats so far, so no
-        # DESC_CONCAT is emitted; it lands together with pipapo
-        # support.
-        desc = Attr.encode([{nfta_set_desc_size(), Wire.u32_be(size)}])
-        {nfta_set_desc(), desc}
+      |> maybe_add(not is_nil(size) or interval_concat?, fn ->
+        size_attrs =
+          if is_nil(size), do: [], else: [{nfta_set_desc_size(), Wire.u32_be(size)}]
+
+        concat_attrs =
+          if interval_concat? do
+            # NFTA_SET_DESC_CONCAT: the unpadded per-field lengths,
+            # one LIST_ELEM per field, so pipapo knows the field
+            # boundaries of the concatenated key.
+            fields =
+              key_type
+              |> Wire.concat_field_lens()
+              |> Enum.map(fn len ->
+                {nfta_list_elem(), Attr.encode([{nfta_set_field_len(), Wire.u32_be(len)}])}
+              end)
+
+            [{nfta_set_desc_concat(), Attr.encode(fields)}]
+          else
+            []
+          end
+
+        {nfta_set_desc(), Attr.encode(size_attrs ++ concat_attrs)}
       end)
 
     payload = Codec.encode_nfgenmsg(family, 0) <> Attr.encode(base_attrs)
@@ -595,21 +614,60 @@ defmodule Linx.Netfilter.Encoder do
         _ -> [{nfta_set_elem_data(), encode_set_elem_data(data_term, data_type)}]
       end
 
-    case {normalize_key(key_term, key_type), interval?} do
-      {{:scalar, key_bin}, false} ->
-        [set_elem_entry(key_bin, data_attrs, false)]
+    case {key_type, key_term, interval?} do
+      # Interval element of a CONCATENATED set (pipapo): one entry
+      # carrying NFTA_SET_ELEM_KEY (the per-field start bounds) and
+      # NFTA_SET_ELEM_KEY_END (the end bounds), each field padded
+      # to the 4-byte register size. Scalar fields are the
+      # degenerate interval [v, v]. Kernel >= 5.6.
+      {{:concat, types}, parts, true} when is_list(parts) ->
+        {start_bins, end_bins} =
+          parts
+          |> Enum.zip(types)
+          |> Enum.map(fn {part, type} ->
+            case normalize_key(part, type) do
+              {:scalar, bin} -> {pad_key4(bin), pad_key4(bin)}
+              {:range, lo, hi} -> {pad_key4(lo), pad_key4(hi)}
+            end
+          end)
+          |> Enum.unzip()
 
-      {{:scalar, key_bin}, true} ->
-        [set_elem_entry(key_bin, data_attrs, false) | interval_end_entries(key_bin)]
+        [
+          set_elem_entry_with_end(
+            IO.iodata_to_binary(start_bins),
+            IO.iodata_to_binary(end_bins),
+            data_attrs
+          )
+        ]
 
-      {{:range, lo_bin, hi_bin}, true} ->
-        [set_elem_entry(lo_bin, data_attrs, false) | interval_end_entries(hi_bin)]
+      _ ->
+        case {normalize_key(key_term, key_type), interval?} do
+          {{:scalar, key_bin}, false} ->
+            [set_elem_entry(key_bin, data_attrs, false)]
 
-      {{:range, _, _}, false} ->
-        raise ArgumentError,
-              "range/CIDR set element #{inspect(key_term)} requires a set with the " <>
-                ":interval flag"
+          {{:scalar, key_bin}, true} ->
+            [set_elem_entry(key_bin, data_attrs, false) | interval_end_entries(key_bin)]
+
+          {{:range, lo_bin, hi_bin}, true} ->
+            [set_elem_entry(lo_bin, data_attrs, false) | interval_end_entries(hi_bin)]
+
+          {{:range, _, _}, false} ->
+            raise ArgumentError,
+                  "range/CIDR set element #{inspect(key_term)} requires a set with the " <>
+                    ":interval flag"
+        end
     end
+  end
+
+  # A pipapo interval entry: start key + end key in one element.
+  defp set_elem_entry_with_end(start_bin, end_bin, data_attrs) do
+    inner_attrs =
+      [
+        {nfta_set_elem_key(), Attr.encode([{nfta_data_value(), start_bin}])},
+        {nfta_set_elem_key_end(), Attr.encode([{nfta_data_value(), end_bin}])}
+      ] ++ data_attrs
+
+    {nfta_list_elem(), Attr.encode(inner_attrs)}
   end
 
   # The end-of-interval marker: key = hi + 1 (the end bound is exclusive on

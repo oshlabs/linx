@@ -1325,11 +1325,11 @@ defmodule Linx.NFT.Parser do
     end
   end
 
-  # A set element is a value (possibly a `.`-concatenation of
-  # values, for concatenated key types), optionally `value : data`
-  # for maps.
+  # A set element is an atom (value or range, possibly a
+  # `.`-concatenation of them for concatenated key types),
+  # optionally `key : data` for maps.
   defp parse_set_element(tokens, state) do
-    {key, rest} = parse_single_value(tokens, state)
+    {key, rest} = parse_element_atom(tokens, state)
     {key, rest} = parse_element_concat(key, rest, state)
 
     case rest do
@@ -1340,19 +1340,31 @@ defmodule Linx.NFT.Parser do
         {data, rest3} = parse_map_data(rest2, state)
         {{:map_elem, key, data, value_meta(key)}, rest3}
 
-      [{:dash, _}, {:integer, _, _} | _] = rest ->
-        [{:dash, _} | rest2] = rest
-        {hi, rest3} = parse_single_value(rest2, state)
-        {{:range, key, hi, value_meta(key)}, rest3}
-
       _ ->
         {key, rest}
     end
   end
 
+  # A single element part: a value, optionally extended to a range
+  # (`80-443`, `10.0.0.1-10.0.0.9`). Ranges bind tighter than
+  # concatenation, so `10.0.0.0/24 . 80-443` splits per field.
+  defp parse_element_atom(tokens, state) do
+    {value, rest} = parse_single_value(tokens, state)
+
+    case rest do
+      [{:dash, _}, {next_kind, _, _} | _] when next_kind in [:integer, :ipv4, :ipv6] ->
+        [{:dash, _} | rest2] = rest
+        {hi, rest3} = parse_single_value(rest2, state)
+        {{:range, value, hi, value_meta(value)}, rest3}
+
+      _ ->
+        {value, rest}
+    end
+  end
+
   # `10.96.0.1 . 443` — concatenated element for `type X . Y` sets.
   defp parse_element_concat(first, [{:dot, _} | rest], state) do
-    {next, rest2} = parse_single_value(rest, state)
+    {next, rest2} = parse_element_atom(rest, state)
 
     case parse_element_concat(next, rest2, state) do
       {{:concat, parts, _}, rest3} ->
