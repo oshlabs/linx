@@ -287,9 +287,9 @@ defmodule Linx.Netfilter.Expr do
       is added by default (anonymous sets are constant unless
       explicitly otherwise).
   """
-  @spec set_literal([term()], atom(), keyword()) :: t()
+  @spec set_literal([term()], atom() | {:concat, [atom()]}, keyword()) :: t()
   def set_literal(values, key_type, opts \\ [])
-      when is_list(values) and is_atom(key_type) and is_list(opts) do
+      when is_list(values) and (is_atom(key_type) or is_tuple(key_type)) and is_list(opts) do
     %__MODULE__{
       name: :__anon_set,
       data: %{
@@ -378,6 +378,47 @@ defmodule Linx.Netfilter.Expr do
         burst: Keyword.get(opts, :burst, default_burst),
         type: type,
         over: Keyword.get(opts, :over, false)
+      }
+    }
+  end
+
+  @doc """
+  Dynamic-set update expression (`nft_dynset`) — adds, updates, or
+  deletes an element in a `dynamic`-flagged set at packet-match
+  time, keyed by whatever a preceding load expression put in
+  `:sreg_key`. This is the `add @ratelimit { ip saddr … }` /
+  fail2ban building block.
+
+  Options:
+
+    * `:op` — `:add` (default), `:update`, or `:delete`.
+    * `:sreg_key` — register holding the element key (default 1).
+    * `:timeout` — per-element timeout in **milliseconds**
+      (requires the set to carry the `:timeout` flag).
+    * `:exprs` — list of stateful `%Expr{}`s attached to each
+      element (e.g. `Expr.limit/1`, `Expr.counter/1`). When such
+      an expression stops matching (a limit trips), the rule stops
+      matching — the standard rate-limit-per-key shape.
+
+      Expr.dynset("ratelimit", op: :update,
+                  exprs: [Expr.limit(rate: 6, per: 60)])
+  """
+  @spec dynset(String.t(), keyword()) :: t()
+  def dynset(set_name, opts \\ []) when is_binary(set_name) and is_list(opts) do
+    op = Keyword.get(opts, :op, :add)
+
+    unless op in [:add, :update, :delete] do
+      raise ArgumentError, "dynset :op must be :add, :update, or :delete, got: #{inspect(op)}"
+    end
+
+    %__MODULE__{
+      name: :dynset,
+      data: %{
+        set: set_name,
+        op: op,
+        sreg_key: Keyword.get(opts, :sreg_key, 1),
+        timeout: Keyword.get(opts, :timeout),
+        exprs: Keyword.get(opts, :exprs, [])
       }
     }
   end

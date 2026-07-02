@@ -488,6 +488,39 @@ defmodule Linx.NFT.Compiler do
     ]
   end
 
+  # `add @ratelimit { ip saddr limit rate 6/minute }` — dynamic
+  # set update: load the key selector, then an nft_dynset that
+  # add/update/deletes the element, optionally attaching a
+  # per-element timeout and stateful expressions.
+  defp compile_stmt({:set_update, op, set, key_lhs, elem_opts, meta}, family, state) do
+    {load_expr, _kind} = compile_lhs(key_lhs, state)
+
+    timeout =
+      case Keyword.get(elem_opts, :timeout) do
+        nil ->
+          nil
+
+        {:time, ms, _} ->
+          ms
+
+        other ->
+          raise_at!(
+            state,
+            value_meta(other),
+            "compiler: set-update element timeout must be a time literal (e.g. `90s`)"
+          )
+      end
+
+    stateful =
+      elem_opts
+      |> Keyword.get_values(:stateful)
+      |> Enum.flat_map(&compile_stmt(&1, family, state))
+
+    _ = meta
+
+    [load_expr, Expr.dynset(set, op: op, sreg_key: 1, timeout: timeout, exprs: stateful)]
+  end
+
   defp compile_stmt({:match, lhs, op, rhs, _meta}, _family, state) do
     {load_expr, value_kind} = compile_lhs(lhs, state)
     cmp_or_lookup = compile_rhs(rhs, op, value_kind, state)
@@ -723,13 +756,22 @@ defmodule Linx.NFT.Compiler do
     end
   end
 
-  defp compile_lhs({:concat_lhs, _parts, meta}, state) do
-    raise_at!(
-      state,
-      meta,
-      "compiler: concatenated selectors (`a . b`) are not yet supported — " <>
-        "planned alongside concatenated set types (NFT-PLAN.md Phase 6)"
-    )
+  # Concatenated selectors (`ip daddr . tcp dport`): each part
+  # loads into consecutive 32-bit registers starting at
+  # NFT_REG32_00 (= 8), one register per 4 bytes of field width —
+  # the same layout nft's own concat compilation uses. The lookup
+  # then reads from register 8.
+  @reg32_base 8
+
+  defp compile_lhs({:concat_lhs, parts, _meta}, state) do
+    {loads, kinds, _next_reg} =
+      Enum.reduce(parts, {[], [], @reg32_base}, fn part, {loads, kinds, reg} ->
+        {expr, kind} = compile_lhs(part, state)
+        expr = %{expr | data: %{expr.data | dreg: reg}}
+        {loads ++ [expr], kinds ++ [kind], reg + div(kind_byte_len!(kind, part, state) + 3, 4)}
+      end)
+
+    {loads, {:concat_kinds, kinds}}
   end
 
   defp compile_lhs({:meta, field, meta}, state) do
@@ -805,6 +847,27 @@ defmodule Linx.NFT.Compiler do
     value
     |> resolve_named_ints(@icmpv6_type_names, "ICMPv6 type", state)
     |> compile_rhs(op, {:int, 1}, state)
+  end
+
+  # Concatenated-selector RHS: only whole-key set membership makes
+  # sense — either a declared set or an inline literal.
+  defp compile_rhs({:set_ref, name, _}, _op, {:concat_kinds, _kinds}, _state) do
+    Expr.lookup(name, sreg: @reg32_base)
+  end
+
+  defp compile_rhs({:set_inline, elems, _}, _op, {:concat_kinds, kinds}, state) do
+    key_type = {:concat, Enum.map(kinds, &set_key_type_for/1)}
+    values = Enum.map(elems, &literal_for_set!(&1, key_type, state))
+    Expr.set_literal(values, key_type, flags: [:constant], sreg: @reg32_base)
+  end
+
+  defp compile_rhs(other, _op, {:concat_kinds, _kinds}, state) do
+    raise_at!(
+      state,
+      value_meta(other),
+      "compiler: concatenated selectors match against `@set` references or " <>
+        "`{ a . b, ... }` literals only"
+    )
   end
 
   defp compile_rhs({:set_ref, name, _}, _op, _kind, _state) do
@@ -1034,6 +1097,8 @@ defmodule Linx.NFT.Compiler do
   # ---- Set / value-kind helpers ----
 
   defp set_key_type_for(:ifindex), do: :mark
+  defp set_key_type_for(:icmp_type), do: :inet_proto
+  defp set_key_type_for(:icmpv6_type), do: :inet_proto
   defp set_key_type_for({:int, 2}), do: :inet_service
   defp set_key_type_for({:int, 4}), do: :mark
   defp set_key_type_for({:int, 1}), do: :inet_proto
@@ -1077,12 +1142,30 @@ defmodule Linx.NFT.Compiler do
   defp literal_for_set!({:range, lo, hi, _}, _, _state),
     do: {:range, literal_int!(lo), literal_int!(hi)}
 
-  defp literal_for_set!({:concat, _parts, meta}, _key_type, state) do
+  # Concatenated element against a concatenated key type: resolve
+  # each part against its field's type. The stored element is a
+  # list, one raw value per field.
+  defp literal_for_set!({:concat, parts, meta}, {:concat, types}, state) do
+    if length(parts) != length(types) do
+      raise_at!(
+        state,
+        meta,
+        "compiler: concatenated element has #{length(parts)} parts but the " <>
+          "set key has #{length(types)} fields"
+      )
+    end
+
+    parts
+    |> Enum.zip(types)
+    |> Enum.map(fn {part, type} -> literal_for_set!(part, type, state) end)
+  end
+
+  defp literal_for_set!({:concat, _parts, meta}, key_type, state) do
     raise_at!(
       state,
       meta,
-      "compiler: concatenated set elements (`a . b`) are not yet supported — " <>
-        "planned alongside concatenated set types (NFT-PLAN.md Phase 6)"
+      "compiler: concatenated element used with non-concatenated set key " <>
+        "type #{inspect(key_type)}"
     )
   end
 
@@ -1127,6 +1210,26 @@ defmodule Linx.NFT.Compiler do
 
   defp resolve_named_ints(other, _table, _what, _state), do: other
 
+  # Byte width of a selector's value — determines how many 32-bit
+  # registers a concatenation part occupies.
+  defp kind_byte_len!({:int, w}, _part, _state), do: w
+  defp kind_byte_len!({:int, w, :host}, _part, _state), do: w
+  defp kind_byte_len!(:ipv4, _part, _state), do: 4
+  defp kind_byte_len!(:ipv6, _part, _state), do: 16
+  defp kind_byte_len!(:ifname, _part, _state), do: 16
+  defp kind_byte_len!(:ifindex, _part, _state), do: 4
+  defp kind_byte_len!(:ct_state, _part, _state), do: 4
+  defp kind_byte_len!(:icmp_type, _part, _state), do: 1
+  defp kind_byte_len!(:icmpv6_type, _part, _state), do: 1
+
+  defp kind_byte_len!(kind, part, state) do
+    raise_at!(
+      state,
+      lhs_meta(part),
+      "compiler: selector kind #{inspect(kind)} cannot be used in a concatenation"
+    )
+  end
+
   defp ifindex!(name, state, meta) do
     case :net.if_name2index(String.to_charlist(name)) do
       {:ok, index} ->
@@ -1170,12 +1273,8 @@ defmodule Linx.NFT.Compiler do
         nil ->
           raise_at!(state, meta, "compiler: set `#{name}` missing required `type` declaration")
 
-        {:concat, _} ->
-          raise_at!(
-            state,
-            meta,
-            "compiler: concatenated set types are not yet supported by the ~NFT compiler"
-          )
+        {:concat, parts} ->
+          {:concat, parts}
 
         atom when is_atom(atom) ->
           atom

@@ -658,6 +658,22 @@ defmodule Linx.NFT.Parser do
     parse_match_stmt(tokens, state)
   end
 
+  # Dynamic-set update: `add @ratelimit { ip saddr limit rate 6/minute }`,
+  # `update @s { ip saddr timeout 90s }`, `delete @s { ip saddr }`.
+  # The braces hold a selector expression (the element key),
+  # optionally followed by a per-element `timeout` and stateful
+  # statements (`limit`, `counter`).
+  defp parse_stmt(
+         [{:identifier, op, meta}, {:at, _}, {:identifier, set, _}, {:lbrace, _} | rest],
+         state
+       )
+       when op in ["add", "update", "delete"] do
+    {key_lhs, rest2} = parse_match_lhs(rest, state)
+    {elem_opts, rest3} = parse_set_update_opts(rest2, state, [])
+    rest4 = expect_punct!(rest3, :rbrace, state, "`}` to close set-update element")
+    {{:set_update, String.to_atom(op), set, key_lhs, elem_opts, meta}, rest4}
+  end
+
   # `not @set` — negated set membership as a stand-alone match.
   defp parse_stmt([{:identifier, "not", meta}, {:at, _}, {:identifier, name, _} | rest], _state) do
     {{:match, {:not, {:set_ref, name, meta}, meta}, :membership, nil, meta}, rest}
@@ -958,6 +974,38 @@ defmodule Linx.NFT.Parser do
 
         finish_match({:ct, String.to_atom(field), meta}, rest, state)
     end
+  end
+
+  # Options after the key expression inside `add @set { ... }`:
+  # `timeout <time>` and nested stateful statements.
+  defp parse_set_update_opts([{:rbrace, _} | _] = tokens, _state, acc),
+    do: {Enum.reverse(acc), tokens}
+
+  defp parse_set_update_opts([{:identifier, "timeout", _} | rest], state, acc) do
+    {value, rest2} = parse_value(rest, state)
+    parse_set_update_opts(rest2, state, [{:timeout, value} | acc])
+  end
+
+  defp parse_set_update_opts([{:identifier, "limit", meta} | rest], state, acc) do
+    {stmt, rest2} = parse_limit_stmt(rest, meta, state)
+    parse_set_update_opts(rest2, state, [{:stateful, stmt} | acc])
+  end
+
+  defp parse_set_update_opts([{:identifier, "counter", meta} | rest], state, acc) do
+    {stmt, rest2} = parse_counter_stmt(rest, meta, state)
+    parse_set_update_opts(rest2, state, [{:stateful, stmt} | acc])
+  end
+
+  defp parse_set_update_opts([tok | _], state, _acc) do
+    raise_unexpected!(
+      state,
+      tok,
+      "expected `timeout`, `limit`, `counter`, or `}` in set-update element"
+    )
+  end
+
+  defp parse_set_update_opts([], state, _acc) do
+    raise_eof!(state, "expected `}` to close set-update element")
   end
 
   defp parse_until_stmt_sep([{:stmt_sep, _} | _] = tokens, _state, acc, _f),

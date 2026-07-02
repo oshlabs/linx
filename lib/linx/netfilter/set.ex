@@ -89,7 +89,8 @@ defmodule Linx.Netfilter.Set do
     :inet_proto,
     :inet_service,
     :mark,
-    :ifname
+    :ifname,
+    :ct_state
   ]
 
   @valid_flags [:constant, :interval, :timeout, :dynamic, :auto_merge, :anonymous]
@@ -163,6 +164,17 @@ defmodule Linx.Netfilter.Set do
 
   defp validate_key_type(nil), do: {:error, {:bad_set, :key_type_required}}
   defp validate_key_type(t) when t in @valid_key_types, do: :ok
+
+  # Concatenated key (`type ipv4_addr . inet_service`): a tuple of
+  # atomic key types. Elements are lists with one part per field.
+  defp validate_key_type({:concat, types}) when is_list(types) and length(types) >= 2 do
+    if Enum.all?(types, &(&1 in @valid_key_types)) do
+      :ok
+    else
+      {:error, {:bad_set, {:unknown_key_type, {:concat, types}}}}
+    end
+  end
+
   defp validate_key_type(other), do: {:error, {:bad_set, {:unknown_key_type, other}}}
 
   defp validate_flags(flags) when is_list(flags) do
@@ -196,7 +208,13 @@ defmodule Linx.Netfilter.Set do
 
   defimpl Inspect do
     def inspect(%Linx.Netfilter.Set{} = s, _opts) do
-      "#Linx.Netfilter.Set<#{s.name}(#{s.key_type}): #{length(s.elements)} elements>"
+      kt =
+        case s.key_type do
+          {:concat, types} -> Enum.join(types, " . ")
+          atom -> to_string(atom)
+        end
+
+      "#Linx.Netfilter.Set<#{s.name}(#{kt}): #{length(s.elements)} elements>"
     end
   end
 end
@@ -212,6 +230,29 @@ defmodule Linx.Netfilter.Set.Element do
   # encoder emits the start/end pair.
   def check({:range, lo, hi}, type) do
     with :ok <- check(lo, type), do: check(hi, type)
+  end
+
+  # Concatenated key element: one part per field, each checked
+  # against its field's type. Interval parts inside concatenations
+  # (pipapo ranges) are not supported yet.
+  def check(parts, {:concat, types}) when is_list(parts) do
+    cond do
+      length(parts) != length(types) ->
+        {:error, {:concat_arity, length(parts), length(types)}}
+
+      Enum.any?(parts, &match?({:range, _, _}, &1)) ->
+        {:error, :concat_interval_not_supported}
+
+      true ->
+        parts
+        |> Enum.zip(types)
+        |> Enum.reduce_while(:ok, fn {part, type}, :ok ->
+          case check(part, type) do
+            :ok -> {:cont, :ok}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
+        end)
+    end
   end
 
   def check(el, :ipv4_addr) do
@@ -266,4 +307,8 @@ defmodule Linx.Netfilter.Set.Element do
 
   def check(el, :ifname) when is_binary(el), do: :ok
   def check(el, :ifname), do: {:error, {:not_ifname, el}}
+
+  # ct state keys are the state's bit value (u32).
+  def check(el, :ct_state) when is_integer(el) and el >= 0 and el < 0x1_0000_0000, do: :ok
+  def check(el, :ct_state), do: {:error, {:not_ct_state, el}}
 end

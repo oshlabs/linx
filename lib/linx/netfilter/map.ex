@@ -83,7 +83,8 @@ defmodule Linx.Netfilter.Map do
     :inet_proto,
     :inet_service,
     :mark,
-    :ifname
+    :ifname,
+    :ct_state
   ]
 
   @doc "Builds a map."

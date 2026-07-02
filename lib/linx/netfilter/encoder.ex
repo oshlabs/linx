@@ -177,8 +177,10 @@ defmodule Linx.Netfilter.Encoder do
        order** — rule ordering matters at runtime, the kernel
        preserves the batch order via `NLM_F_APPEND`.
 
-  Objects and flowtables are not yet emitted. The batch shape
-  supports them by interleaving in step 3.
+  Named objects are emitted right after `NEWTABLE` (declarations
+  before the rules that reference them). Flowtables are not yet
+  emitted; the batch shape supports them by interleaving in
+  step 3.
 
   This list is intended to drop straight into
   `Linx.Netlink.Nfnl.batch/2`; it does not include the
@@ -489,6 +491,14 @@ defmodule Linx.Netfilter.Encoder do
         {nfta_set_gc_interval(), Wire.u32_be(gc_interval)}
       end)
       |> maybe_add(not is_nil(size), fn ->
+        # Note on concatenated keys: nft sends NFTA_SET_DESC_CONCAT
+        # (+ the NFT_SET_CONCAT flag) ONLY for interval concat sets
+        # (evaluate.c:5300, pipapo ranges). A plain concat set is
+        # just a hash set whose key length is the padded sum of the
+        # fields — the kernel EINVALs a DESC_CONCAT without the
+        # flag. We only support non-interval concats so far, so no
+        # DESC_CONCAT is emitted; it lands together with pipapo
+        # support.
         desc = Attr.encode([{nfta_set_desc_size(), Wire.u32_be(size)}])
         {nfta_set_desc(), desc}
       end)
@@ -688,6 +698,22 @@ defmodule Linx.Netfilter.Encoder do
   # "1.2.3.4" must become 4 address bytes, never its 7 ASCII bytes.
   defp encode_key_value(value, type) do
     cond do
+      # Concatenated key: one part per field, each encoded with its
+      # field's type and padded to the 4-byte register boundary.
+      match?({:concat, _}, type) and is_list(value) ->
+        {:concat, types} = type
+
+        if length(value) != length(types) do
+          raise ArgumentError,
+                "concat element #{inspect(value)} has #{length(value)} parts, " <>
+                  "key type has #{length(types)}"
+        end
+
+        value
+        |> Enum.zip(types)
+        |> Enum.map(fn {part, t} -> pad_key4(encode_key_value(part, t)) end)
+        |> IO.iodata_to_binary()
+
       type == :ipv4_addr and is_tuple(value) and tuple_size(value) == 4 ->
         {a, b, c, d} = value
         <<a, b, c, d>>
@@ -732,6 +758,13 @@ defmodule Linx.Netfilter.Encoder do
       true ->
         raise ArgumentError,
               "cannot encode set element #{inspect(value)} for type #{inspect(type)}"
+    end
+  end
+
+  defp pad_key4(bin) when is_binary(bin) do
+    case rem(byte_size(bin), 4) do
+      0 -> bin
+      r -> bin <> :binary.copy(<<0>>, 4 - r)
     end
   end
 
@@ -1168,6 +1201,15 @@ defmodule Linx.Netfilter.Encoder do
     {nfta_list_elem(), Attr.encode(inner)}
   end
 
+  # A single nested expression (NFTA_DYNSET_EXPR and friends) —
+  # same NFTA_EXPR_NAME/DATA shape, without the LIST_ELEM wrapper.
+  defp encode_nested_expr(%Expr{name: name, data: data}) do
+    Attr.encode([
+      {nfta_expr_name(), [Atom.to_string(name), 0]},
+      {nfta_expr_data(), Attr.encode(encode_expr_data(name, data))}
+    ])
+  end
+
   # immediate-verdict (or constant-into-register)
   defp encode_expr_data(:immediate, %Verdict{} = v) do
     [
@@ -1259,6 +1301,41 @@ defmodule Linx.Netfilter.Encoder do
     |> maybe_add(not is_nil(effective_code), fn ->
       {nfta_reject_icmp_code(), <<effective_code::8>>}
     end)
+  end
+
+  defp encode_expr_data(:dynset, %{set: set, op: op, sreg_key: sreg_key} = data) do
+    op_int =
+      case op do
+        :add -> nft_dynset_op_add()
+        :update -> nft_dynset_op_update()
+        :delete -> nft_dynset_op_delete()
+      end
+
+    timeout = Map.get(data, :timeout)
+    exprs = Map.get(data, :exprs, [])
+
+    base = [
+      {nfta_dynset_set_name(), [set, 0]},
+      {nfta_dynset_op(), Wire.u32_be(op_int)},
+      {nfta_dynset_sreg_key(), Wire.u32_be(sreg_key)}
+    ]
+
+    base
+    |> maybe_add(not is_nil(timeout), fn ->
+      {nfta_dynset_timeout(), Wire.u64_be(timeout)}
+    end)
+    |> Kernel.++(
+      case exprs do
+        [] ->
+          []
+
+        [single] ->
+          [{nfta_dynset_expr(), encode_nested_expr(single)}]
+
+        many ->
+          [{nfta_dynset_expressions(), Attr.encode(Enum.map(many, &encode_expression_elem/1))}]
+      end
+    )
   end
 
   defp encode_expr_data(:objref, %{name: name, kind: kind}) do

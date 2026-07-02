@@ -235,6 +235,22 @@ defmodule Linx.Netfilter.Wire do
   defmacro nft_object_ct_expect, do: 9
   defmacro nft_object_synproxy, do: 10
 
+  # NFTA_DYNSET_* (nft_dynset expression — runtime set updates)
+  defmacro nfta_dynset_set_name, do: 1
+  defmacro nfta_dynset_set_id, do: 2
+  defmacro nfta_dynset_op, do: 3
+  defmacro nfta_dynset_sreg_key, do: 4
+  defmacro nfta_dynset_sreg_data, do: 5
+  defmacro nfta_dynset_timeout, do: 6
+  defmacro nfta_dynset_expr, do: 7
+  defmacro nfta_dynset_flags, do: 9
+  defmacro nfta_dynset_expressions, do: 10
+
+  # NFT_DYNSET_OP_*
+  defmacro nft_dynset_op_add, do: 0
+  defmacro nft_dynset_op_update, do: 1
+  defmacro nft_dynset_op_delete, do: 2
+
   # NFTA_LIMIT_* (nft_limit expression)
   defmacro nfta_limit_rate, do: 1
   defmacro nfta_limit_unit, do: 2
@@ -339,6 +355,9 @@ defmodule Linx.Netfilter.Wire do
   defmacro nfta_set_desc_size, do: 1
   defmacro nfta_set_desc_concat, do: 2
 
+  # NFTA_SET_FIELD_* (inside NFTA_SET_DESC_CONCAT list elements)
+  defmacro nfta_set_field_len, do: 1
+
   # ===========================================================
   # libnftnl key/data type IDs
   #
@@ -368,13 +387,28 @@ defmodule Linx.Netfilter.Wire do
   Maps a Linx key-type atom to its `(libnftnl_type_id, byte_len)`
   pair for `NFTA_SET_KEY_TYPE` / `NFTA_SET_KEY_LEN`.
   """
-  @spec set_type_info(atom()) :: {non_neg_integer(), pos_integer()}
+  @spec set_type_info(atom() | {:concat, [atom()]}) :: {non_neg_integer(), pos_integer()}
+
+  # Concatenated key: nft packs the subtype ids 6 bits each
+  # (TYPE_BITS) into one type id, and each field's key bytes are
+  # padded to the 4-byte register size — the total key length is
+  # the sum of the padded field widths.
+  def set_type_info({:concat, types}) when is_list(types) and types != [] do
+    import Bitwise
+
+    Enum.reduce(types, {0, 0}, fn t, {id, len} ->
+      {tid, tlen} = set_type_info(t)
+      {bor(bsl(id, 6), tid), len + pad4(tlen)}
+    end)
+  end
+
   def set_type_info(:ipv4_addr), do: {7, 4}
   def set_type_info(:ipv6_addr), do: {8, 16}
   def set_type_info(:ether_addr), do: {9, 6}
   def set_type_info(:inet_proto), do: {12, 1}
   def set_type_info(:inet_service), do: {13, 2}
   def set_type_info(:mark), do: {19, 4}
+  def set_type_info(:ct_state), do: {26, 4}
   def set_type_info(:ifname), do: {41, 16}
   def set_type_info(:verdict), do: {1, 16}
 
@@ -389,9 +423,25 @@ defmodule Linx.Netfilter.Wire do
   def set_type_atom(12, 1), do: :inet_proto
   def set_type_atom(13, 2), do: :inet_service
   def set_type_atom(19, 4), do: :mark
+  def set_type_atom(26, 4), do: :ct_state
   def set_type_atom(41, 16), do: :ifname
   def set_type_atom(1, _), do: :verdict
   def set_type_atom(id, len), do: {:unknown_type, id, len}
+
+  @doc """
+  The unpadded per-field byte lengths of a concatenated key type —
+  what `NFTA_SET_DESC_CONCAT` carries so the kernel knows the
+  field boundaries.
+  """
+  @spec concat_field_lens({:concat, [atom()]}) :: [pos_integer()]
+  def concat_field_lens({:concat, types}) do
+    Enum.map(types, fn t ->
+      {_id, len} = set_type_info(t)
+      len
+    end)
+  end
+
+  defp pad4(n), do: div(n + 3, 4) * 4
 
   @doc """
   Maps a set-flags atom list to the u32 bitmask. The encoder may

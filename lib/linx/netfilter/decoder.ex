@@ -240,6 +240,7 @@ defmodule Linx.Netfilter.Decoder do
   defp expr_name_atom("reject"), do: :reject
   defp expr_name_atom("counter"), do: :counter
   defp expr_name_atom("limit"), do: :limit
+  defp expr_name_atom("dynset"), do: :dynset
   defp expr_name_atom("nat"), do: :nat
   defp expr_name_atom("masq"), do: :masq
   defp expr_name_atom("redir"), do: :redir
@@ -328,6 +329,31 @@ defmodule Linx.Netfilter.Decoder do
     bytes = get_u64_be(attrs, nfta_counter_bytes(), 0)
     packets = get_u64_be(attrs, nfta_counter_packets(), 0)
     %{packets: packets, bytes: bytes}
+  end
+
+  defp decode_expr_data(:dynset, bin) do
+    attrs = Attr.decode(bin)
+
+    op =
+      case get_u32_be(attrs, nfta_dynset_op(), 0) do
+        0 -> :add
+        1 -> :update
+        2 -> :delete
+      end
+
+    nested =
+      case get_binary(attrs, nfta_dynset_expr()) do
+        nil -> []
+        expr_bin -> [decode_expression(expr_bin)]
+      end
+
+    %{
+      set: get_string(attrs, nfta_dynset_set_name()),
+      op: op,
+      sreg_key: get_u32_be(attrs, nfta_dynset_sreg_key(), 1),
+      timeout: get_u64_be(attrs, nfta_dynset_timeout(), nil),
+      exprs: nested
+    }
   end
 
   defp decode_expr_data(:limit, bin) do

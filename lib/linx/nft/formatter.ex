@@ -161,7 +161,7 @@ defmodule Linx.NFT.Formatter do
   defp format_set(%Set{name: name, key_type: kt, flags: flags, elements: elems, timeout: to}) do
     body =
       [
-        "type #{kt}",
+        "type #{render_key_type(kt)}",
         if(flags != [] and flags != [nil],
           do: "flags #{Enum.join(flags, ", ")}",
           else: nil
@@ -190,7 +190,7 @@ defmodule Linx.NFT.Formatter do
 
     body =
       [
-        "type #{kt} : #{dt}",
+        "type #{render_key_type(kt)} : #{dt}",
         if(flags != [] and flags != [nil],
           do: "flags #{Enum.join(flags, ", ")}",
           else: nil
@@ -207,7 +207,14 @@ defmodule Linx.NFT.Formatter do
     "#{keyword} #{name} {\n#{indent(body, 2)}\n}"
   end
 
+  defp render_key_type({:concat, types}), do: Enum.join(types, " . ")
+  defp render_key_type(atom), do: to_string(atom)
+
   defp format_set_value({:range, lo, hi}), do: "#{lo}-#{hi}"
+
+  defp format_set_value(parts) when is_list(parts),
+    do: Enum.map_join(parts, " . ", &format_set_value/1)
+
   defp format_set_value(v) when is_integer(v), do: Integer.to_string(v)
   defp format_set_value(v) when is_binary(v), do: v
   defp format_set_value(other), do: inspect(other)
@@ -216,6 +223,12 @@ defmodule Linx.NFT.Formatter do
   # element strings are quoted — nft itself lists ifnames quoted,
   # and quoting keeps names that collide with nft keywords loadable
   # in string-accepting positions.
+  defp render_set_element(parts, {:concat, types}) when is_list(parts) do
+    parts
+    |> Enum.zip(types)
+    |> Enum.map_join(" . ", fn {part, t} -> render_set_element(part, t) end)
+  end
+
   defp render_set_element({:range, lo, hi}, _kt), do: "#{lo}-#{hi}"
   defp render_set_element(v, _kt) when is_integer(v), do: Integer.to_string(v)
   defp render_set_element(v, :ifname) when is_binary(v), do: ~s/"#{v}"/
@@ -262,6 +275,27 @@ defmodule Linx.NFT.Formatter do
   defp format_exprs(exprs), do: do_format_exprs(exprs, [])
 
   defp do_format_exprs([], acc), do: Enum.reverse(acc)
+
+  # ---- concatenated selectors: a run of loads into the 32-bit
+  # register file (dreg >= 8) followed by a lookup or anon set ----
+  defp do_format_exprs([%Expr{name: n, data: %{dreg: d}} | _] = exprs, acc)
+       when n in [:payload, :meta, :ct] and is_integer(d) and d >= 8 do
+    {loads, rest} = Enum.split_while(exprs, &concat_load?/1)
+    lhs = Enum.map_join(loads, " . ", &render_load_lhs/1)
+
+    case rest do
+      [%Expr{name: :lookup, data: %{set: name} = lookup} | rest2] ->
+        ref = if lookup[:dreg] == 0, do: "vmap @#{name}", else: "@#{name}"
+        do_format_exprs(rest2, ["#{lhs} #{ref}" | acc])
+
+      [%Expr{name: :__anon_set, data: %{values: vals, key_type: kt}} | rest2] ->
+        rendered = Enum.map_join(vals, ", ", &render_set_element(&1, kt))
+        do_format_exprs(rest2, ["#{lhs} { #{rendered} }" | acc])
+
+      _ ->
+        do_format_exprs(rest, ["# <unsupported concat selector tail>" | acc])
+    end
+  end
 
   # ---- payload + cmp ----
   defp do_format_exprs(
@@ -511,6 +545,21 @@ defmodule Linx.NFT.Formatter do
     do_format_exprs(rest, [text | acc])
   end
 
+  # ---- dynamic set update: load + dynset ----
+  defp do_format_exprs(
+         [%Expr{name: load_name} = load, %Expr{name: :dynset, data: d} | rest],
+         acc
+       )
+       when load_name in [:payload, :ct, :meta] do
+    inner =
+      [render_load_lhs(load)] ++
+        if(d[:timeout], do: ["timeout #{format_time_ms(d[:timeout])}"], else: []) ++
+        do_format_exprs(d[:exprs] || [], [])
+
+    text = "#{d.op} @#{d.set} { #{Enum.join(inner, " ")} }"
+    do_format_exprs(rest, [text | acc])
+  end
+
   # ---- limit ----
   defp do_format_exprs([%Expr{name: :limit, data: data} | rest], acc) do
     %{rate: rate, per: per, burst: burst, type: type, over: over} = data
@@ -595,6 +644,18 @@ defmodule Linx.NFT.Formatter do
   defp do_format_exprs([expr | rest], acc) do
     do_format_exprs(rest, ["# <unsupported expression: #{inspect(expr.name)}>" | acc])
   end
+
+  defp concat_load?(%Expr{name: n, data: %{dreg: d}})
+       when n in [:payload, :meta, :ct] and is_integer(d),
+       do: d >= 8
+
+  defp concat_load?(_), do: false
+
+  defp render_load_lhs(%Expr{name: :payload, data: %{base: b, offset: o, len: l}}),
+    do: payload_field(b, o, l)
+
+  defp render_load_lhs(%Expr{name: :ct, data: %{key: key}}), do: "ct #{key}"
+  defp render_load_lhs(%Expr{name: :meta, data: %{key: key}}), do: "meta #{key}"
 
   defp render_vmap_elems(elems, key_type) do
     elems

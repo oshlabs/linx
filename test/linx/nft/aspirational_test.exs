@@ -43,7 +43,9 @@ defmodule Linx.NFT.AspirationalTest do
     "a1_debian_default.nft",
     "a2_workstation.nft",
     "a3_server_vmap.nft",
-    "a4_nat_router.nft"
+    "a4_nat_router.nft",
+    "a5_kube_style.nft",
+    "a6_ssh_ratelimit.nft"
   ]
 
   # What each pending fixture is waiting on (kept in sync with
@@ -54,9 +56,10 @@ defmodule Linx.NFT.AspirationalTest do
   #   (a3_server_vmap.nft  — landed: named + anonymous vmaps,
   #                          named counter objects + objref)
   #   (a4_nat_router.nft   — landed: define/$var + dnat to addr:port)
-  #   a5_kube_style.nft    — concatenated set keys/elements,
-  #                          dynamic sets with `add @set { … }`
-  #                          (Phase 1/2/6)
+  #   (a5_kube_style.nft   — landed: concatenated set types/
+  #                          elements/selectors + dynset; interval
+  #                          concatenations (pipapo ranges) still
+  #                          rejected with a clear error)
 
   for path <- @fixtures do
     basename = Path.basename(path)

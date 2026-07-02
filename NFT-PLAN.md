@@ -10,11 +10,19 @@ This is a maintainer doc — not shipped in the hex package, does not render on
 hexdocs. Companion to `PLAN.md` (which keeps two `~NFT` compiler items that
 are absorbed into Phase 6 here).
 
-Status 2026-07-02: Phase 0 complete; differential + measured-coverage
-harnesses live (`differential_test.exs` / `aspirational_test.exs` — corpus at
-**4/5 fixtures fully supported**, the fifth waits on dynamic-set statements
-and concat lowering); first slices of Phases 1–4 landed (see `[x]`/`[~]`
-marks inline).
+Status 2026-07-02 (second pass): Phase 0 complete; differential +
+measured-coverage harnesses live (`differential_test.exs` /
+`aspirational_test.exs` — corpus at **6/6 fixtures fully supported**);
+dynamic-set statements (`add`/`update`/`delete @set { … }` → nft_dynset) and
+non-interval concatenations (set types, elements, and rule-side reg32
+selector loads) landed end-to-end. All new encodings are **kernel-verified**:
+`kernel_acceptance_test.exs` (`:integration`) pushes NEWOBJ/objref, limit,
+dynset-with-nested-limit, concat sets, and named+anonymous vmaps through a
+real netlink socket and reads them back (runs unprivileged during dev via
+`unshare -r -n`). Kernel-sourced correction: nft sends NFTA_SET_DESC_CONCAT
+(+ NFT_SET_CONCAT flag) only for INTERVAL concat sets (evaluate.c:5300); a
+plain concat set is a hash set with the padded combined key length — the
+kernel EINVALs DESC_CONCAT without the flag.
 
 Baseline (2026-07): `Tokenizer` ~1,100 lines, `Parser` ~1,300 lines (recursive
 descent), `Compiler` ~1,070 lines onto the `Linx.Netfilter.Ruleset`
@@ -142,9 +150,13 @@ mirrors this as one function per layer.
 - [ ] **Implicit relational**: `expr rhs_expr` juxtaposition = `OP_IMPLICIT`
   (we already default to `:eq`; extend to set membership and flag semantics).
 - [ ] Explicit `value/mask` forms (`ct mark 0x4/0xff`).
-- [~] **Concatenations** (2026-07-02): parse into `{:concat_lhs, …}` /
-  `{:concat, …}` AST on both key and element side; compiler rejects with a
-  located error until the pipapo/concat backend lands (Phase 6).
+- [x] **Concatenations, non-interval** (2026-07-02): set declarations
+  (`type ipv4_addr . inet_service`), elements (`10.96.0.1 . 443`), and
+  rule-side selectors (`ip daddr . tcp dport @svc` → consecutive reg32
+  loads from register 8 + lookup) land end-to-end, kernel-verified.
+  Interval parts inside concatenations (pipapo ranges, KEY_END,
+  DESC_CONCAT + NFT_SET_CONCAT flag) remain open — rejected with a clear
+  error (Phase 6).
 - [ ] **Prefix as generic operator**: `expr / NUM` beyond address CIDR
   (string prefixes come via wildcard strings; see below).
 - [ ] Ranges over any ordered type, including symbolic ranges deferred to the
@@ -192,8 +204,11 @@ Have today: verdicts, match, counter, log, limit (partial), nat/masq/redir,
 meta-set, ct-set (partial), reject, queue (bare).
 
 - [ ] `queue` full form: `queue num 3`, ranges, `bypass`/`fanout` flags.
-- [ ] `set` statement: `add @s { tcp dport }`, `update`, `delete` — dynamic
-  set updates from rules, with element timeout/expiration options.
+- [x] `set` statement (2026-07-02): `add`/`update`/`delete @set { key }`
+  with per-element `timeout` and nested stateful statements (`limit`,
+  `counter`) → new `Expr.dynset/2` + nft_dynset codec (single nested expr
+  via NFTA_DYNSET_EXPR, multiple via NFTA_DYNSET_EXPRESSIONS).
+  Kernel-verified via the fail2ban-pattern fixture (a6).
 - [ ] `map` statement (dynamic map updates) and `meter` (legacy flow tables).
 - [ ] `dup to <addr> [device <dev>]`, `fwd to <dev>`.
 - [ ] `tproxy to :port / addr:port` (family-sensitive).

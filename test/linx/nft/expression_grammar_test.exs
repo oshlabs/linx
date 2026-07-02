@@ -151,17 +151,72 @@ defmodule Linx.NFT.ExpressionGrammarTest do
              ] = opts[:elements]
     end
 
-    test "concatenated selectors are rejected by the compiler with a located error" do
+    test "concatenated selectors lower to reg32 loads + lookup at reg 8" do
       src = """
       table inet t {
+        set svc {
+          type ipv4_addr . inet_service
+          elements = { 10.96.0.1 . 443 }
+        }
         chain c {
+          type filter hook input priority 0
           ip daddr . tcp dport @svc accept
         }
       }
       """
 
-      assert {:error, %ParseError{} = err} = Linx.NFT.parse(src)
-      assert Exception.message(err) =~ "concatenated selectors"
+      {:ok, rs} = Linx.NFT.parse(src)
+      table = rs.tables[{:inet, "t"}]
+
+      assert table.sets["svc"].key_type == {:concat, [:ipv4_addr, :inet_service]}
+      assert table.sets["svc"].elements == [["10.96.0.1", 443]]
+
+      [rule] = table.chains["c"].rules
+
+      # ip daddr (4 bytes) → reg 8; tcp dport (2 bytes) → reg 9;
+      # lookup reads the concatenation starting at reg 8.
+      assert [
+               %Expr{name: :payload, data: %{base: :network, offset: 16, len: 4, dreg: 8}},
+               %Expr{name: :payload, data: %{base: :transport, offset: 2, len: 2, dreg: 9}},
+               %Expr{name: :lookup, data: %{set: "svc", sreg: 8}},
+               %Expr{name: :immediate}
+             ] = rule.expressions
+    end
+
+    test "an IPv6 part occupies four 32-bit registers" do
+      src = """
+      table inet t {
+        set svc6 {
+          type ipv6_addr . inet_service
+        }
+        chain c {
+          type filter hook input priority 0
+          ip6 daddr . tcp dport @svc6 accept
+        }
+      }
+      """
+
+      {:ok, rs} = Linx.NFT.parse(src)
+      [rule] = rs.tables[{:inet, "t"}].chains["c"].rules
+
+      # ip6 daddr (16 bytes) fills regs 8-11; tcp dport lands at 12.
+      assert Enum.any?(rule.expressions, fn
+               %Expr{name: :payload, data: %{len: 2, dreg: 12}} -> true
+               _ -> false
+             end)
+    end
+
+    test "interval parts inside concatenations are still rejected" do
+      src = """
+      table inet t {
+        set svc {
+          type ipv4_addr . inet_service
+          elements = { 10.96.0.1 . 100-200 }
+        }
+      }
+      """
+
+      assert {:error, %ParseError{}} = Linx.NFT.parse(src)
     end
   end
 
