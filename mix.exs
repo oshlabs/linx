@@ -22,6 +22,14 @@ defmodule Linx.MixProject do
         Mix.compilers() ++
           [:netlink_nif, :linx_process, :linx_tty, :linx_mount, :linx_sysctl],
       deps: deps(),
+      # `mix dialyzer`. :mix goes in the PLT because the custom compile
+      # tasks (lib/mix/) call Mix.* at build time; warnings that are
+      # deliberate design choices live in .dialyzer_ignore.exs.
+      dialyzer: [
+        plt_add_apps: [:mix],
+        ignore_warnings: ".dialyzer_ignore.exs",
+        list_unused_filters: true
+      ],
       name: "Linx",
       description:
         "Linux kernel interface primitives for Elixir: netlink/rtnetlink/nf_tables, " <>
@@ -55,6 +63,7 @@ defmodule Linx.MixProject do
 
   defp deps do
     [
+      {:dialyxir, "~> 1.4", only: :dev, runtime: false},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:stream_data, "~> 1.0", only: :test, runtime: false}
     ]

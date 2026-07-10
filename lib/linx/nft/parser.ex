@@ -1619,6 +1619,7 @@ defmodule Linx.NFT.Parser do
   # Error helpers
   # ===========================================================
 
+  @spec raise_unexpected!(term(), term(), String.t()) :: no_return()
   defp raise_unexpected!(state, {:stmt_sep, meta}, msg) do
     raise_at!(state, meta, msg <> " but got end of statement")
   end
@@ -1635,6 +1636,7 @@ defmodule Linx.NFT.Parser do
     raise_at!(state, %{line: 1, column: 1}, msg)
   end
 
+  @spec raise_eof!(term(), String.t()) :: no_return()
   defp raise_eof!(state, msg) do
     ParseError.raise_syntax_error!(
       %{file: state.file, line: 0, column: 0, snippet: nil},
@@ -1642,6 +1644,7 @@ defmodule Linx.NFT.Parser do
     )
   end
 
+  @spec raise_at!(term(), term(), String.t()) :: no_return()
   defp raise_at!(state, meta, msg) do
     ParseError.raise_syntax_error!(
       %{

@@ -64,8 +64,6 @@ defmodule Linx.Capabilities.Constants do
 
   @bits_to_atoms for {atom, bit} <- @atoms_to_bits, into: %{}, do: {bit, atom}
 
-  @all_atoms MapSet.new(Map.keys(@atoms_to_bits))
-
   @last_cap 40
 
   # OR of every bit Linx knows about — used by the read-side parser
@@ -81,8 +79,11 @@ defmodule Linx.Capabilities.Constants do
   `CAP_LAST_CAP + 1` count (41 on every kernel ≥ 5.8, the kernel
   Linx targets).
   """
-  @spec all() :: MapSet.t(atom())
-  def all, do: @all_atoms
+  @spec all() :: MapSet.t()
+  # Built per call rather than baked into a module attribute: a MapSet
+  # literal embedded at compile time is constructed outside MapSet,
+  # which dialyzer's opacity analysis (rightly) rejects.
+  def all, do: MapSet.new(Map.keys(@atoms_to_bits))
 
   @doc """
   The kernel's `CAP_LAST_CAP` value — the highest bit number for

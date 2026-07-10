@@ -39,7 +39,9 @@ defmodule Linx.Sysctl.Native do
 
   @doc false
   def __on_load__ do
-    :erlang.load_nif(Path.join(:code.priv_dir(:linx), ~c"linx_sysctl"), 0)
+    :code.priv_dir(:linx)
+    |> :filename.join(~c"linx_sysctl")
+    |> :erlang.load_nif(0)
   end
 
   @typedoc """

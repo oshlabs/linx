@@ -502,6 +502,7 @@ defmodule Linx.NFT.RuntimeCompiler do
   defp value_meta({_, _, _, _, meta}) when is_map(meta), do: meta
   defp value_meta(_), do: nil
 
+  @spec raise_at!(term(), term(), String.t()) :: no_return()
   defp raise_at!(state, meta, msg) do
     line = Map.get(meta || %{}, :line, 0)
     column = Map.get(meta || %{}, :column, 0)

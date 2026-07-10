@@ -1955,6 +1955,7 @@ defmodule Linx.NFT.Compiler do
       raise_at!(state, meta, "compiler: `#{op}` rejected by validator: #{Exception.message(e)}")
   end
 
+  @spec raise_at!(term(), term(), String.t()) :: no_return()
   defp raise_at!(state, meta, msg) do
     line = Map.get(meta || %{}, :line, 0)
     column = Map.get(meta || %{}, :column, 0)

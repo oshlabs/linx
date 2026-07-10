@@ -117,3 +117,36 @@ jobs:
       # test` on already-fetched deps fails to load the project).
       - name: Run full suite as root (includes :integration)
         run: sudo --preserve-env=PATH,HOME,MIX_ENV,MIX_HOME env "PATH=$PATH" "$(which mix)" test --include integration
+
+  # Dialyzer enforces the @spec-on-every-public-function policy (AGENTS.md);
+  # deliberate skips live in .dialyzer_ignore.exs, and unused skips fail the
+  # run (list_unused_filters), so the ignore file can't rot. Runs in dev
+  # (dialyxir is a dev-only dep); the PLT lands in _build/dev and rides the
+  # same cache shape as the test jobs.
+  dialyzer:
+    name: dialyzer (elixir 1.19 / otp 28)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      - name: Cache deps, build, and PLT
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-dialyzer-otp28-elixir1.19-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-dialyzer-otp28-elixir1.19-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Run dialyzer
+        run: mix dialyzer

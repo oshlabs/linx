@@ -416,6 +416,7 @@ defmodule Linx.Seccomp do
     do_validate_rules(rules, arch, MapSet.new())
   end
 
+  @spec do_validate_rules([term()], atom(), MapSet.t()) :: :ok | {:error, term()}
   defp do_validate_rules([], _arch, _seen), do: :ok
 
   defp do_validate_rules([{action, syscall} | rest], arch, seen)

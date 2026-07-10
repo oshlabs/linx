@@ -1258,6 +1258,7 @@ defmodule Linx.NFT.Tokenizer do
     |> Enum.at(line - 1)
   end
 
+  @spec raise_at!(term(), String.t()) :: no_return()
   defp raise_at!(state, message) do
     ParseError.raise_syntax_error!(
       %{
@@ -1270,6 +1271,7 @@ defmodule Linx.NFT.Tokenizer do
     )
   end
 
+  @spec raise_unterminated!(term(), atom()) :: no_return()
   defp raise_unterminated!(state, :string) do
     ctx = string_start_ctx(state)
     ParseError.raise_syntax_error!(ctx, "unterminated string literal")

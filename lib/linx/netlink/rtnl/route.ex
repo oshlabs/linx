@@ -362,7 +362,7 @@ defmodule Linx.Netlink.Rtnl.Route do
         [
           route.gateway && "via #{Linx.IP.to_string(route.gateway)}",
           route.oif && "oif=#{route.oif}",
-          is_integer(table) and table != 254 and "table=#{table}",
+          table != 254 and "table=#{table}",
           route.priority && "metric=#{route.priority}",
           is_integer(route.protocol) and route.protocol != 3 and "proto=#{route.protocol}"
         ]

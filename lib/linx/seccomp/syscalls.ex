@@ -511,8 +511,6 @@ defmodule Linx.Seccomp.Syscalls do
   @x86_64_inv for {atom, n} <- @x86_64, into: %{}, do: {n, atom}
   @aarch64_inv for {atom, n} <- @aarch64, into: %{}, do: {n, atom}
 
-  @x86_64_atoms MapSet.new(Map.keys(@x86_64))
-  @aarch64_atoms MapSet.new(Map.keys(@aarch64))
 
   @doc """
   The current host architecture as an atom — wraps
@@ -566,9 +564,12 @@ defmodule Linx.Seccomp.Syscalls do
   Every known syscall on the given arch, as a `MapSet`. Returns the
   empty MapSet for an unsupported arch.
   """
-  @spec all(atom()) :: MapSet.t(atom())
-  def all(:x86_64), do: @x86_64_atoms
-  def all(:aarch64), do: @aarch64_atoms
+  @spec all(atom()) :: MapSet.t()
+  # Built per call rather than baked into a module attribute: a MapSet
+  # literal embedded at compile time is an opaque struct constructed
+  # outside MapSet, which dialyzer (rightly) rejects.
+  def all(:x86_64), do: MapSet.new(Map.keys(@x86_64))
+  def all(:aarch64), do: MapSet.new(Map.keys(@aarch64))
   def all(_arch), do: MapSet.new()
 
   @doc """

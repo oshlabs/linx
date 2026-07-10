@@ -199,6 +199,8 @@ defmodule Linx.Process do
   @doc false
   def __error_stages__, do: @error_stages
 
+  # --- public API ------------------------------------------------------------
+
   @doc """
   Builds a supervisor child specification that runs `spawn/1` under
   supervision — the way to auto-restart a workload "with the same arguments".
@@ -937,42 +939,37 @@ defmodule Linx.Process do
   # `abort/1`). State-machine guards mirror what's documented on the
   # Linx.Capabilities verbs: :no_process > :running >
   # :not_ready > forward.
-  for cmd_arity <- [{:cap_drop_bounding, 2}, {:cap_set_ambient, 2}, {:cap_set_thread, 4}] do
-    {cmd, arity} = cmd_arity
-
+  for cmd <- [:cap_drop_bounding, :cap_set_ambient] do
     # Terminal first.
     def handle_call({unquote(cmd), _} = _call, _from, %{result: result} = state)
-        when result != nil and unquote(arity) == 2 do
-      {:reply, {:error, :no_process}, state}
-    end
-
-    def handle_call({unquote(cmd), _, _, _} = _call, _from, %{result: result} = state)
-        when result != nil and unquote(arity) == 4 do
+        when result != nil do
       {:reply, {:error, :no_process}, state}
     end
 
     # Past the checkpoint -- the agent is no longer in await_proceed.
-    def handle_call({unquote(cmd), _} = _call, _from, %{running?: true} = state)
-        when unquote(arity) == 2 do
-      {:reply, {:error, :running}, state}
-    end
-
-    def handle_call({unquote(cmd), _, _, _} = _call, _from, %{running?: true} = state)
-        when unquote(arity) == 4 do
+    def handle_call({unquote(cmd), _} = _call, _from, %{running?: true} = state) do
       {:reply, {:error, :running}, state}
     end
 
     # Pre-checkpoint -- the agent hasn't gotten to the await_proceed
     # loop yet, so the command would be dropped or misordered.
-    def handle_call({unquote(cmd), _} = _call, _from, %{child_pid: nil} = state)
-        when unquote(arity) == 2 do
+    def handle_call({unquote(cmd), _} = _call, _from, %{child_pid: nil} = state) do
       {:reply, {:error, :not_ready}, state}
     end
+  end
 
-    def handle_call({unquote(cmd), _, _, _} = _call, _from, %{child_pid: nil} = state)
-        when unquote(arity) == 4 do
-      {:reply, {:error, :not_ready}, state}
-    end
+  # Same state-machine ladder for the one 4-tuple command.
+  def handle_call({:cap_set_thread, _, _, _} = _call, _from, %{result: result} = state)
+      when result != nil do
+    {:reply, {:error, :no_process}, state}
+  end
+
+  def handle_call({:cap_set_thread, _, _, _} = _call, _from, %{running?: true} = state) do
+    {:reply, {:error, :running}, state}
+  end
+
+  def handle_call({:cap_set_thread, _, _, _} = _call, _from, %{child_pid: nil} = state) do
+    {:reply, {:error, :not_ready}, state}
   end
 
   # Parked at :ready -- forward each cap command to the agent. The
@@ -1238,6 +1235,8 @@ defmodule Linx.Process do
     {:noreply, state}
   end
 
+  # --- agent frame handling ---------------------------------------------------
+
   # Wrap binary_to_term/2 so a malformed payload doesn't crash the
   # GenServer. With :safe, decoding is bounded; the rescue is for the
   # truly malformed case where the framing itself is bad.
@@ -1350,6 +1349,8 @@ defmodule Linx.Process do
     Logger.warning("Linx.Process: unrecognised agent frame: #{inspect(other)}")
     {:noreply, state}
   end
+
+  # --- teardown & session internals --------------------------------------------
 
   # Any waiters still in the queue when the GenServer goes down -- e.g.
   # the spawn/1 caller dies before a terminal event arrives -- get

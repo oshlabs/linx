@@ -38,7 +38,9 @@ defmodule Linx.Mount.Native do
 
   @doc false
   def __on_load__ do
-    :erlang.load_nif(Path.join(:code.priv_dir(:linx), "linx_mount"), 0)
+    :code.priv_dir(:linx)
+    |> :filename.join(~c"linx_mount")
+    |> :erlang.load_nif(0)
   end
 
   @doc """
