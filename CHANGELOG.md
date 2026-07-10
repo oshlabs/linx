@@ -66,6 +66,16 @@ test coverage. Highlights:
 
 ### Changed
 
+- **`{:connect_unix, path}` stdio directives now connect in the agent,
+  host-side, at spawn/enter time** — before the `clone(2)` (or, in enter
+  mode, before any `setns(2)`); the workload inherits the already-connected
+  fd and only `dup2`s it. Previously the *child* connected after `:proceed`,
+  which resolved `path` in the child's (possibly pivoted) mount namespace
+  and surfaced bad paths only after the whole checkpoint bring-up.
+  Consequences: `path` is always a host path; the listener's `accept`
+  completes at spawn time (before `:ready`); a failed connect is a new
+  pre-clone error stage `:connect_unix` emitted before `:ready`; and child
+  seccomp filters no longer need `socket`/`connect` for stdio plumbing.
 - **Tables built with `Table.new/3` / `Ruleset.add_table/3` now default to
   `flags: [:owner]`** — a pushed table auto-reaps when the creating socket
   closes, aligning the primary authoring path with the documented "sockets

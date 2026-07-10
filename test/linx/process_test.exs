@@ -376,7 +376,7 @@ defmodule Linx.ProcessTest do
       refute_received {:linx_process, :pty_out, _}
     end
 
-    test "{:connect_unix, path} delivers stdout bytes to a host listener" do
+    test "{:connect_unix, path} connects at spawn time and delivers stdout bytes" do
       socket_path =
         Path.join(System.tmp_dir!(), "linx_test_#{System.unique_integer([:positive])}.sock")
 
@@ -396,11 +396,82 @@ defmodule Linx.ProcessTest do
             stdio: [stdout: {:connect_unix, socket_path}]
           )
 
+        # The agent connects host-side on receipt of the request, so the
+        # accept completes while the workload is still parked at the
+        # checkpoint — before proceed/1. (This timing is the contract
+        # that makes the path immune to checkpoint-window rootfs pivots:
+        # the fd exists before the child's mount view can diverge.)
+        {:ok, sock} = :gen_tcp.accept(listener, 2_000)
+        assert_receive {:linx_process, :ready, _}, 2_000
+
+        # Connected ≠ exec'd: no bytes flow until :proceed.
+        assert {:error, :timeout} = :gen_tcp.recv(sock, 0, 100)
+
+        :ok = P.proceed(session)
+        assert {:ok, "hello-from-the-child\n"} = :gen_tcp.recv(sock, 0, 2_000)
+
+        assert_receive {:linx_process, :exited, 0}, 2_000
+
+        # The agent closed its copy of the fd after clone, so the workload
+        # exiting closes the last writer and the listener side sees EOF.
+        assert {:error, :closed} = :gen_tcp.recv(sock, 0, 2_000)
+        :gen_tcp.close(sock)
+      after
+        :gen_tcp.close(listener)
+        File.rm(socket_path)
+      end
+    end
+
+    test "{:connect_unix, path} with nothing at path fails at spawn, before :ready" do
+      # The agent's host-side connect fails on receipt of the request —
+      # the workload is never created. ENOENT = 2.
+      path =
+        Path.join(System.tmp_dir!(), "linx_absent_#{System.unique_integer([:positive])}.sock")
+
+      {:ok, _session} = P.spawn(argv: ["/bin/true"], stdio: [stdout: {:connect_unix, path}])
+
+      assert_receive {:linx_process, :error, 2, :connect_unix}, 2_000
+      refute_received {:linx_process, :ready, _}
+    end
+
+    test "{:connect_unix, path} exceeding sun_path fails with ENAMETOOLONG" do
+      # sun_path caps AF_UNIX paths at ~107 bytes; the agent checks before
+      # connecting. ENAMETOOLONG = 36.
+      long_path = Path.join(System.tmp_dir!(), String.duplicate("x", 200) <> ".sock")
+
+      {:ok, _session} =
+        P.spawn(argv: ["/bin/true"], stdio: [stdout: {:connect_unix, long_path}])
+
+      assert_receive {:linx_process, :error, 36, :connect_unix}, 2_000
+      refute_received {:linx_process, :ready, _}
+    end
+
+    @tag :integration
+    test "{:connect_unix, path} crosses fresh :mount and :net namespaces" do
+      # The fd is connected before the namespaces even exist, so neither a
+      # diverging mount view nor an isolated netns can break it — the
+      # workload inherits an already-connected socket on fd 1.
+      socket_path =
+        Path.join(System.tmp_dir!(), "linx_test_ns_#{System.unique_integer([:positive])}.sock")
+
+      _ = File.rm(socket_path)
+
+      {:ok, listener} =
+        :gen_tcp.listen(0, [{:ifaddr, {:local, socket_path}}, :binary, {:active, false}])
+
+      try do
+        {:ok, session} =
+          P.spawn(
+            argv: ["/bin/echo", "hello-across-namespaces"],
+            namespaces: [:mount, :net],
+            stdio: [stdout: {:connect_unix, socket_path}]
+          )
+
+        {:ok, sock} = :gen_tcp.accept(listener, 2_000)
         assert_receive {:linx_process, :ready, _}, 2_000
         :ok = P.proceed(session)
 
-        {:ok, sock} = :gen_tcp.accept(listener, 2_000)
-        assert {:ok, "hello-from-the-child\n"} = :gen_tcp.recv(sock, 0, 2_000)
+        assert {:ok, "hello-across-namespaces\n"} = :gen_tcp.recv(sock, 0, 2_000)
         :gen_tcp.close(sock)
 
         assert_receive {:linx_process, :exited, 0}, 2_000
@@ -666,6 +737,52 @@ defmodule Linx.ProcessTest do
 
       :ok = P.signal(sleeper, 9)
       assert_receive {:linx_process, :signaled, 9}, 5_000
+    end
+
+    @tag :integration
+    test "{:connect_unix, _} stdio connects host-side, before the setns" do
+      # Enter mode setns's the *agent itself* into the target's namespaces
+      # before forking -- so a connect performed at the child's usual
+      # stdio stage would resolve the path in the target's mount/net view.
+      # The contract is host-side resolution: the agent connects on
+      # receipt of the request, before any setns. Witnessed here by the
+      # accept completing against a host listener even though the probe
+      # joins a netns-and-mountns-isolated target.
+      {:ok, sleeper} = P.spawn(argv: ["/bin/sleep", "60"], namespaces: [:net, :mount])
+      assert_receive {:linx_process, :ready, target_pid}, 2_000
+      :ok = P.proceed(sleeper)
+      assert_receive {:linx_process, :running}, 2_000
+
+      socket_path =
+        Path.join(System.tmp_dir!(), "linx_enter_#{System.unique_integer([:positive])}.sock")
+
+      _ = File.rm(socket_path)
+
+      {:ok, listener} =
+        :gen_tcp.listen(0, [{:ifaddr, {:local, socket_path}}, :binary, {:active, false}])
+
+      try do
+        {:ok, prober} =
+          P.enter(target_pid,
+            argv: ["/bin/echo", "hello-from-inside"],
+            stdio: [stdout: {:connect_unix, socket_path}]
+          )
+
+        {:ok, sock} = :gen_tcp.accept(listener, 2_000)
+        assert_receive {:linx_process, :ready, _}, 2_000
+        :ok = P.proceed(prober)
+
+        assert {:ok, "hello-from-inside\n"} = :gen_tcp.recv(sock, 0, 2_000)
+        :gen_tcp.close(sock)
+
+        assert {:ok, {:exited, 0}} = P.wait(prober, 5_000)
+      after
+        :gen_tcp.close(listener)
+        File.rm(socket_path)
+
+        :ok = P.signal(sleeper, 9)
+        assert_receive {:linx_process, :signaled, 9}, 5_000
+      end
     end
   end
 

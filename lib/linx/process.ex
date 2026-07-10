@@ -57,6 +57,11 @@ defmodule Linx.Process do
 
     * `:posix_openpt`, `:ptsetup`, `:ptsname`, `:pts_open` — PTY pair
       creation (PTY mode only).
+    * `:connect_unix` — the agent couldn't connect a
+      `{:connect_unix, path}` stdio socket (no listener at `path` →
+      `ECONNREFUSED`/`ENOENT`, path exceeds `sun_path` →
+      `ENAMETOOLONG`). Emitted before `:ready` — the child is never
+      created.
     * `:sigprocmask`, `:pipe2`, `:signalfd` — internal pipe and signal
       plumbing.
 
@@ -73,8 +78,8 @@ defmodule Linx.Process do
 
   ### Child-side pre-exec failures (post-checkpoint)
 
-    * `:stdio` — `apply_stdio` failed (dup2 onto 0/1/2, AF_UNIX
-      connect for `{:connect_unix, _}`, or the PTY slave's `TIOCSCTTY`).
+    * `:stdio` — `apply_stdio` failed in the child (opening `/dev/null`,
+      dup2 onto 0/1/2, or the PTY slave's `TIOCSCTTY`).
     * `:chdir` — `chdir(2)` to the `:cwd` option failed in the child
       (e.g. the directory doesn't exist in the workload's root).
     * `:execve` — `execve(2)` returned (i.e. failed).
@@ -151,6 +156,7 @@ defmodule Linx.Process do
     :clone,
     :fork,
     :stdio,
+    :connect_unix,
     :chdir,
     :posix_openpt,
     :ptsetup,
@@ -297,10 +303,18 @@ defmodule Linx.Process do
 
     * `:inherit` — leave that fd untouched.
     * `:devnull` — dup `/dev/null` onto it.
-    * `{:connect_unix, "/path/to/socket"}` — the workload connects an
-      `AF_UNIX` stream socket to `path` and dup2's it onto the fd. The
-      listener at `path` is the caller's responsibility (must be
-      `:gen_tcp.listen`-ing before `spawn/1`).
+    * `{:connect_unix, "/path/to/socket"}` — an `AF_UNIX` stream socket,
+      connected to `path` and dup2'd onto the fd. The **agent** performs
+      the connect, host-side, when it receives the request — before the
+      clone (or, for `enter/2`, before any `setns`) — so `path` is
+      resolved in the **host's** mount namespace, immune to whatever the
+      checkpoint window does to the workload's filesystem view (rootfs
+      pivots included); the workload merely inherits the already-connected
+      fd. The listener at `path` is the caller's responsibility (must be
+      `:gen_tcp.listen`-ing before `spawn/1`); expect its `accept` to
+      complete at spawn time, before `:ready`/`proceed/1`. A failed
+      connect surfaces as `{:linx_process, :error, errno, :connect_unix}`
+      before `:ready`, and the workload is never created.
 
   Per-fd PTY directives are not supported — a PTY is one device shared
   across all three fds; use the `:pty` shorthand.

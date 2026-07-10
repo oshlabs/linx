@@ -341,8 +341,13 @@ P.wait(c)
 
 ### `{:connect_unix, path}` — pipe a single fd to an AF_UNIX listener
 
-The caller opens the listener *before* `spawn/1`; the workload
-`connect(2)`s to it. Useful for capturing stdout/stderr to a
+The caller opens the listener *before* `spawn/1`; the **agent**
+`connect(2)`s to it host-side, on receipt of the request — before the
+clone (or enter-mode `setns`) — and the workload inherits the
+already-connected fd. `path` is therefore always a *host* path, immune
+to anything the checkpoint window does to the workload's mount
+namespace (rootfs pivots included), and the accept completes at spawn
+time, before `:ready`. Useful for capturing stdout/stderr to a
 GenServer, a file, anywhere.
 
 ```elixir

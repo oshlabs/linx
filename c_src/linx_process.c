@@ -169,7 +169,7 @@
  * sees. */
 enum stage {
 	STAGE_EXECVE = 1,
-	STAGE_STDIO = 2, /* per-fd plumbing in child: /dev/null, AF_UNIX connect, PTY ioctl */
+	STAGE_STDIO = 2, /* per-fd plumbing in child: /dev/null open, dup2 of pre-connected AF_UNIX fds, PTY ioctl */
 	STAGE_CAP_DROP_BOUNDING = 3, /* prctl(PR_CAPBSET_DROP) failed in the child */
 	STAGE_CAP_SET_THREAD = 4,    /* capset(2) failed in the child */
 	STAGE_CAP_SET_AMBIENT = 5,   /* prctl(PR_CAP_AMBIENT_*) failed in the child */
@@ -360,10 +360,15 @@ static void emit_error(int err, const char *stage)
 enum req_mode { MODE_SPAWN, MODE_ENTER };
 
 /* Per-fd stdio directive. INHERIT leaves the child's fd untouched; DEVNULL
- * dup2's /dev/null on; CONNECT_UNIX connects an AF_UNIX stream to `path`
- * and dup2's it on. (The whole-stdio PTY mode is handled separately --
- * see `pty` below -- since it shares one slave fd across 0/1/2 plus
- * setsid + TIOCSCTTY.) */
+ * dup2's /dev/null on; CONNECT_UNIX dup2's a pre-connected AF_UNIX stream
+ * socket on. The *agent* performs the connect, host-side, before any
+ * namespace transition (spawn-mode clone or enter-mode setns) -- see
+ * connect_stdio_sockets -- so `path` is always resolved in the host's
+ * mount namespace, immune to whatever the checkpoint window does to the
+ * child's (rootfs pivots included), and a bad path fails the request up
+ * front instead of post-:proceed. The child merely inherits the fd.
+ * (The whole-stdio PTY mode is handled separately -- see `pty` below --
+ * since it shares one slave fd across 0/1/2 plus setsid + TIOCSCTTY.) */
 struct stdio_dir {
 	enum stdio_kind {
 		STDIO_INHERIT = 0,
@@ -371,6 +376,7 @@ struct stdio_dir {
 		STDIO_CONNECT_UNIX,
 	} kind;
 	char *path; /* CONNECT_UNIX only; malloc'd */
+	int fd;     /* CONNECT_UNIX only; connected by the agent, -1 until then */
 };
 
 /* The parsed shape of an inbound request.
@@ -568,6 +574,7 @@ static int decode_stdio_directive(const char *buf, int *idx, struct stdio_dir *o
 		if (decode_string(buf, idx, &out->path) < 0)
 			return -1;
 		out->kind = STDIO_CONNECT_UNIX;
+		out->fd = -1; /* connect_stdio_sockets fills this in */
 		return 0;
 	}
 
@@ -856,7 +863,9 @@ fail:
 /* Arguments handed to child_fn via clone's `arg` pointer.
  *
  * stdio    -- per-fd directives. The child applies them after :proceed
- *             but before execve.
+ *             but before execve. CONNECT_UNIX entries carry an
+ *             already-connected fd (agent-side connect, pre-clone/setns);
+ *             the child only dup2's it.
  * pty_slave -- if >= 0, the child closes pty_master, sets up a new
  *              session (setsid), makes pty_slave its controlling TTY
  *              (TIOCSCTTY), and dups it onto fd 0/1/2. The per-fd
@@ -879,11 +888,11 @@ struct child_args {
 
 /* Report an in-child pre-exec failure as a `{:error, errno, stage_atom}`
  * ei frame on the c2p pipe and exit. Called when something between the
- * checkpoint and execve fails -- e.g. opening /dev/null, connecting to
- * the AF_UNIX path, ioctl on the PTY slave, capset/prctl in the K2 cap
- * commands. The parent reads the frame in await_exec_outcome (post-
- * proceed) or in await_proceed's c2p poll branch (checkpoint window),
- * and forwards the {:error, _, _} to the BEAM. */
+ * checkpoint and execve fails -- e.g. opening /dev/null, dup2 of a
+ * pre-connected AF_UNIX fd, ioctl on the PTY slave, capset/prctl in the
+ * K2 cap commands. The parent reads the frame in await_exec_outcome
+ * (post-proceed) or in await_proceed's c2p poll branch (checkpoint
+ * window), and forwards the {:error, _, _} to the BEAM. */
 __attribute__((noreturn))
 static void child_fail(int c2p_w, int err, enum stage stage)
 {
@@ -941,30 +950,20 @@ static int apply_stdio(struct child_args *ca)
 		}
 
 		case STDIO_CONNECT_UNIX: {
-			int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-			if (s < 0)
-				return -1;
-			struct sockaddr_un addr = { .sun_family = AF_UNIX };
-			size_t len = strlen(ca->stdio[fd].path);
-			if (len >= sizeof addr.sun_path) {
-				close(s);
-				errno = ENAMETOOLONG;
-				return -1;
-			}
-			memcpy(addr.sun_path, ca->stdio[fd].path, len + 1);
-			if (connect(s, (struct sockaddr *)&addr, sizeof addr) < 0) {
-				int e = errno;
-				close(s);
-				errno = e;
+			/* Connected by the agent (host-side, pre-clone/setns
+			 * -- see connect_stdio_sockets); just dup2 it on.
+			 * dup2 clears CLOEXEC on the new fd; the original is
+			 * CLOEXEC so it would clean itself up at execve, but
+			 * close it eagerly for symmetry with the other cases. */
+			int s = ca->stdio[fd].fd;
+			if (s < 0) {
+				errno = EBADF;
 				return -1;
 			}
-			if (dup2(s, fd) < 0) {
-				int e = errno;
-				close(s);
-				errno = e;
+			if (dup2(s, fd) < 0)
 				return -1;
-			}
-			close(s);
+			if (s > 2)
+				close(s);
 			break;
 		}
 		}
@@ -1943,6 +1942,66 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 	}
 }
 
+/* --- CONNECT_UNIX stdio: agent-side connect ----------------------------- */
+
+/* Connect one AF_UNIX stream socket to `path`. Returns the connected fd
+ * (SOCK_CLOEXEC -- the child's dup2 onto 0/1/2 clears the flag on the
+ * duplicate; the original closes itself at execve), or -1 with errno set. */
+static int connect_one_unix(const char *path)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	size_t len = strlen(path);
+	if (len >= sizeof addr.sun_path) {
+		errno = ENAMETOOLONG;
+		return -1;
+	}
+	memcpy(addr.sun_path, path, len + 1);
+
+	int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (s < 0)
+		return -1;
+	if (connect(s, (struct sockaddr *)&addr, sizeof addr) < 0) {
+		int e = errno;
+		close(s);
+		errno = e;
+		return -1;
+	}
+	return s;
+}
+
+/* Connect every CONNECT_UNIX stdio directive -- in the agent, before the
+ * mode switch (spawn-mode clone or enter-mode setns). The paths are
+ * caller-supplied *host* paths (the listener lives BEAM-side, bound
+ * before the request was sent), so they must be resolved in the host's
+ * mount namespace -- never the child's, whose view the checkpoint window
+ * is free to rearrange (Tank pivots the rootfs there). Connecting here
+ * also fails fast: a bad path surfaces as {:error, errno, :connect_unix}
+ * before any child exists, and the child needs no socket syscalls in its
+ * seccomp filter -- apply_stdio just dup2's the inherited fd.
+ *
+ * On failure: closes any fds connected so far and returns -1 with errno
+ * set. */
+static int connect_stdio_sockets(struct request *req)
+{
+	for (int fd = 0; fd < 3; fd++) {
+		if (req->stdio[fd].kind != STDIO_CONNECT_UNIX)
+			continue;
+		int s = connect_one_unix(req->stdio[fd].path);
+		if (s < 0) {
+			int e = errno;
+			for (int j = 0; j < fd; j++) {
+				if (req->stdio[j].kind == STDIO_CONNECT_UNIX &&
+				    req->stdio[j].fd >= 0)
+					close(req->stdio[j].fd);
+			}
+			errno = e;
+			return -1;
+		}
+		req->stdio[fd].fd = s;
+	}
+	return 0;
+}
+
 /* --- main -------------------------------------------------------------- */
 
 int main(void)
@@ -1998,6 +2057,15 @@ int main(void)
 	 * the BEAM-side caller will expect. */
 	extern char **environ;
 	char **child_env = req.env ? req.env : environ;
+
+	/* CONNECT_UNIX stdio directives connect here -- host-side, before
+	 * the clone/setns below -- so the child only inherits ready-made
+	 * fds. See connect_stdio_sockets for the full reasoning. */
+	if (connect_stdio_sockets(&req) < 0) {
+		emit_error(errno, "connect_unix");
+		free_request(&req);
+		return 4;
+	}
 
 	/* Two internal pipes for the checkpoint handshake. c2p uses CLOEXEC
 	 * on the child end so a successful execve auto-closes it (the
@@ -2130,6 +2198,15 @@ int main(void)
 	 * close here is the parent's copy. */
 	close(c2p[1]);
 	close(p2c[0]);
+	/* And the parent's copies of any pre-connected CONNECT_UNIX fds: the
+	 * child holds its own across clone/fork. Dropping ours here means
+	 * the BEAM-side listener sees EOF when the *workload* exits (or the
+	 * child aborts before dup2'ing them), not when the agent does. */
+	for (int i = 0; i < 3; i++) {
+		if (req.stdio[i].kind == STDIO_CONNECT_UNIX &&
+		    req.stdio[i].fd >= 0)
+			close(req.stdio[i].fd);
+	}
 	/* In PTY mode, the slave is for the child only; the parent keeps the
 	 * master. Closing the slave here removes the agent's extra reference;
 	 * once the child also closes it (via dup2 onto 0/1/2 + close), the
