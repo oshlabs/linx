@@ -25,6 +25,10 @@ defmodule Mix.Linx.CC do
   #     clone/execve as root: `-fstack-protector-strong`,
   #     `-D_FORTIFY_SOURCE=2` (needs optimisation, so skipped under
   #     `LINX_DEBUG`'s `-O0`), and full RELRO (`-z relro -z now`).
+  #     The Port binary is additionally built PIE (`-fPIE -pie`) so the
+  #     one artifact that runs as root gets ASLR of its own text/data
+  #     regardless of the host compiler's default; NIFs are inherently
+  #     position-independent (`-fPIC -shared`).
   @moduledoc false
 
   @base_flags ~w(-std=c11 -Wall -Wextra -Wpedantic -D_GNU_SOURCE)
@@ -111,6 +115,7 @@ defmodule Mix.Linx.CC do
 
       :port_binary ->
         @base_flags ++
+          ~w(-fPIE -pie) ++
           opt ++
           @harden_compile ++
           fortify ++
