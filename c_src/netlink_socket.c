@@ -134,10 +134,15 @@ static ERL_NIF_TERM open_in_netns(ErlNifEnv *env, int argc,
 	if (!enif_get_int(env, argv[1], &protocol))
 		return enif_make_badarg(env);
 
-	/* open() needs a NUL-terminated C string. */
+	/* open() needs a NUL-terminated C string. Reject embedded NUL:
+	 * "validated\0smuggled" would silently truncate at the NUL and open
+	 * a different path than the Elixir side validated -- same hardening
+	 * as binary_to_cstr in the other three C units. */
 	char cpath[PATH_MAX];
 	if (path.size >= sizeof cpath)
 		return make_error(env, "open", ENAMETOOLONG);
+	if (memchr(path.data, '\0', path.size))
+		return make_error(env, "open", EINVAL);
 	memcpy(cpath, path.data, path.size);
 	cpath[path.size] = '\0';
 

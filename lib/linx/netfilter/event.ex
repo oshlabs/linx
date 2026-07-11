@@ -7,14 +7,14 @@ defmodule Linx.Netfilter.Event do
   Each committed transaction generates a sequence of events on
   the multicast group:
 
-    1. One `NFT_MSG_NEWGEN` with the new generation id and the
-       committing process's pid / name.
-    2. One event per entity created, modified, or deleted in the
+    1. One event per entity created, modified, or deleted in the
        commit (`NFT_MSG_NEWTABLE`, `NFT_MSG_DELRULE`, …).
+    2. One closing `NFT_MSG_NEWGEN` with the new generation id and
+       the committing process's pid / name.
 
-  `Linx.Netfilter.Monitor` walks this stream, attaching the most
-  recent `NEWGEN`'s `gen_id` / `proc_pid` / `proc_name` to every
-  subsequent entity event, so each `%Event{}` carries the full
+  `Linx.Netfilter.Monitor` buffers the entity events until the
+  closing `NEWGEN` arrives, then stamps them with its `gen_id` /
+  `proc_pid` / `proc_name` — so each `%Event{}` carries the full
   context of "who changed this and when".
 
   ## Fields

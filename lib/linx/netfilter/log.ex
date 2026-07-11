@@ -60,7 +60,9 @@ defmodule Linx.Netfilter.Log do
       nfulnl_msg_config: 0,
       nfulnl_msg_packet: 0,
       nfulnl_cfg_cmd_bind: 0,
+      nfulnl_cfg_cmd_unbind: 0,
       nfulnl_cfg_cmd_pf_bind: 0,
+      nfulnl_cfg_cmd_pf_unbind: 0,
       nfula_cfg_cmd: 0,
       nfula_cfg_mode: 0,
       nfula_cfg_qthresh: 0,
@@ -180,8 +182,7 @@ defmodule Linx.Netfilter.Log do
 
   defp send_pf_unbinds(sock, families) do
     Enum.each(families, fn family ->
-      # PF_UNBIND
-      _ = send_cfg_cmd(sock, family_num_for_log(family), 4, 0)
+      _ = send_cfg_cmd(sock, family_num_for_log(family), nfulnl_cfg_cmd_pf_unbind(), 0)
     end)
 
     :ok
@@ -197,8 +198,7 @@ defmodule Linx.Netfilter.Log do
   end
 
   defp send_cmd_unbind(sock, group) do
-    # NFULNL_CFG_CMD_UNBIND = 2
-    send_cfg_cmd(sock, 0, 2, group)
+    send_cfg_cmd(sock, 0, nfulnl_cfg_cmd_unbind(), group)
   end
 
   # Sends NFULNL_MSG_CONFIG with a NFULA_CFG_CMD attribute. The cmd
@@ -282,17 +282,31 @@ defmodule Linx.Netfilter.Log do
 
     case :socket.send(sock.socket, Message.encode(msg)) do
       :ok ->
-        # Best-effort: drain any ACK that arrives. We don't strictly
-        # need to wait — the config takes effect asynchronously.
-        case :socket.recv(sock.socket, @recv_size, 50) do
-          {:ok, _ack} -> :ok
+        # The request carries NLM_F_ACK, so the kernel answers every
+        # config message. A NACK here (EPERM without CAP_NET_ADMIN,
+        # nfnetlink_log module missing) is the difference between a
+        # working listener and one that silently never delivers —
+        # classify it instead of draining it blind.
+        case :socket.recv(sock.socket, @recv_size, 1_000) do
+          {:ok, ack} -> classify_config_ack(Message.decode(ack))
           {:error, :timeout} -> :ok
-          {:error, _} -> :ok
+          {:error, reason} -> {:error, {:recv, reason}}
         end
 
       {:error, reason} ->
         {:error, {:send, reason}}
     end
+  end
+
+  defp classify_config_ack(messages) do
+    Enum.find_value(messages, :ok, fn %Message{type: type, payload: payload} ->
+      with true <- type == nlmsg_error(),
+           <<errno::native-signed-32, _::binary>> when errno != 0 <- payload do
+        {:error, Linx.Netlink.Error.from_errno(-errno)}
+      else
+        _ -> nil
+      end
+    end)
   end
 
   # ===========================================================

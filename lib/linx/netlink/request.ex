@@ -29,14 +29,7 @@ defmodule Linx.Netlink.Request do
   import Bitwise
   import Linx.Netlink.Constants
 
-  alias Linx.Netlink.{Attr, Error, Message, Socket}
-
-  # Flags carried in an NLMSG_ERROR's nlmsg_flags when extended-ack TLVs are
-  # appended. NLM_F_CAPPED means the echoed original message was trimmed to
-  # its 16-byte header; NLM_F_ACK_TLVS means the extended-ack attributes
-  # follow it. See include/uapi/linux/netlink.h.
-  @nlm_f_capped 0x100
-  @nlm_f_ack_tlvs 0x200
+  alias Linx.Netlink.{Error, Message, Socket}
 
   @doc """
   Sends a request and returns the kernel's reply.
@@ -59,10 +52,18 @@ defmodule Linx.Netlink.Request do
       meaning the object set changed mid-dump and the reply may contain
       duplicates or omissions. Retry the dump.
   """
-  @spec talk(Socket.t(), 0..0xFFFF, non_neg_integer, iodata) ::
+  # A reply datagram that takes longer than this to arrive means the
+  # request or its reply was lost (netlink is lossy under ENOBUFS) —
+  # without a bound, the caller blocks forever. Generous: the kernel
+  # answers healthy requests in microseconds, and the timeout is
+  # per-datagram, so long dumps are unaffected as long as they flow.
+  @default_timeout 5_000
+
+  @spec talk(Socket.t(), 0..0xFFFF, non_neg_integer, iodata, keyword) ::
           {:ok, [Message.t()]} | {:error, term}
-  def talk(%Socket{} = socket, type, flags, payload \\ <<>>) do
+  def talk(%Socket{} = socket, type, flags, payload \\ <<>>, opts \\ []) do
     seq = Socket.next_seq(socket)
+    timeout = Keyword.get(opts, :timeout, @default_timeout)
 
     message = %Message{
       type: type,
@@ -72,7 +73,7 @@ defmodule Linx.Netlink.Request do
     }
 
     case :socket.send(socket.socket, Message.encode(message)) do
-      :ok -> receive_reply(socket, seq, [])
+      :ok -> receive_reply(socket, seq, [], timeout)
       {:error, reason} -> {:error, {:send, reason}}
     end
   end
@@ -80,11 +81,11 @@ defmodule Linx.Netlink.Request do
   # Receive and decode datagrams until the reply terminates. The explicit
   # 64 KiB read in recv_datagram/1 matters: :socket.recv/1's default read
   # length is 8 KiB and silently truncates larger dump chunks.
-  defp receive_reply(socket, seq, acc) do
-    case Socket.recv_datagram(socket) do
+  defp receive_reply(socket, seq, acc, timeout) do
+    case Socket.recv_datagram(socket, timeout: timeout) do
       {:ok, data} ->
         case consume(Message.decode(data), seq, acc) do
-          {:cont, acc} -> receive_reply(socket, seq, acc)
+          {:cont, acc} -> receive_reply(socket, seq, acc, timeout)
           {:halt, result} -> result
         end
 
@@ -158,43 +159,11 @@ defmodule Linx.Netlink.Request do
     if errno == 0 do
       :ack
     else
-      {:error, Error.from_errno(-errno, extack_message(flags, rest))}
+      {:error, Error.from_errno(-errno, Error.extack_message(flags, rest))}
     end
   end
 
   defp classify_error(%Message{}), do: {:error, %Error{errno: :malformed_error, code: nil}}
-
-  # Extract NLMSGERR_ATTR_MSG from an error reply's payload, or nil if the
-  # kernel did not include the extended-ack TLVs.
-  defp extack_message(flags, rest) do
-    if (flags &&& @nlm_f_ack_tlvs) != 0 do
-      case skip_echoed(rest, (flags &&& @nlm_f_capped) != 0) do
-        {:ok, tlvs} ->
-          case List.keyfind(Attr.decode(tlvs), 1, 0) do
-            # NLMSGERR_ATTR_MSG = 1 — a NUL-terminated string.
-            {1, value} -> String.trim_trailing(value, <<0>>)
-            nil -> nil
-          end
-
-        :error ->
-          nil
-      end
-    end
-  end
-
-  # After the errno, the error reply contains the echoed nlmsghdr — just the
-  # 16-byte header when NLM_F_CAPPED is set, the full original message
-  # (rounded up to a 4-byte boundary) otherwise. The TLVs follow.
-  defp skip_echoed(<<len::native-32, _::binary>> = bin, capped?) do
-    consume = if capped?, do: 16, else: len + 3 &&& bnot(3)
-
-    case bin do
-      <<_::binary-size(consume), tlvs::binary>> -> {:ok, tlvs}
-      _ -> :error
-    end
-  end
-
-  defp skip_echoed(_, _), do: :error
 
   # NLM_F_MULTI marks a message as one of a series ended by NLMSG_DONE; a
   # message without it is a complete single reply.

@@ -32,17 +32,12 @@ defmodule Linx.Netlink.Nfnl do
   import Bitwise
   import Linx.Netlink.Constants
 
-  alias Linx.Netlink.{Attr, Error, Message, Socket}
+  alias Linx.Netlink.{Error, Message, Socket}
   alias Linx.Netlink.Nfnl.Codec
 
   # NETLINK_NETFILTER — the nfnetlink protocol number for socket(2).
   # `include/uapi/linux/netlink.h`.
   @netlink_netfilter 12
-
-  # NLM_F_ACK + NLM_F_ACK_TLVS flag bits, used when decoding error
-  # responses to find extended-ack messages.
-  @nlm_f_capped 0x100
-  @nlm_f_ack_tlvs 0x200
 
   @doc """
   Opens an nfnetlink socket in network namespace `netns`.
@@ -203,35 +198,9 @@ defmodule Linx.Netlink.Nfnl do
     if errno == 0 do
       :ack
     else
-      {:error, Error.from_errno(-errno, extack_message(flags, rest))}
+      {:error, Error.from_errno(-errno, Error.extack_message(flags, rest))}
     end
   end
 
   defp classify_error(%Message{}), do: {:error, %Error{errno: :malformed_error, code: nil}}
-
-  defp extack_message(flags, rest) do
-    if (flags &&& @nlm_f_ack_tlvs) != 0 do
-      case skip_echoed(rest, (flags &&& @nlm_f_capped) != 0) do
-        {:ok, tlvs} ->
-          case List.keyfind(Attr.decode(tlvs), 1, 0) do
-            {1, value} -> String.trim_trailing(value, <<0>>)
-            nil -> nil
-          end
-
-        :error ->
-          nil
-      end
-    end
-  end
-
-  defp skip_echoed(<<len::native-32, _::binary>> = bin, capped?) do
-    consume = if capped?, do: 16, else: len + 3 &&& bnot(3)
-
-    case bin do
-      <<_::binary-size(consume), tlvs::binary>> -> {:ok, tlvs}
-      _ -> :error
-    end
-  end
-
-  defp skip_echoed(_, _), do: :error
 end

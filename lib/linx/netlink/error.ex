@@ -58,4 +58,53 @@ defmodule Linx.Netlink.Error do
 
   defp format_errno(:unknown, code), do: "errno #{code}"
   defp format_errno(errno, code), do: "#{errno |> Atom.to_string() |> String.upcase()} (#{code})"
+
+  import Bitwise
+
+  # Flags carried in an NLMSG_ERROR's nlmsg_flags when extended-ack TLVs
+  # are appended. NLM_F_CAPPED means the echoed original message was
+  # trimmed to its 16-byte header; NLM_F_ACK_TLVS means the extended-ack
+  # attributes follow it. See include/uapi/linux/netlink.h.
+  @nlm_f_capped 0x100
+  @nlm_f_ack_tlvs 0x200
+
+  @doc """
+  Extracts the `NLMSGERR_ATTR_MSG` string from an error reply.
+
+  `flags` is the `NLMSG_ERROR` message's `nlmsg_flags`; `rest` is its
+  payload *after* the leading signed errno. Returns the human-readable
+  extended-ack string, or `nil` if the kernel didn't include one.
+  Shared by `Linx.Netlink.Request` and `Linx.Netlink.Nfnl`, which parse
+  the same reply shape on different receive paths.
+  """
+  @spec extack_message(non_neg_integer, binary) :: String.t() | nil
+  def extack_message(flags, rest) do
+    if (flags &&& @nlm_f_ack_tlvs) != 0 do
+      case skip_echoed(rest, (flags &&& @nlm_f_capped) != 0) do
+        {:ok, tlvs} ->
+          case List.keyfind(Linx.Netlink.Attr.decode(tlvs), 1, 0) do
+            # NLMSGERR_ATTR_MSG = 1 — a NUL-terminated string.
+            {1, value} -> String.trim_trailing(value, <<0>>)
+            nil -> nil
+          end
+
+        :error ->
+          nil
+      end
+    end
+  end
+
+  # After the errno, the error reply contains the echoed nlmsghdr — just
+  # the 16-byte header when NLM_F_CAPPED is set, the full original
+  # message (rounded up to a 4-byte boundary) otherwise. The TLVs follow.
+  defp skip_echoed(<<len::native-32, _::binary>> = bin, capped?) do
+    consume = if capped?, do: 16, else: len + 3 &&& bnot(3)
+
+    case bin do
+      <<_::binary-size(consume), tlvs::binary>> -> {:ok, tlvs}
+      _ -> :error
+    end
+  end
+
+  defp skip_echoed(_, _), do: :error
 end

@@ -14,11 +14,13 @@ defmodule Linx.Netfilter.Monitor do
 
   ## Event grouping
 
-  The kernel broadcasts one `NEW_GEN` message at the start of each
-  committed transaction, then one event per entity in that commit.
-  The Monitor tracks the most recent `NEW_GEN` and attaches its
-  `gen_id` / `proc_pid` / `proc_name` to every subsequent entity
-  event, so each `%Event{}` carries full provenance.
+  The kernel broadcasts a commit's entity events first, then one
+  closing `NEW_GEN` message naming the generation and the
+  committing process. The Monitor buffers the entity events until
+  that `NEW_GEN` arrives, stamps them with its `gen_id` /
+  `proc_pid` / `proc_name`, and delivers them (entity events first,
+  the `:new_gen` event last) — so each `%Event{}` carries full
+  provenance.
 
   ## ENOBUFS recovery
 
@@ -124,7 +126,6 @@ defmodule Linx.Netfilter.Monitor do
         proc_pid: nil,
         proc_name: nil,
         min_gen: since_gen,
-        select_ref: nil,
         # Pending entity events buffered until the closing NEWGEN
         # tells us which gen they belong to. The kernel broadcasts
         # entity events FIRST, then the NEWGEN for the batch.
@@ -143,14 +144,6 @@ defmodule Linx.Netfilter.Monitor do
 
   @impl true
   def handle_info(:recv, state), do: do_recv(state)
-
-  # Non-blocking-recv resolution message: data is now ready.
-  def handle_info({:"$socket", _sock, :select, ref}, %{select_ref: ref} = state) do
-    do_recv(%{state | select_ref: nil})
-  end
-
-  # Stale select notification (we re-armed since). Ignore.
-  def handle_info({:"$socket", _sock, :select, _other_ref}, state), do: {:noreply, state}
 
   @impl true
   def terminate(_reason, state) do

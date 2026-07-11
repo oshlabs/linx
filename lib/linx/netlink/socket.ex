@@ -63,7 +63,7 @@ defmodule Linx.Netlink.Socket do
 
   def open(protocol, :host) when is_integer(protocol) and protocol >= 0 do
     case :socket.open(@af_netlink, :raw, protocol) do
-      {:ok, socket} -> {:ok, build(socket, :host, protocol)}
+      {:ok, socket} -> build(socket, :host, protocol)
       {:error, reason} -> {:error, {:socket, reason}}
     end
   end
@@ -78,7 +78,7 @@ defmodule Linx.Netlink.Socket do
     with {:ok, fd} <- Native.open_in_netns(path, protocol) do
       case :socket.open(fd) do
         {:ok, socket} ->
-          {:ok, build(socket, netns, protocol)}
+          build(socket, netns, protocol)
 
         {:error, reason} ->
           # :socket declined the fd, so it is still ours — do not leak it.
@@ -119,17 +119,29 @@ defmodule Linx.Netlink.Socket do
   @recv_size 65_536
 
   @doc """
-  Receives one datagram from `socket`, blocking until it arrives.
+  Receives one datagram from `socket`.
 
   Reads up to 64 KiB per datagram — `:socket.recv/1`'s default read length
   is only 8 KiB, which silently truncates large netlink dump chunks. If the
   kernel still flags the read as truncated (`MSG_TRUNC` in the returned
   message flags), returns `{:error, :truncated}` instead of handing back a
   cut buffer that would decode into an incomplete message list.
+
+  The second argument is either a read size in bytes or a keyword list:
+  `:size` (default 64 KiB) and `:timeout` in ms (default `:infinity`;
+  `{:error, :timeout}` when it elapses).
   """
-  @spec recv_datagram(t, pos_integer) :: {:ok, binary} | {:error, term}
-  def recv_datagram(%__MODULE__{socket: socket}, size \\ @recv_size) do
-    case :socket.recvmsg(socket, size, 0, [], :infinity) do
+  @spec recv_datagram(t, pos_integer | keyword) :: {:ok, binary} | {:error, term}
+  def recv_datagram(socket, size_or_opts \\ [])
+
+  def recv_datagram(%__MODULE__{} = socket, size) when is_integer(size),
+    do: recv_datagram(socket, size: size)
+
+  def recv_datagram(%__MODULE__{socket: socket}, opts) when is_list(opts) do
+    size = Keyword.get(opts, :size, @recv_size)
+    timeout = Keyword.get(opts, :timeout, :infinity)
+
+    case :socket.recvmsg(socket, size, 0, [], timeout) do
       {:ok, %{flags: flags, iov: iov}} ->
         if :trunc in flags do
           {:error, :truncated}
@@ -193,24 +205,25 @@ defmodule Linx.Netlink.Socket do
 
     # Explicit bind with nl_pid=0 (kernel auto-assigns). Required for
     # multicast: an unbound netlink socket never receives broadcast
-    # events even after NETLINK_ADD_MEMBERSHIP. For request/reply
-    # users this is a no-op (auto-bind would happen on first sendto
-    # anyway). Erlang's :socket.bind/2 doesn't speak netlink
-    # sockaddrs, so the bind goes via the NIF.
-    case :socket.getopt(socket, {:otp, :fd}) do
-      {:ok, fd} ->
-        _ = Native.bind_netlink(fd, 0)
-
-      _ ->
-        :ok
+    # events even after NETLINK_ADD_MEMBERSHIP — so a bind failure is
+    # NOT best-effort: swallowing it would hand back a socket whose
+    # Monitor never sees an event, with no error anywhere. Erlang's
+    # :socket.bind/2 doesn't speak netlink sockaddrs, so the bind goes
+    # via the NIF.
+    with {:ok, fd} <- :socket.getopt(socket, {:otp, :fd}),
+         :ok <- Native.bind_netlink(fd, 0) do
+      {:ok,
+       %__MODULE__{
+         socket: socket,
+         netns: netns,
+         protocol: protocol,
+         # :atomics start at 0, so the first add_get/3 in next_seq/1 yields 1.
+         seq: :atomics.new(1, signed: false)
+       }}
+    else
+      {:error, reason} ->
+        :socket.close(socket)
+        {:error, {:bind, reason}}
     end
-
-    %__MODULE__{
-      socket: socket,
-      netns: netns,
-      protocol: protocol,
-      # :atomics start at 0, so the first add_get/3 in next_seq/1 yields 1.
-      seq: :atomics.new(1, signed: false)
-    }
   end
 end
