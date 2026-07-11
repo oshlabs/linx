@@ -303,6 +303,45 @@ defmodule Linx.Netfilter.Expr do
   end
 
   @doc """
+  Anonymous verdict-map lookup —
+  `ct state vmap { established : accept, invalid : drop }`.
+
+  Returns a sentinel `%Expr{name: :__anon_vmap}` that the encoder
+  expands at `to_batch/2` time into an auto-generated anonymous
+  constant vmap plus a `lookup` reading the verdict from it — the
+  vmap sibling of `set_literal/3`, with the same rule-scoped
+  lifecycle.
+
+  `elements` is a list of `{key, verdict}` pairs, the same shapes
+  `Linx.Netfilter.Vmap.new!/2` accepts. `key_type` names the key
+  type. For `:ct_state` keys, build the bitmask keys with
+  `Linx.Netfilter.Wire.ct_state_bits/1`:
+
+      Rule.build!([
+        Expr.ct(:state),
+        Expr.vmap_literal(
+          [
+            {Wire.ct_state_bits(:established), Verdict.accept()},
+            {Wire.ct_state_bits(:invalid), Verdict.drop()}
+          ],
+          :ct_state
+        )
+      ])
+  """
+  @spec vmap_literal([{term(), term()}], atom() | {:concat, [atom()]}, keyword()) :: t()
+  def vmap_literal(elements, key_type, opts \\ [])
+      when is_list(elements) and (is_atom(key_type) or is_tuple(key_type)) and is_list(opts) do
+    %__MODULE__{
+      name: :__anon_vmap,
+      data: %{
+        elements: elements,
+        key_type: key_type,
+        sreg: Keyword.get(opts, :sreg, @reg_value)
+      }
+    }
+  end
+
+  @doc """
   Reject expression. Produces an explicit rejection response then
   drops the packet.
 

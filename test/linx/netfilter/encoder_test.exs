@@ -8,7 +8,7 @@ defmodule Linx.Netfilter.EncoderTest do
 
   import Linx.Netfilter.Wire
 
-  alias Linx.Netfilter.{Decoder, Encoder, Patch, Set}
+  alias Linx.Netfilter.{Decoder, Encoder, Expr, Patch, Ruleset, Set}
   alias Linx.Netlink.Attr
   alias Linx.Netlink.Message
   alias Linx.Netlink.Nfnl.Codec
@@ -143,35 +143,37 @@ defmodule Linx.Netfilter.EncoderTest do
     end
   end
 
-  describe "~NFT-compiled rulesets encode end-to-end" do
-    # These sources compiled cleanly but crashed (ranges) or mis-encoded
-    # (textual IPs as ASCII) at push time — invisible to value-equality
-    # round-trip tests.
-    defp nft_batch!(source) do
-      {:ok, tokens} = Linx.NFT.Tokenizer.tokenize(source)
-      {:ok, ast} = Linx.NFT.Parser.parse(tokens, source: source)
-      {:ok, rs} = Linx.NFT.Compiler.compile(ast, source: source)
-      Encoder.to_batch(rs)
+  describe "anonymous-set rules encode end-to-end" do
+    # These shapes once compiled cleanly but crashed (ranges) or
+    # mis-encoded (textual IPs as ASCII) at push time — invisible to
+    # value-equality round-trip tests. The rules go through the full
+    # to_batch/2 pipeline so the anonymous-set expansion is covered too.
+    defp rule_batch!(exprs) do
+      Ruleset.new()
+      |> Ruleset.add_table!(:inet, "t")
+      |> Ruleset.add_chain!({:inet, "t"}, "c", type: :filter, hook: :input, priority: 0)
+      |> Ruleset.add_rule!({:inet, "t"}, "c", exprs)
+      |> Encoder.to_batch()
     end
 
-    test "port ranges in rules encode without raising (M1)" do
+    test "port ranges in anonymous sets encode without raising (M1)" do
       msgs =
-        nft_batch!("""
-        table inet t {
-          chain c { type filter hook input priority 0; tcp dport 22-25 accept }
-        }
-        """)
+        rule_batch!([
+          Expr.payload(:tcp_dport),
+          Expr.set_literal([{:range, 22, 25}], :inet_service, flags: [:interval, :constant]),
+          Expr.immediate(:accept)
+        ])
 
       assert Enum.all?(msgs, &match?(%Message{}, &1))
     end
 
-    test "sigil-authored IP sets encode their addresses as 4-byte keys (C4)" do
+    test "textual IPs in anonymous sets encode as 4-byte keys (C4)" do
       msgs =
-        nft_batch!("""
-        table inet t {
-          chain c { type filter hook input priority 0; ip saddr { 1.2.3.4, 5.6.7.8 } drop }
-        }
-        """)
+        rule_batch!([
+          Expr.payload(:ip_saddr),
+          Expr.set_literal(["1.2.3.4", "5.6.7.8"], :ipv4_addr),
+          Expr.immediate(:drop)
+        ])
 
       # Find the NEWSETELEM message for the anonymous set and check the keys.
       newsetelem = Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_newsetelem())
@@ -181,11 +183,11 @@ defmodule Linx.Netfilter.EncoderTest do
 
     test "CIDR inside a set list encodes as an interval pair" do
       msgs =
-        nft_batch!("""
-        table inet t {
-          chain c { type filter hook input priority 0; ip saddr { 10.0.0.0/8 } drop }
-        }
-        """)
+        rule_batch!([
+          Expr.payload(:ip_saddr),
+          Expr.set_literal(["10.0.0.0/8"], :ipv4_addr, flags: [:interval, :constant]),
+          Expr.immediate(:drop)
+        ])
 
       newsetelem = Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_newsetelem())
       [elem_msg] = Enum.filter(msgs, &(&1.type == newsetelem))
