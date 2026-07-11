@@ -207,6 +207,8 @@ defmodule Linx.Sysctl do
   @spec supported?() :: boolean()
   def supported?, do: File.exists?(@self_ostype)
 
+  # --- read verbs -------------------------------------------------------------
+
   @doc """
   Reads a sysctl as a trimmed binary.
 
@@ -329,6 +331,8 @@ defmodule Linx.Sysctl do
     end
   end
 
+  # --- write verbs ------------------------------------------------------------
+
   @doc """
   Writes a value to a sysctl.
 
@@ -402,6 +406,8 @@ defmodule Linx.Sysctl do
   # otherwise dot form. Both validations rule out empty segments and
   # `.`/`..`, so nothing can escape /proc/sys/ via traversal and the
   # Path.join below is safe.
+  # --- key resolution & value rendering ----------------------------------------
+
   defp resolve_key(key) do
     if String.contains?(key, "/") do
       resolve_slash_key(key)
@@ -459,6 +465,8 @@ defmodule Linx.Sysctl do
   # If the target shares all namespaces with us (the filtered list
   # is empty), short-circuit back to :self -- the operation is then
   # functionally identical to a host-side call.
+  # --- the :in option & native-error wrapping -----------------------------------
+
   defp resolve_in(opts) do
     case Keyword.get(opts, :in, :self) do
       :self ->
@@ -539,6 +547,8 @@ defmodule Linx.Sysctl do
   the procfs path side-channel.
   """
   @spec list() :: {:ok, [Entry.t()]} | {:error, term()}
+  # --- list verbs & tree walking -------------------------------------------------
+
   def list, do: do_list(@procsys, :self)
 
   @doc """

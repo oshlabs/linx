@@ -122,6 +122,8 @@ defmodule Linx.Tty do
   `:gen_event` broadcasts to every registered handler.
   """
 
+  require Logger
+
   alias Linx.Tty.Native
   alias Linx.Tty.{Env, Saved, WindowSize}
 
@@ -146,6 +148,8 @@ defmodule Linx.Tty do
   @error_stages [:open, :tcgetattr, :tcsetattr, :ioctl, :close]
   @doc false
   def __error_stages__, do: @error_stages
+
+  # --- terminal primitives ------------------------------------------------------
 
   @doc """
   Returns the linx_tty NIF identifier string — sanity that the native
@@ -352,6 +356,8 @@ defmodule Linx.Tty do
 
   ## Session must be running
 
+  # --- attach ------------------------------------------------------------------
+
   `attach/2` requires the session to be at the `:running` stage.
   Terminal stages return `{:error, :no_process}`; pre-running stages
   (`:starting` / `:spawned` / `:ready`) return
@@ -502,6 +508,8 @@ defmodule Linx.Tty do
   end
 
   def format_error(other), do: inspect(other)
+
+  # --- :group_leader attach internals -------------------------------------------
 
   defp attach_group_leader(session, winsize_poll_ms, detach_key) do
     gl = Process.group_leader()
@@ -827,6 +835,8 @@ defmodule Linx.Tty do
     ArgumentError -> :ok
   end
 
+  # --- local tty handover helpers ----------------------------------------------
+
   # Suspend `prim_tty`'s reader process so it doesn't pull keystrokes
   # out from under our port. Returns the opaque prim_tty state on
   # success (hand it back to give_tty_back/1) or nil if there is no
@@ -886,6 +896,8 @@ defmodule Linx.Tty do
       _, _ -> :error
     end
   end
+
+  # --- prim_tty output-mode surgery (:group_leader attach) ---------------------
 
   # Find the driver pid backing the caller's group leader (the SSH
   # `ssh_cli` channel handler on a Nerves SSH session, the local
@@ -954,8 +966,21 @@ defmodule Linx.Tty do
       _ = :sys.replace_state(drv, swap, 200)
 
       receive do
-        {^ref, {:ok, old_mode}} -> {:ok, old_mode}
-        {^ref, _} -> :error
+        {^ref, {:ok, old_mode}} ->
+          {:ok, old_mode}
+
+        {^ref, reason} ->
+          # :no_prim_tty / :swap_failed both mean the prim_tty state no
+          # longer looks the way this OTP release taught us — say so
+          # loudly rather than silently degrading the attach.
+          Logger.warning(
+            "Linx.Tty group-leader attach: prim_tty state traversal failed " <>
+              "(#{inspect(reason)}); the user_drv/ssh_cli record layout may " <>
+              "have changed in this OTP release. Output-mode switching is " <>
+              "disabled for this attach."
+          )
+
+          :error
       after
         200 -> :error
       end
@@ -1053,6 +1078,8 @@ defmodule Linx.Tty do
   defp prim_tty_options_map?(%{input: _, output: _}), do: true
   defp prim_tty_options_map?(_), do: false
 
+  # --- SIGWINCH plumbing ------------------------------------------------------
+
   # Register a Linx.Tty.SigwinchHandler instance on
   # `:erl_signal_server` keyed by `{handler, id}` so multiple
   # concurrent attaches can coexist (each `id` is a unique ref made by
@@ -1083,6 +1110,8 @@ defmodule Linx.Tty do
 
     :ok
   end
+
+  # --- the :controlling byte pump ---------------------------------------------
 
   @doc false
   # The byte pump. Exposed (under @doc false) so tests can drive it
