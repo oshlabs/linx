@@ -10,9 +10,6 @@ need it on current kernels — `nf_tables_getgen` is gated on
 `CAP_NET_ADMIN` for security reasons. Opening the netlink socket
 itself is unprivileged.
 
-> 🚧 **Skeleton.** Primitives are still in flight; sections fill
-> in as milestones ship.
-
 ## Detecting nfnetlink support
 
 ```elixir
@@ -354,8 +351,11 @@ Ruleset.new()
 
 Element types: `:ipv4_addr` (4-tuple or 4-byte binary),
 `:ipv6_addr` (8-tuple or 16-byte), `:ether_addr`, `:inet_proto`,
-`:inet_service` (port int), `:mark`, `:ifname`. The codec
-normalises element shapes for you on encode and decode.
+`:inet_service` (port int), `:mark`, `:ifname`. Keys can also be
+concatenations — `key_type: {:concat, [:ipv4_addr, :inet_service]}`
+with each element a list of parts (`["10.96.0.1", 443]`), matching
+nft's `addr . port` style. The codec normalises element shapes for
+you on encode and decode.
 
 ## Maps and vmaps
 

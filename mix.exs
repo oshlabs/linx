@@ -317,7 +317,23 @@ defmodule Linx.MixProject do
           Linx.Netlink.Rtnl.Neighbour,
           Linx.Netlink.Rtnl.Rule,
           Linx.Netlink.Rtnl.Stats,
-          Linx.Netlink.Rtnl.Stats.Link64
+          Linx.Netlink.Rtnl.Stats.Link64,
+          Linx.Netlink.Rtnl.Diff,
+          Linx.Netlink.Rtnl.Monitor,
+          Linx.Netlink.Rtnl.Monitor.Event
+        ],
+        Reconcile: [
+          Linx.Reconcile,
+          Linx.Reconcile.Source,
+          Linx.Sysctl.Reconcile,
+          Linx.Sysctl.Reconcile.Report,
+          Linx.Sysctl.Reconcile.Source,
+          Linx.Cgroup.Reconcile,
+          Linx.Cgroup.Reconcile.Report,
+          Linx.Cgroup.Reconcile.Source,
+          Linx.Netlink.Rtnl.Reconcile,
+          Linx.Netlink.Rtnl.Reconcile.Report,
+          Linx.Netlink.Rtnl.Reconcile.Source
         ]
       ]
     ]

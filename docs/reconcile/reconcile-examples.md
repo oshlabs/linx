@@ -6,7 +6,8 @@ and converges the two — idempotent and self-healing, so manual drift, crashes,
 and reboots are corrected on the next pass.
 
 This is the **overview**. Each subsystem keeps its own hands-on examples in its
-`EXAMPLES.md`; the per-subsystem detail is not repeated here. This page covers
+examples page (`docs/<subsystem>/<subsystem>-examples.md`); the per-subsystem
+detail is not repeated here. This page covers
 the shared model, the generic opt-in loop (`Linx.Reconcile`), the plug-in
 contract (`Linx.Reconcile.Source`), and how the pieces fit together. The design
 and rationale live in [reconcile-overview.md](reconcile-overview.md) and the

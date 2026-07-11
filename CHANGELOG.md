@@ -111,9 +111,8 @@ back and compare):
   netlink decoders tolerate short/empty attributes instead of crashing;
   attribute encoding rejects payloads past the 16-bit `nla_len` limit;
   netlink sequence numbers wrap correctly at 32 bits.
-- `finit_module` added to the x86_64 seccomp syscall table; `~NFT` accepts
-  `priority filter + 10`; reconcile reads the generation counter before the
-  snapshot (CAS race).
+- `finit_module` added to the x86_64 seccomp syscall table; reconcile reads
+  the generation counter before the snapshot (CAS race).
 
 ### Changed
 

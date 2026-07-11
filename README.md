@@ -17,7 +17,7 @@ Add `linx` to your dependencies:
 ```elixir
 def deps do
   [
-    {:linx, "~> 0.1"}
+    {:linx, "~> 0.2"}
   ]
 end
 ```
