@@ -839,12 +839,22 @@ defmodule Linx.Process do
 
   # --- GenServer ------------------------------------------------------------
 
+  # A bare File.exists? let a present-but-non-executable agent binary
+  # (botched deploy, chmod lost in packaging) surface as an opaque
+  # Port.open crash instead of the tagged {:missing_binary, _} stop.
+  defp executable?(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} -> Bitwise.band(mode, 0o111) != 0
+      _ -> false
+    end
+  end
+
   @impl true
   def init({command, owner, session})
       when is_tuple(command) and tuple_size(command) == 2 and is_map(session) do
     binary = Path.join(:code.priv_dir(:linx), "linx_process")
 
-    if not File.exists?(binary) do
+    if not executable?(binary) do
       {:stop, {:missing_binary, binary}}
     else
       # Trap exits so terminate/2 (and thus reap/1) runs on exit *signals*,

@@ -138,6 +138,10 @@ static ERL_NIF_TERM open_controlling_raw(ErlNifEnv *env, int argc,
 	/* The saved termios travels back to Elixir as an opaque binary. */
 	ErlNifBinary bin;
 	if (!enif_alloc_binary(sizeof saved, &bin)) {
+		/* Raw mode is already applied and the caller gets no saved
+		 * state back -- undo it here or the terminal stays raw.
+		 * Restore-is-mandatory is this module's doctrine. */
+		(void)tcsetattr(fd, TCSANOW, &saved);
 		close(fd);
 		return make_error(env, "alloc", ENOMEM);
 	}

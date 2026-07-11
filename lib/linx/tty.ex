@@ -793,11 +793,24 @@ defmodule Linx.Tty do
       # pause.
       tty_state = take_tty_quietly()
       sigwinch_id = make_ref()
-      # Opened before the try so `after` can close it: the port holds a
-      # `driver_select` on `fd`, and leaving it open leaks that registration.
-      # A later attach then reuses the fd number and the new port "steals
-      # control" of it from this stale one (a VM warning on fd reuse).
-      port = :erlang.open_port({:fd, fd, fd}, [:binary, :stream])
+
+      # Opened before the main try so its `after` can close it: the port
+      # holds a `driver_select` on `fd`, and leaving it open leaks that
+      # registration. A later attach then reuses the fd number and the
+      # new port "steals control" of it from this stale one (a VM
+      # warning on fd reuse). The open itself can raise (port limit) —
+      # and at this point the terminal is raw and the reader disabled,
+      # so that path must unwind everything acquired above.
+      port =
+        try do
+          :erlang.open_port({:fd, fd, fd}, [:binary, :stream])
+        rescue
+          e ->
+            restore_and_close(fd, saved)
+            give_tty_back(tty_state)
+            Process.flag(:trap_exit, saved_trap)
+            reraise e, __STACKTRACE__
+        end
 
       try do
         # Arm a SIGWINCH forwarder so the pump sees terminal-resize
@@ -819,6 +832,12 @@ defmodule Linx.Tty do
         disarm_sigwinch(sigwinch_id)
         # Restore termios *before* closing the port — the fd must still be open
         # for the tcsetattr — then drop the port to release its fd select.
+        # INVARIANT: restore_and_close/2 is the only closer of `fd`. An
+        # `{:fd, _, _}` port does not close its fds on port close (ERTS's
+        # fd driver only clears the select registration — that's the very
+        # reason the port must be closed explicitly at all). If a future
+        # OTP changed that, this ordering would double-close a possibly
+        # reused fd number; revisit before bumping the OTP floor.
         restore_and_close(fd, saved)
         close_port(port)
         give_tty_back(tty_state)
