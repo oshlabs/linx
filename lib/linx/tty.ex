@@ -898,6 +898,55 @@ defmodule Linx.Tty do
   end
 
   # --- prim_tty output-mode surgery (:group_leader attach) ---------------------
+  #
+  # ## Why this section violates :prim_tty's opacity (the dialyzer skip)
+  #
+  # Over SSH / :remsh there is no kernel tty; the only path to the
+  # user's terminal is the group-leader stack (group -> user_drv /
+  # ssh_cli -> prim_tty), and prim_tty cooks output unless its
+  # `options.output` is `:raw`. OTP has no supported way to flip that
+  # for an SSH-fronted prim_tty: the official `:prim_tty.reinit/2`
+  # bottoms out in the `tty_init` NIF, which needs a real terminal fd
+  # and crashes with :function_clause on states built by
+  # `prim_tty:init_ssh/3` (their `tty` field is `undefined`). So we
+  # reach into the driver's state ourselves: scan for the prim_tty
+  # record — probing tuple fields with `:prim_tty.output_mode/1`,
+  # which is the opacity-violating call that the
+  # `{"lib/linx/tty.ex", :call_without_opaque}` entry in
+  # .dialyzer_ignore.exs skips — then rewrite `options.output` in
+  # place. That mutation suffices because prim_tty's own request
+  # dispatch pattern-matches
+  # `#state{options = #{output := raw}}` (prim_tty.erl:677).
+  #
+  # ## How this gets cleaned up
+  #
+  # Only an OTP-side change removes this section; there is no more
+  # elegant userland variant (hard-coded record indexes are strictly
+  # more brittle than the scan). Two upstream shapes would do it:
+  #
+  #   * minimal — teach `prim_tty:reinit/2` (or a new
+  #     `prim_tty:set_output_mode/2`) to accept `tty = undefined`
+  #     states; the find + swap below become one supported call.
+  #   * proper — a user_drv request, e.g.
+  #     `io:setopts(GL, [{output_mode, raw}])`, so callers never
+  #     touch driver state at all; this whole section reduces to a
+  #     setopts pair.
+  #
+  # OTP 28 added the `output_mode/1` *read* accessor (our probe), so
+  # write access is the natural upstream follow-up — an OTP PR citing
+  # "terminal attach from a remote shell has no supported path" as
+  # the use case. If such an API lands: delete
+  # take_prim_tty_output_quietly / give_prim_tty_output_back /
+  # safe_replace_prim_tty_output / find_prim_tty_in_state /
+  # put_in_tuple_path / safe_prim_tty_output_mode /
+  # swap_prim_tty_output_mode_direct, call the new API from
+  # attach_group_leader/3, and drop the tty.ex entry from
+  # .dialyzer_ignore.exs.
+  #
+  # Failure posture until then: every helper is total. If the
+  # traversal or swap fails, we log a warning naming the reason (the
+  # user_drv/ssh_cli layouts drifted) and the attach degrades to
+  # cooked output instead of crashing; the pump itself still runs.
 
   # Find the driver pid backing the caller's group leader (the SSH
   # `ssh_cli` channel handler on a Nerves SSH session, the local
@@ -907,16 +956,15 @@ defmodule Linx.Tty do
   # have an addressable `:prim_tty` state (escripts, non-shell apps,
   # drivers we don't recognise).
   #
-  # We touch OTP internals here -- specifically, we run a function
-  # inside the driver process via `:sys.replace_state/2` that scans
-  # its state record for an element that responds to
-  # `:prim_tty.output_mode/1`, swaps in a `:prim_tty.reinit/2`'d
-  # version with the new output mode, and shouts the previous mode
-  # back to us through a one-shot ref. Same kind of OTP-internals
-  # coupling we already accept for :prim_tty.disable_reader/1.
-  # Scanning rather than hard-coding the field index makes us
-  # resilient to ssh_cli / user_drv record-layout reshuffles across
-  # OTP versions.
+  # We run a function inside the driver process via
+  # `:sys.replace_state/2` that scans its state record for an element
+  # that responds to `:prim_tty.output_mode/1`, rewrites that
+  # element's options map with the new output mode, and shouts the
+  # previous mode back to us through a one-shot ref. Same kind of
+  # OTP-internals coupling we already accept for
+  # :prim_tty.disable_reader/1. Scanning rather than hard-coding the
+  # field index makes us resilient to ssh_cli / user_drv
+  # record-layout reshuffles across OTP versions.
   defp take_prim_tty_output_quietly(gl, new_mode) do
     # Use a short timeout (200ms) for the GL introspection: a real
     # `:group` gen_statem replies within microseconds, while
