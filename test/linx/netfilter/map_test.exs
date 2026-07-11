@@ -134,4 +134,26 @@ defmodule Linx.Netfilter.MapTest do
       end
     end
   end
+
+  describe "concatenated keys" do
+    test "maps accept {:concat, types} key types, matching Set" do
+      assert {:ok, m} =
+               NMap.new("svc",
+                 key_type: {:concat, [:ipv4_addr, :inet_service]},
+                 data_type: :ipv4_addr,
+                 table: "t"
+               )
+
+      assert m.key_type == {:concat, [:ipv4_addr, :inet_service]}
+    end
+
+    test "a concat with an unknown part is rejected" do
+      assert {:error, {:bad_map, {:unknown_key_type, _}}} =
+               NMap.new("svc",
+                 key_type: {:concat, [:ipv4_addr, :nope]},
+                 data_type: :ipv4_addr,
+                 table: "t"
+               )
+    end
+  end
 end

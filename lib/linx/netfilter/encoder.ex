@@ -1049,6 +1049,15 @@ defmodule Linx.Netfilter.Encoder do
     str = to_string.(value)
     # NUL-terminate (libnftnl convention) and pack type:1 + len:1 + bytes.
     payload = str <> <<0>>
+
+    # Rule.new bounds comments at 253 bytes; this is the backstop for
+    # values that bypass it (a 254+ byte payload would wrap the 8-bit
+    # length and corrupt every TLV after it).
+    if byte_size(payload) > 255 do
+      raise ArgumentError,
+            "rule userdata TLV #{type} payload is #{byte_size(payload)} bytes (max 255)"
+    end
+
     list ++ [<<type::8, byte_size(payload)::8>>, payload]
   end
 
@@ -1243,7 +1252,22 @@ defmodule Linx.Netfilter.Encoder do
   defp infer_key_type({_, _, _, _, _, _}), do: :ether_addr
   defp infer_key_type(n) when is_integer(n) and n < 256, do: :inet_proto
   defp infer_key_type(n) when is_integer(n), do: :inet_service
-  defp infer_key_type(s) when is_binary(s), do: :ifname
+
+  defp infer_key_type(s) when is_binary(s) do
+    # A textual IP here is ambiguous: inferring :ifname would NUL-pad
+    # "1.2.3.4" as an interface name and match nothing. Refuse rather
+    # than mis-encode; the caller should pass decoded 4/16-byte
+    # addresses (or tuples), which carry their type.
+    case :inet.parse_address(String.to_charlist(s)) do
+      {:ok, _} ->
+        raise ArgumentError,
+              "cannot infer a set key type for textual IP #{inspect(s)} — " <>
+                "pass the address in decoded form (tuple or 4/16-byte binary)"
+
+      {:error, _} ->
+        :ifname
+    end
+  end
 
   # ===========================================================
   # Expressions
@@ -1253,6 +1277,15 @@ defmodule Linx.Netfilter.Encoder do
     expressions
     |> Enum.map(&encode_expression_elem/1)
     |> Attr.encode()
+  end
+
+  # A string name means the rule was pulled from the kernel with an
+  # expression Linx couldn't decode (the decoder keeps the raw name);
+  # its data is opaque, so re-encoding it can only corrupt.
+  defp encode_expression_elem(%Expr{name: name}) when not is_atom(name) do
+    raise ArgumentError,
+          "cannot re-encode expression #{inspect(name)} — pulled from the kernel " <>
+            "but not decodable by Linx"
   end
 
   defp encode_expression_elem(%Expr{name: name, data: data}) do
@@ -1559,8 +1592,17 @@ defmodule Linx.Netfilter.Encoder do
     end)
   end
 
-  # Unknown expression — emit empty data; kernel will reject.
-  defp encode_expr_data(_name, _data), do: []
+  # No wire encoding for this expression. Raise rather than emit an
+  # empty NFTA_EXPR_DATA the kernel rejects with an opaque EINVAL.
+  # Reachable three ways: an expression Linx doesn't support, an
+  # :__anon_set / :__anon_vmap sentinel outside :replace-mode push
+  # (anonymous set/vmap literals require mode: :replace), or a pulled
+  # rule whose expression Linx couldn't decode (string name, raw data)
+  # and therefore cannot re-encode.
+  defp encode_expr_data(name, data) do
+    raise ArgumentError,
+          "no wire encoding for nft expression #{inspect(name)} (data: #{inspect(data)})"
+  end
 
   defp encode_log_flags(flags) do
     import Bitwise

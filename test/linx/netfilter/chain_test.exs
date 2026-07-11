@@ -218,4 +218,22 @@ defmodule Linx.Netfilter.ChainTest do
       assert {:error, {:bad_chain, {:not_a_rule, :nope}}} = Chain.add_rule(c, :nope)
     end
   end
+
+  describe "named priorities are checked against the family" do
+    test "a bridge-only name (:out) is rejected for inet at validate_for_family" do
+      {:ok, c} = Chain.new("post", type: :filter, hook: :postrouting, priority: :out)
+
+      assert {:error, {:bad_chain, {:priority_not_valid_for_family, :out, :inet}}} =
+               Chain.validate_for_family(c, :inet)
+
+      assert :ok = Chain.validate_for_family(c, :bridge)
+    end
+
+    test "offsets on a named priority are checked the same way" do
+      {:ok, c} = Chain.new("post", type: :filter, hook: :postrouting, priority: {:out, 10})
+
+      assert {:error, {:bad_chain, {:priority_not_valid_for_family, :out, :inet}}} =
+               Chain.validate_for_family(c, :inet)
+    end
+  end
 end

@@ -171,6 +171,18 @@ defmodule Linx.Netfilter.Map do
 
   defp validate_key_type(nil), do: {:error, {:bad_map, :key_type_required}}
   defp validate_key_type(t) when t in @valid_key_types, do: :ok
+
+  # Concatenated key (`type ipv4_addr . inet_service`), same shape
+  # Linx.Netfilter.Set accepts: a tuple of atomic key types, elements
+  # are lists with one part per field.
+  defp validate_key_type({:concat, types}) when is_list(types) and length(types) >= 2 do
+    if Enum.all?(types, &(&1 in @valid_key_types)) do
+      :ok
+    else
+      {:error, {:bad_map, {:unknown_key_type, {:concat, types}}}}
+    end
+  end
+
   defp validate_key_type(other), do: {:error, {:bad_map, {:unknown_key_type, other}}}
 
   defp validate_data_type(nil), do: {:error, {:bad_map, :data_type_required}}

@@ -244,6 +244,9 @@ defmodule Linx.Netfilter.Decoder do
   defp expr_name_atom("nat"), do: :nat
   defp expr_name_atom("masq"), do: :masq
   defp expr_name_atom("redir"), do: :redir
+  defp expr_name_atom("log"), do: :log
+  defp expr_name_atom("quota"), do: :quota
+  defp expr_name_atom("objref"), do: :objref
   defp expr_name_atom(other) when is_binary(other), do: other
 
   defp decode_expr_data(_name, nil), do: nil
@@ -376,6 +379,40 @@ defmodule Linx.Netfilter.Decoder do
     }
   end
 
+  # Mirrors the encoder's :log shape so pulled rules compare equal to
+  # authored ones and re-encode instead of dying in the encoder.
+  defp decode_expr_data(:log, bin) do
+    attrs = Attr.decode(bin)
+
+    %{
+      group: get_u16_be(attrs, nfta_log_group(), nil),
+      prefix: get_string(attrs, nfta_log_prefix()),
+      snaplen: get_u32_be(attrs, nfta_log_snaplen(), nil),
+      qthreshold: get_u16_be(attrs, nfta_log_qthreshold(), nil),
+      flags: decode_log_flags(get_u32_be(attrs, nfta_log_flags(), 0))
+    }
+  end
+
+  defp decode_expr_data(:quota, bin) do
+    attrs = Attr.decode(bin)
+    flags = get_u32_be(attrs, nfta_quota_flags(), 0)
+
+    %{
+      bytes: get_u64_be(attrs, nfta_quota_bytes(), 0),
+      used: get_u64_be(attrs, nfta_quota_consumed(), 0),
+      over: Bitwise.band(flags, nft_quota_f_inv()) != 0
+    }
+  end
+
+  defp decode_expr_data(:objref, bin) do
+    attrs = Attr.decode(bin)
+
+    %{
+      name: get_string(attrs, nfta_objref_imm_name()),
+      kind: object_kind_atom(get_u32_be(attrs, nfta_objref_imm_type(), 0))
+    }
+  end
+
   defp decode_expr_data(:nat, bin) do
     attrs = Attr.decode(bin)
     type_int = get_u32_be(attrs, nfta_nat_type(), 0)
@@ -418,6 +455,31 @@ defmodule Linx.Netfilter.Decoder do
   end
 
   defp decode_expr_data(_name, bin), do: bin
+
+  # Inverse of the encoder's encode_log_flags bit table.
+  @log_flag_bits [tcp_seq: 0x01, tcp_opt: 0x02, ip_opt: 0x04, uid: 0x08, macdecode: 0x20]
+
+  defp decode_log_flags(0), do: []
+
+  defp decode_log_flags(int) do
+    for {atom, bit} <- @log_flag_bits, Bitwise.band(int, bit) != 0, do: atom
+  end
+
+  # Inverse of the encoder's object_kind_int/1.
+  defp object_kind_atom(n) do
+    cond do
+      n == nft_object_counter() -> :counter
+      n == nft_object_quota() -> :quota
+      n == nft_object_ct_helper() -> :ct_helper
+      n == nft_object_limit() -> :limit
+      n == nft_object_connlimit() -> :connlimit
+      n == nft_object_ct_timeout() -> :ct_timeout
+      n == nft_object_secmark() -> :secmark
+      n == nft_object_ct_expect() -> :ct_expectation
+      n == nft_object_synproxy() -> :synproxy
+      true -> {:unknown_object_kind, n}
+    end
+  end
 
   defp decode_immediate_data(nil), do: nil
 
@@ -608,40 +670,56 @@ defmodule Linx.Netfilter.Decoder do
   defp decode_one_set_elem(bin) do
     attrs = Attr.decode(bin)
 
-    key_bin =
-      case List.keyfind(attrs, nfta_set_elem_key(), 0) do
-        {_, key_nla} ->
-          key_attrs = Attr.decode(key_nla)
-          get_binary(key_attrs, nfta_data_value())
+    key_bin = elem_key(attrs, nfta_set_elem_key())
+    key_end_bin = elem_key(attrs, nfta_set_elem_key_end())
 
-        nil ->
-          nil
-      end
+    cond do
+      # Pipapo interval entry (concatenated interval sets): start and
+      # end bounds in one element via NFTA_SET_ELEM_KEY_END — the shape
+      # the encoder emits for {:concat, _} interval sets.
+      key_end_bin != nil ->
+        {:key_with_end, key_bin, key_end_bin, elem_data(attrs)}
 
-    # Interval sets carry their range ends as separate elements flagged
-    # NFT_SET_ELEM_INTERVAL_END; surface them as tagged markers so
-    # materialize_elements/4 can pair them back into `{:range, lo, hi}`.
-    if (elem_flags(attrs) &&& nft_set_elem_interval_end()) != 0 do
-      {:interval_end, key_bin}
-    else
-      case List.keyfind(attrs, nfta_set_elem_data(), 0) do
-        {_, data_nla} ->
-          data_attrs = Attr.decode(data_nla)
+      # Interval sets carry their range ends as separate elements flagged
+      # NFT_SET_ELEM_INTERVAL_END; surface them as tagged markers so
+      # materialize_elements/4 can pair them back into `{:range, lo, hi}`.
+      (elem_flags(attrs) &&& nft_set_elem_interval_end()) != 0 ->
+        {:interval_end, key_bin}
 
-          data_value =
-            cond do
-              verdict_bin = get_binary(data_attrs, nfta_data_verdict()) ->
-                decode_verdict(verdict_bin)
+      true ->
+        case elem_data(attrs) do
+          nil -> key_bin
+          data_value -> {key_bin, data_value}
+        end
+    end
+  end
 
-              true ->
-                get_binary(data_attrs, nfta_data_value())
-            end
+  defp elem_key(attrs, tag) do
+    case List.keyfind(attrs, tag, 0) do
+      {_, key_nla} ->
+        key_attrs = Attr.decode(key_nla)
+        get_binary(key_attrs, nfta_data_value())
 
-          {key_bin, data_value}
+      nil ->
+        nil
+    end
+  end
 
-        nil ->
-          key_bin
-      end
+  defp elem_data(attrs) do
+    case List.keyfind(attrs, nfta_set_elem_data(), 0) do
+      {_, data_nla} ->
+        data_attrs = Attr.decode(data_nla)
+
+        cond do
+          verdict_bin = get_binary(data_attrs, nfta_data_verdict()) ->
+            decode_verdict(verdict_bin)
+
+          true ->
+            get_binary(data_attrs, nfta_data_value())
+        end
+
+      nil ->
+        nil
     end
   end
 
@@ -676,8 +754,42 @@ defmodule Linx.Netfilter.Decoder do
     Enum.map(elements, fn
       # Tolerate stray end markers on a set not flagged :interval.
       {:interval_end, k} -> decode_key(k, key_type)
+      # Tolerate a KEY_END entry on a set not flagged :interval: keep
+      # the start bound as the key.
+      {:key_with_end, k, _e, nil} -> decode_key(k, key_type)
+      {:key_with_end, k, _e, v} -> {decode_key(k, key_type), decode_data(v, data_type)}
       {k, v} -> {decode_key(k, key_type), decode_data(v, data_type)}
       k -> decode_key(k, key_type)
+    end)
+  end
+
+  # Concatenated interval sets (pipapo) carry both bounds in one
+  # element (NFTA_SET_ELEM_KEY_END); pair the per-field bounds back
+  # into scalar-or-{:range, lo, hi} parts.
+  def materialize_elements(elements, {:concat, types}, data_type, true) do
+    Enum.map(elements, fn
+      {:key_with_end, start_bin, end_bin, data} ->
+        parts =
+          [split_concat_fields(start_bin, types), split_concat_fields(end_bin, types), types]
+          |> Enum.zip()
+          |> Enum.map(fn {lo_raw, hi_raw, type} ->
+            if lo_raw == hi_raw do
+              decode_key(lo_raw, type)
+            else
+              {:range, decode_key(lo_raw, type), decode_key(hi_raw, type)}
+            end
+          end)
+
+        case data do
+          nil -> parts
+          _ -> {parts, decode_data(data, data_type)}
+        end
+
+      {k, v} ->
+        {decode_key(k, {:concat, types}), decode_data(v, data_type)}
+
+      k when is_binary(k) ->
+        decode_key(k, {:concat, types})
     end)
   end
 
@@ -725,10 +837,20 @@ defmodule Linx.Netfilter.Decoder do
   end
 
   # Big-endian −1 over the full key width (inverse of the encoder's +1).
+  # A zero end key can't legitimately reach here (the kernel's leading
+  # zero sentinel arrives with no preceding start and is consumed by the
+  # stray-marker clause) — refuse to wrap to all-ones rather than
+  # fabricate a bogus type-max bound.
   defp decrement_key(bin) do
     size = byte_size(bin) * 8
-    <<n::size(size)>> = bin
-    <<n - 1::size(size)>>
+
+    case bin do
+      <<0::size(size)>> ->
+        raise ArgumentError, "interval end key of zero cannot be decremented"
+
+      <<n::size(size)>> ->
+        <<n - 1::size(size)>>
+    end
   end
 
   defp decode_key(<<a, b, c, d>>, :ipv4_addr), do: {a, b, c, d}
@@ -743,7 +865,38 @@ defmodule Linx.Netfilter.Decoder do
   # a native u32 register); the encoder writes them native-endian too.
   defp decode_key(<<mark::native-32>>, :mark), do: mark
   defp decode_key(bin, :ifname), do: String.trim_trailing(bin, <<0>>)
+
+  # A concatenated key blob: split into per-field parts (each padded to
+  # the 4-byte register size on the wire) and decode each by its own
+  # type. A blob that doesn't match the declared width stays raw.
+  defp decode_key(bin, {:concat, types}) when is_binary(bin) do
+    expected = Enum.sum(Enum.map(types, fn t -> pad4(elem(Wire.set_type_info(t), 1)) end))
+
+    if byte_size(bin) == expected do
+      types
+      |> split_concat_fields(bin, [])
+      |> Enum.zip(types)
+      |> Enum.map(fn {raw, type} -> decode_key(raw, type) end)
+    else
+      bin
+    end
+  end
+
   defp decode_key(bin, _), do: bin
+
+  defp split_concat_fields(bin, types), do: split_concat_fields(types, bin, [])
+
+  defp split_concat_fields([], _rest, acc), do: Enum.reverse(acc)
+
+  defp split_concat_fields([type | types], rest, acc) do
+    {_id, len} = Wire.set_type_info(type)
+    padded = pad4(len)
+    <<field::binary-size(padded), tail::binary>> = rest
+    <<raw::binary-size(len), _::binary>> = field
+    split_concat_fields(types, tail, [raw | acc])
+  end
+
+  defp pad4(n), do: div(n + 3, 4) * 4
 
   defp decode_data(%Verdict{} = v, :verdict), do: v
   defp decode_data(bin, type), do: decode_key(bin, type)
@@ -1014,6 +1167,13 @@ defmodule Linx.Netfilter.Decoder do
   defp get_s32_be(attrs, tag, default) do
     case List.keyfind(attrs, tag, 0) do
       {^tag, <<v::big-signed-32>>} -> v
+      _ -> default
+    end
+  end
+
+  defp get_u16_be(attrs, tag, default) do
+    case List.keyfind(attrs, tag, 0) do
+      {^tag, <<v::big-unsigned-16>>} -> v
       _ -> default
     end
   end

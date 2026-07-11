@@ -169,8 +169,15 @@ defmodule Linx.Netfilter.Rule do
   defp validate_handle(h) when is_integer(h) and h > 0, do: :ok
   defp validate_handle(other), do: {:error, {:bad_rule, {:handle_not_pos_int, other}}}
 
+  # 253 = the kernel's NFT_USERDATA_MAXLEN (256) minus the TLV type
+  # and length bytes and the trailing NUL. Longer would also wrap the
+  # encoder's 8-bit TLV length byte and corrupt the userdata stream.
   defp validate_comment(nil), do: :ok
-  defp validate_comment(c) when is_binary(c), do: :ok
+  defp validate_comment(c) when is_binary(c) and byte_size(c) <= 253, do: :ok
+
+  defp validate_comment(c) when is_binary(c),
+    do: {:error, {:bad_rule, {:comment_too_long, byte_size(c)}}}
+
   defp validate_comment(other), do: {:error, {:bad_rule, {:comment_not_binary, other}}}
 
   defp validate_chain(nil), do: :ok

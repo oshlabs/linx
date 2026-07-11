@@ -247,4 +247,80 @@ defmodule Linx.Netfilter.EncoderTest do
       assert Decoder.materialize_elements(raw, :inet_service, nil, true) == elements
     end
   end
+
+  describe "expression encode ↔ decode symmetry" do
+    alias Linx.Netfilter.Rule
+
+    test "log / quota / objref round-trip through rule encode → decode" do
+      exprs = [
+        Expr.log(prefix: "audit: ", group: 5, flags: [:tcp_seq, :uid]),
+        Expr.quota(bytes: 1_000_000, over: true, used: 512),
+        Expr.objref("web-quota", :quota)
+      ]
+
+      rule = Rule.build!(exprs)
+      msg = Encoder.rule(rule, :inet, "t", "c")
+      {:inet, "t", "c", decoded} = Decoder.rule(msg.payload)
+
+      assert decoded.expressions == exprs
+    end
+
+    test "an expression with no wire encoding raises instead of encoding empty data" do
+      rule = Rule.build!([%Expr{name: :exthdr, data: <<1, 2, 3>>}])
+
+      assert_raise ArgumentError, ~r/no wire encoding/, fn ->
+        Encoder.rule(rule, :inet, "t", "c")
+      end
+    end
+
+    test "a pulled-but-undecodable expression (string name) raises on re-encode" do
+      rule = Rule.build!([%Expr{name: "fib", data: <<1, 2, 3>>}])
+
+      assert_raise ArgumentError, ~r/cannot re-encode/, fn ->
+        Encoder.rule(rule, :inet, "t", "c")
+      end
+    end
+
+    test "an :__anon_set sentinel outside :replace-mode expansion raises" do
+      rule = Rule.build!([Expr.set_literal([80, 443], :inet_service)])
+
+      assert_raise ArgumentError, ~r/no wire encoding/, fn ->
+        Encoder.rule(rule, :inet, "t", "c")
+      end
+    end
+  end
+
+  describe "concatenated interval sets round-trip (pipapo)" do
+    test "Wire.set_type_atom inverts packed concat type ids" do
+      concat = {:concat, [:ipv4_addr, :inet_service]}
+      {id, len} = Linx.Netfilter.Wire.set_type_info(concat)
+
+      assert Linx.Netfilter.Wire.set_type_atom(id, len) == concat
+      # A packed id with a bogus length stays unknown.
+      assert Linx.Netfilter.Wire.set_type_atom(id, len + 4) == {:unknown_type, id, len + 4}
+    end
+
+    test "KEY_END elements decode and materialise back to authored parts" do
+      elements = [
+        [{:range, {10, 0, 0, 1}, {10, 0, 0, 9}}, 443],
+        [{192, 168, 1, 1}, 80]
+      ]
+
+      {:ok, set} =
+        Set.new("svc",
+          key_type: {:concat, [:ipv4_addr, :inet_service]},
+          flags: [:interval],
+          elements: elements,
+          table: "t"
+        )
+
+      msg = Encoder.set_elements(set, :inet)
+      {:inet, "t", "svc", raw} = Decoder.set_elements(msg.payload)
+
+      materialized =
+        Decoder.materialize_elements(raw, {:concat, [:ipv4_addr, :inet_service]}, nil, true)
+
+      assert materialized == elements
+    end
+  end
 end

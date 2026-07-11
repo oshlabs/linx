@@ -64,18 +64,30 @@ defmodule Linx.Netfilter.Diff do
 
   @doc """
   Validates that `desired` is reconcile-safe: every chain with
-  more than one rule has tags on all of its rules.
+  more than one rule has tags on all of its rules, and no rule
+  uses an anonymous set/vmap literal (`Expr.set_literal/3`,
+  `Expr.vmap_literal/2`) — anonymous sets are expanded only by
+  `:replace`-mode push; the reconcile diff has no name-allocation
+  or equivalence story for them.
 
-  Returns `:ok` or `{:error, {:tag_required, {family, table, chain}}}`.
+  Returns `:ok`, `{:error, {:tag_required, {family, table, chain}}}`,
+  or `{:error, {:anonymous_set_in_reconcile, {family, table, chain}}}`.
   """
   @spec validate_for_reconcile(Ruleset.t()) ::
-          :ok | {:error, {:tag_required, {atom(), String.t(), String.t()}}}
+          :ok | {:error, {:tag_required | :anonymous_set_in_reconcile, term()}}
   def validate_for_reconcile(%Ruleset{tables: tables}) do
     result =
       Enum.find_value(tables, fn {{family, table_name}, %Table{} = t} ->
         Enum.find_value(t.chains, fn {chain_name, %Chain{} = c} ->
-          if length(c.rules) > 1 and Enum.any?(c.rules, &is_nil(&1.tag)) do
-            {:tag_required, {family, table_name, chain_name}}
+          cond do
+            length(c.rules) > 1 and Enum.any?(c.rules, &is_nil(&1.tag)) ->
+              {:tag_required, {family, table_name, chain_name}}
+
+            Enum.any?(c.rules, &rule_has_anon_set?/1) ->
+              {:anonymous_set_in_reconcile, {family, table_name, chain_name}}
+
+            true ->
+              nil
           end
         end)
       end)
@@ -84,6 +96,13 @@ defmodule Linx.Netfilter.Diff do
       nil -> :ok
       tagged -> {:error, tagged}
     end
+  end
+
+  defp rule_has_anon_set?(%{expressions: exprs}) do
+    Enum.any?(exprs, fn
+      %{name: name} -> name in [:__anon_set, :__anon_vmap]
+      _ -> false
+    end)
   end
 
   # ===========================================================

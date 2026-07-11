@@ -111,4 +111,16 @@ defmodule Linx.Netfilter.RuleTest do
                "#Linx.Netfilter.Rule<[counter, immediate accept]>"
     end
   end
+
+  describe "comment length bound" do
+    test "a 253-byte comment is accepted; 254 is rejected" do
+      ok = String.duplicate("x", 253)
+      too_long = String.duplicate("x", 254)
+
+      assert {:ok, _} = Rule.build([:accept], comment: ok)
+
+      assert {:error, {:bad_rule, {:comment_too_long, 254}}} =
+               Rule.build([:accept], comment: too_long)
+    end
+  end
 end

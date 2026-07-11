@@ -359,4 +359,23 @@ defmodule Linx.Netfilter.DiffTest do
       Rule.build!([Verdict.accept()], tag: :allow_all, handle: 1)
     )
   end
+
+  describe "validate_for_reconcile/1 — anonymous set literals" do
+    test "a rule using Expr.set_literal is rejected for reconcile" do
+      rule =
+        Rule.build!(
+          [Linx.Netfilter.Expr.set_literal([80, 443], :inet_service), :accept],
+          tag: :web
+        )
+
+      rs =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, "fw")
+        |> Ruleset.add_chain!("fw", "input", type: :filter, hook: :input, priority: 0)
+        |> Ruleset.add_rule!("fw", "input", rule)
+
+      assert {:error, {:anonymous_set_in_reconcile, {:inet, "fw", "input"}}} =
+               Diff.validate_for_reconcile(rs)
+    end
+  end
 end

@@ -422,9 +422,12 @@ defmodule Linx.Netfilter.Wire do
 
   @doc """
   Inverse: maps a libnftnl type id + length back to a key-type
-  atom. Returns `{:unknown_type, id, len}` for unrecognised pairs.
+  atom — including packed concatenation ids (6 bits per field,
+  the inverse of `set_type_info({:concat, _})`). Returns
+  `{:unknown_type, id, len}` for unrecognised pairs.
   """
-  @spec set_type_atom(non_neg_integer(), pos_integer()) :: atom() | tuple()
+  @spec set_type_atom(non_neg_integer(), pos_integer()) ::
+          atom() | {:concat, [atom()]} | tuple()
   def set_type_atom(7, 4), do: :ipv4_addr
   def set_type_atom(8, 16), do: :ipv6_addr
   def set_type_atom(9, 6), do: :ether_addr
@@ -434,7 +437,44 @@ defmodule Linx.Netfilter.Wire do
   def set_type_atom(26, 4), do: :ct_state
   def set_type_atom(41, 16), do: :ifname
   def set_type_atom(1, _), do: :verdict
+
+  # A multi-field id (≥ 64 means more than one 6-bit chunk). Unpack the
+  # chunks low-to-high — the low chunk is the LAST field — and accept
+  # only if every chunk is a known single type and the padded field
+  # widths sum to the declared key length.
+  def set_type_atom(id, len) when id >= 64 do
+    with {:ok, types} <- unpack_concat_ids(id, []),
+         {_id, ^len} <- set_type_info({:concat, types}) do
+      {:concat, types}
+    else
+      _ -> {:unknown_type, id, len}
+    end
+  end
+
   def set_type_atom(id, len), do: {:unknown_type, id, len}
+
+  defp unpack_concat_ids(0, acc) when acc != [], do: {:ok, acc}
+
+  defp unpack_concat_ids(id, acc) when id > 0 do
+    import Bitwise
+
+    case concat_subtype(band(id, 0x3F)) do
+      nil -> :error
+      atom -> unpack_concat_ids(bsr(id, 6), [atom | acc])
+    end
+  end
+
+  defp unpack_concat_ids(_, _), do: :error
+
+  defp concat_subtype(7), do: :ipv4_addr
+  defp concat_subtype(8), do: :ipv6_addr
+  defp concat_subtype(9), do: :ether_addr
+  defp concat_subtype(12), do: :inet_proto
+  defp concat_subtype(13), do: :inet_service
+  defp concat_subtype(19), do: :mark
+  defp concat_subtype(26), do: :ct_state
+  defp concat_subtype(41), do: :ifname
+  defp concat_subtype(_), do: nil
 
   @doc """
   The unpadded per-field byte lengths of a concatenated key type —

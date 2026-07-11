@@ -194,8 +194,37 @@ defmodule Linx.Netfilter.Chain do
     with :ok <- check_family(family),
          :ok <- check_type_for_family(chain.type, family),
          :ok <- check_hook_for_family(chain.hook, family),
-         :ok <- check_type_hook(chain.type, chain.hook) do
+         :ok <- check_type_hook(chain.type, chain.hook),
+         :ok <- check_priority_for_family(chain.priority, family) do
       :ok
+    end
+  end
+
+  # Named priorities must resolve for the family — this mirrors the
+  # Wire.priority_int/2 clause table exactly. Without the check a
+  # chain builds fine (Chain.new is family-agnostic) and the push
+  # dies in the encoder with a FunctionClauseError instead of a
+  # tagged error.
+  @priority_names_for %{
+    ip: [:raw, :mangle, :dstnat, :filter, :security, :srcnat],
+    ip6: [:raw, :mangle, :dstnat, :filter, :security, :srcnat],
+    inet: [:raw, :mangle, :dstnat, :filter, :security, :srcnat],
+    bridge: [:dstnat, :filter, :out, :srcnat],
+    netdev: [:filter],
+    arp: [:filter]
+  }
+
+  defp check_priority_for_family(nil, _family), do: :ok
+  defp check_priority_for_family(p, _family) when is_integer(p), do: :ok
+
+  defp check_priority_for_family({name, offset}, family) when is_integer(offset),
+    do: check_priority_for_family(name, family)
+
+  defp check_priority_for_family(name, family) when is_atom(name) do
+    if name in Map.get(@priority_names_for, family, []) do
+      :ok
+    else
+      {:error, {:bad_chain, {:priority_not_valid_for_family, name, family}}}
     end
   end
 
