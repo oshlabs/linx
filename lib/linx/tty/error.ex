@@ -29,36 +29,19 @@ defmodule Linx.Tty.Error do
 
   @type t :: %__MODULE__{operation: atom(), errno: atom(), code: pos_integer() | nil}
 
-  # The errnos the linx_tty NIF maps to atoms (see errno_atom/1 in
-  # c_src/linx_tty.c). Used both ways: an atom from the NIF gets its
-  # number filled in, and a raw integer (an errno the NIF didn't map)
-  # gets resolved back to an atom where possible.
-  @code_of %{
-    eacces: 13,
-    ebadf: 9,
-    ebusy: 16,
-    eintr: 4,
-    einval: 22,
-    eio: 5,
-    enoent: 2,
-    enomem: 12,
-    enotty: 25,
-    enxio: 6,
-    eperm: 1
-  }
-
   @doc """
   Builds an error from the NIF's `{stage, errno}` pair, where `errno` is
-  either a POSIX atom (the NIF mapped it) or a raw integer (it didn't).
+  either a POSIX atom (the NIF mapped it; see errno_atom/1 in
+  c_src/linx_tty.c) or a raw integer (it didn't). `Linx.Errno` resolves
+  the other direction either way.
   """
   @spec from_nif(atom(), atom() | integer()) :: t()
   def from_nif(stage, errno) when is_atom(errno) do
-    %__MODULE__{operation: stage, errno: errno, code: Map.get(@code_of, errno)}
+    %__MODULE__{operation: stage, errno: errno, code: Linx.Errno.code(errno)}
   end
 
   def from_nif(stage, code) when is_integer(code) do
-    errno = Enum.find_value(@code_of, :unknown, fn {atom, n} -> if n == code, do: atom end)
-    %__MODULE__{operation: stage, errno: errno, code: code}
+    %__MODULE__{operation: stage, errno: Linx.Errno.atom(code), code: code}
   end
 
   @impl Exception

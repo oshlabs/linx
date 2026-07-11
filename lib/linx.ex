@@ -69,6 +69,22 @@ defmodule Linx do
   always-present Linux baseline Linx requires (`Linx.Process`, `Linx.Netlink`,
   `Linx.Mount`, `Linx.Tty`) omit it by design.
 
+  ## Error model
+
+  One taxonomy across every subsystem:
+
+    * **Kernel rejections** come back as `{:error, %Linx.<Subsystem>.Error{}}`.
+      Every struct implements `Exception`, and carries the errno as an atom
+      (`:errno`) plus its Linux number (`:code`, resolved through the shared
+      `Linx.Errno` table) and a tag naming what was attempted (`:operation`;
+      `Linx.Process.Error` calls it `:stage`, `Linx.Netlink.Error` omits it —
+      each divergence is documented in its module).
+    * **Caller-side input mistakes** are tagged tuples, distinct from kernel
+      rejections — `{:error, {:bad_map, _}}`, `{:error, {:bad_key, _}}`,
+      `{:error, {:bad_chain, _}}`, ….
+    * **Lifecycle conditions** that aren't failures of a syscall stay bare
+      atoms — `{:error, :no_process}`, `{:error, :not_ready}`, ….
+
   ## Declarative reconciliation
 
   Several subsystems expose the `pull` / `diff` / `push(mode: :reconcile)` /

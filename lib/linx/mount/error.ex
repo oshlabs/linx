@@ -24,8 +24,13 @@ defmodule Linx.Mount.Error do
       * `:thread` — couldn't create the worker thread that does
         the cross-namespace dance. Rare; typically `EAGAIN` from
         thread-creation pressure.
-      The last three only appear when a cross-namespace `:in`
-      option was used.
+      * `:create` — couldn't create the `create_target: true`
+        placeholder file at the mount target.
+      * `:open_pidns`, `:setns_pid`, `:pipe`, `:fork` — failures
+        in the PID-namespace fork dance that mounting `proc` with a
+        cross-namespace `:in` triggers (see `Linx.Mount.Native.mount/8`).
+      The namespace/fork stages only appear when a cross-namespace
+      `:in` option was used.
     * `:errno` — the POSIX errno as an atom (`:enoent`, `:eacces`,
       `:ebusy`, `:einval`, `:eperm`, …).
     * `:code` — the matching positive errno integer, or `nil` if we
@@ -59,6 +64,11 @@ defmodule Linx.Mount.Error do
           | :setns
           | :chdir
           | :thread
+          | :create
+          | :open_pidns
+          | :setns_pid
+          | :pipe
+          | :fork
 
   @type t :: %__MODULE__{
           path: Path.t(),
@@ -67,37 +77,10 @@ defmodule Linx.Mount.Error do
           code: pos_integer() | nil
         }
 
-  # POSIX errno table for the syscall paths mount operations can land
-  # on. An unmapped atom keeps `:code` at `nil` -- the atom is still
-  # pattern-matchable and self-describing.
-  @code_of %{
-    eperm: 1,
-    enoent: 2,
-    eio: 5,
-    enxio: 6,
-    ebadf: 9,
-    enomem: 12,
-    eacces: 13,
-    efault: 14,
-    enotblk: 15,
-    ebusy: 16,
-    eexist: 17,
-    enodev: 19,
-    enotdir: 20,
-    eisdir: 21,
-    einval: 22,
-    enametoolong: 36,
-    enolck: 37,
-    enosys: 38,
-    enotempty: 39,
-    eloop: 40,
-    erofs: 30,
-    eopnotsupp: 95
-  }
-
   @doc """
   Builds a `%Linx.Mount.Error{}` from a posix-atom errno, the
-  filesystem path that failed, and the operation we attempted.
+  filesystem path that failed, and the operation we attempted. The
+  integer `:code` comes from the shared `Linx.Errno` table.
   """
   @spec from_posix(atom(), Path.t(), operation()) :: t()
   def from_posix(errno, path, operation) when is_atom(errno) do
@@ -105,7 +88,7 @@ defmodule Linx.Mount.Error do
       path: path,
       operation: operation,
       errno: errno,
-      code: Map.get(@code_of, errno)
+      code: Linx.Errno.code(errno)
     }
   end
 

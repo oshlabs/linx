@@ -15,7 +15,7 @@ defmodule Linx.Sysctl.Error do
       e.g. `"/proc/sys/net/ipv4/ip_forward"`.
     * `:operation` — what we were trying to do, as an atom:
       * `:read`, `:write`, `:list` — the procfs I/O itself failed.
-      * `:open_ns`, `:unshare`, `:setns`, `:chdir`, `:thread` —
+      * `:open_ns`, `:unshare`, `:setns`, `:thread` —
         namespace-acquisition failures from the cross-namespace NIF (only seen
         when a cross-namespace `:in` option was used).
     * `:errno` — the POSIX errno as an atom (`:enoent`, `:eperm`,
@@ -60,7 +60,6 @@ defmodule Linx.Sysctl.Error do
           | :open_ns
           | :unshare
           | :setns
-          | :chdir
           | :thread
 
   @type t :: %__MODULE__{
@@ -71,34 +70,11 @@ defmodule Linx.Sysctl.Error do
           code: pos_integer() | nil
         }
 
-  # POSIX errno table for the procfs paths sysctl operations can land
-  # on. An unmapped atom keeps `:code` at `nil` -- the atom is still
-  # pattern-matchable and self-describing.
-  @code_of %{
-    eperm: 1,
-    enoent: 2,
-    esrch: 3,
-    eio: 5,
-    ebadf: 9,
-    enomem: 12,
-    eacces: 13,
-    efault: 14,
-    ebusy: 16,
-    eexist: 17,
-    enodev: 19,
-    einval: 22,
-    enospc: 28,
-    erofs: 30,
-    erange: 34,
-    enametoolong: 36,
-    enosys: 38,
-    eopnotsupp: 95
-  }
-
   @doc """
   Builds a `%Linx.Sysctl.Error{}` from a posix-atom errno, the
   dot-form key, the resolved procfs path, and the operation we
-  attempted.
+  attempted. The integer `:code` comes from the shared `Linx.Errno`
+  table.
   """
   @spec from_posix(atom(), String.t(), Path.t(), operation()) :: t()
   def from_posix(errno, key, path, operation) when is_atom(errno) do
@@ -107,7 +83,7 @@ defmodule Linx.Sysctl.Error do
       path: path,
       operation: operation,
       errno: errno,
-      code: Map.get(@code_of, errno)
+      code: Linx.Errno.code(errno)
     }
   end
 

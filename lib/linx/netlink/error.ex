@@ -36,64 +36,15 @@ defmodule Linx.Netlink.Error do
           message: binary | nil
         }
 
-  # Linux errno numbers Linx is most likely to surface from netlink replies.
-  # An unmapped code falls through to :unknown; the integer is still kept in
-  # the :code field.
-  @posix %{
-    1 => :eperm,
-    2 => :enoent,
-    3 => :esrch,
-    4 => :eintr,
-    5 => :eio,
-    9 => :ebadf,
-    11 => :eagain,
-    12 => :enomem,
-    13 => :eacces,
-    14 => :efault,
-    16 => :ebusy,
-    17 => :eexist,
-    18 => :exdev,
-    19 => :enodev,
-    20 => :enotdir,
-    21 => :eisdir,
-    22 => :einval,
-    23 => :enfile,
-    24 => :emfile,
-    28 => :enospc,
-    32 => :epipe,
-    34 => :erange,
-    36 => :enametoolong,
-    38 => :enosys,
-    39 => :enotempty,
-    40 => :eloop,
-    42 => :enomsg,
-    71 => :eproto,
-    75 => :eoverflow,
-    85 => :erestart,
-    90 => :emsgsize,
-    92 => :enoprotoopt,
-    93 => :eprotonosupport,
-    95 => :eopnotsupp,
-    97 => :eafnosupport,
-    98 => :eaddrinuse,
-    99 => :eaddrnotavail,
-    100 => :enetdown,
-    101 => :enetunreach,
-    102 => :enetreset,
-    103 => :econnaborted,
-    104 => :econnreset,
-    105 => :enobufs,
-    110 => :etimedout,
-    113 => :ehostunreach
-  }
-
   @doc """
   Builds an error from a positive errno `code` and an optional kernel-supplied
-  `message` (the `NLMSGERR_ATTR_MSG` string).
+  `message` (the `NLMSGERR_ATTR_MSG` string). The errno atom comes from the
+  shared `Linx.Errno` table; an unmapped code falls through to `:unknown` and
+  the integer is still kept in the `:code` field.
   """
   @spec from_errno(pos_integer, binary | nil) :: t
   def from_errno(code, message \\ nil) when is_integer(code) and code > 0 do
-    %__MODULE__{errno: Map.get(@posix, code, :unknown), code: code, message: message}
+    %__MODULE__{errno: Linx.Errno.atom(code), code: code, message: message}
   end
 
   @impl Exception

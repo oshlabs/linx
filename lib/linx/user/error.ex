@@ -61,28 +61,10 @@ defmodule Linx.User.Error do
           code: pos_integer() | nil
         }
 
-  # POSIX errno table for the procfs paths user-ns operations can
-  # land on. Unmapped atoms keep `:code` at `nil`; the atom is still
-  # self-describing.
-  @code_of %{
-    eperm: 1,
-    enoent: 2,
-    eio: 5,
-    ebadf: 9,
-    enomem: 12,
-    eacces: 13,
-    efault: 14,
-    ebusy: 16,
-    eexist: 17,
-    einval: 22,
-    enospc: 28,
-    erofs: 30,
-    enotsup: 95
-  }
-
   @doc """
   Builds a `%Linx.User.Error{}` from a posix-atom errno, the
-  procfs path that failed, and the operation we attempted.
+  procfs path that failed, and the operation we attempted. The
+  integer `:code` comes from the shared `Linx.Errno` table.
   """
   @spec from_posix(atom(), Path.t(), operation()) :: t()
   def from_posix(errno, path, operation) when is_atom(errno) do
@@ -90,7 +72,7 @@ defmodule Linx.User.Error do
       path: path,
       operation: operation,
       errno: errno,
-      code: Map.get(@code_of, errno)
+      code: Linx.Errno.code(errno)
     }
   end
 

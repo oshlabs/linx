@@ -26,9 +26,9 @@ defmodule Linx.Seccomp.Error do
 
     * `:operation` — what we were trying to do, as an atom:
       `:build` | `:install` | `:set_no_new_privs`.
-    * `:errno` — a POSIX errno as an atom (`:einval`, `:eperm`, …),
-      or a Linx-specific atom (`:e2big` for the jump-overflow
-      build failure) when nothing in the POSIX table fits.
+    * `:errno` — a POSIX errno as an atom (`:einval`, `:eperm`, …).
+      The jump-overflow build failure reports `:e2big` (errno 7),
+      following the libseccomp convention for "filter too large".
     * `:code` — the matching positive errno integer, or `nil` for
       atoms outside the POSIX table.
 
@@ -47,25 +47,10 @@ defmodule Linx.Seccomp.Error do
           code: pos_integer() | nil
         }
 
-  # POSIX errno table for the errno atoms the seccomp paths can
-  # surface. `:e2big` is included because that's the libc convention
-  # for "filter too large" (here: a jump that doesn't fit in 8 bits).
-  @code_of %{
-    eperm: 1,
-    enoent: 2,
-    eio: 5,
-    ebadf: 9,
-    e2big: 7,
-    enomem: 12,
-    eacces: 13,
-    efault: 14,
-    einval: 22,
-    enosys: 38
-  }
-
   @doc """
   Builds a `%Linx.Seccomp.Error{}` from an errno atom and the
-  operation that failed.
+  operation that failed. The integer `:code` comes from the shared
+  `Linx.Errno` table.
   """
   @spec from_posix(atom(), operation()) :: t()
   def from_posix(errno, operation)
@@ -73,7 +58,7 @@ defmodule Linx.Seccomp.Error do
     %__MODULE__{
       operation: operation,
       errno: errno,
-      code: Map.get(@code_of, errno)
+      code: Linx.Errno.code(errno)
     }
   end
 

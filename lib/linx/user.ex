@@ -303,6 +303,7 @@ defmodule Linx.User do
       {:error, %Linx.User.Error{operation: :set_gid_map, ...}}
       {:error, {:bad_map, _}}                             -- bad uid/gid input
       {:error, {:bad_setgroups, value}}                   -- bad :setgroups opt
+      {:error, {:bad_setup, {:missing, :uid | :gid}}}     -- required key absent
 
   Steps that ran successfully before a later step failed are
   **not** rolled back — the kernel's write-once semantics mean
@@ -319,7 +320,8 @@ defmodule Linx.User do
   """
   @spec setup_maps(pid_target(), keyword()) ::
           :ok
-          | {:error, Error.t() | {:bad_map, term()} | {:bad_setgroups, term()}}
+          | {:error,
+             Error.t() | {:bad_map, term()} | {:bad_setgroups, term()} | {:bad_setup, term()}}
   def setup_maps(pid, opts) when is_integer(pid) and pid > 0 and is_list(opts) do
     with {:ok, uid} <- fetch_required(opts, :uid),
          {:ok, gid} <- fetch_required(opts, :gid),

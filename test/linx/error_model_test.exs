@@ -1,32 +1,77 @@
 defmodule Linx.ErrorModelTest do
   use ExUnit.Case, async: true
 
-  # Exercises the Phase-1 error structs whose value is in their mapping
-  # tables and message/1 clauses — the parts unit tests for the happy path
-  # never touch. Covers Linx.Tty.Error (bidirectional errno<->code) and
-  # Linx.Process.Error (agent code -> POSIX atom).
+  # Exercises the shared errno table (Linx.Errno) and the parts of the
+  # error structs unit tests for the happy path never touch: the
+  # constructor mapping clauses, message/1, and the cross-subsystem
+  # uniformity contract every %Linx.X.Error{} promises.
 
   alias Linx.Process.Error, as: PErr
   alias Linx.Tty.Error, as: TErr
 
-  describe "Linx.Tty.Error" do
-    # The known errno<->code pairs; from_nif must map both directions.
+  describe "Linx.Errno" do
+    # Golden pairs pinned against asm-generic errno numbers — a typo in
+    # the shared table would silently mis-label kernel errors everywhere.
     @pairs %{
-      eacces: 13,
-      ebadf: 9,
-      ebusy: 16,
-      eintr: 4,
-      einval: 22,
-      eio: 5,
+      eperm: 1,
       enoent: 2,
-      enomem: 12,
-      enotty: 25,
+      esrch: 3,
+      eintr: 4,
+      eio: 5,
       enxio: 6,
-      eperm: 1
+      e2big: 7,
+      ebadf: 9,
+      eagain: 11,
+      enomem: 12,
+      eacces: 13,
+      efault: 14,
+      ebusy: 16,
+      eexist: 17,
+      enodev: 19,
+      enotdir: 20,
+      eisdir: 21,
+      einval: 22,
+      emfile: 24,
+      enotty: 25,
+      efbig: 27,
+      enospc: 28,
+      erofs: 30,
+      erange: 34,
+      enametoolong: 36,
+      enosys: 38,
+      enotempty: 39,
+      eloop: 40,
+      eproto: 71,
+      erestart: 85,
+      emsgsize: 90,
+      eprotonosupport: 93,
+      eopnotsupp: 95,
+      eaddrinuse: 98,
+      enobufs: 105,
+      etimedout: 110
     }
 
-    test "from_nif maps a POSIX atom to its numeric code and back" do
+    test "code/1 and atom/1 agree on the golden pairs, both directions" do
       for {errno, code} <- @pairs do
+        assert Linx.Errno.code(errno) == code
+        assert Linx.Errno.atom(code) == errno
+      end
+    end
+
+    test "an unknown atom has no code; an unknown code is :unknown" do
+      assert Linx.Errno.code(:eweird) == nil
+      assert Linx.Errno.atom(4242) == :unknown
+    end
+
+    test ":enotsup (Erlang file convention) aliases EOPNOTSUPP; reverse is canonical" do
+      assert Linx.Errno.code(:enotsup) == 95
+      assert Linx.Errno.atom(95) == :eopnotsupp
+    end
+  end
+
+  describe "Linx.Tty.Error" do
+    test "from_nif maps a POSIX atom to its numeric code and back" do
+      for {errno, code} <- %{enotty: 25, enxio: 6, eperm: 1} do
         assert %TErr{operation: :open, errno: ^errno, code: ^code} = TErr.from_nif(:open, errno)
         assert %TErr{operation: :open, errno: ^errno, code: ^code} = TErr.from_nif(:open, code)
       end
@@ -59,23 +104,8 @@ defmodule Linx.ErrorModelTest do
   end
 
   describe "Linx.Process.Error" do
-    @posix %{
-      1 => :eperm,
-      2 => :enoent,
-      4 => :eintr,
-      5 => :eio,
-      9 => :ebadf,
-      11 => :eagain,
-      12 => :enomem,
-      13 => :eacces,
-      14 => :efault,
-      22 => :einval,
-      71 => :eproto,
-      90 => :emsgsize
-    }
-
     test "from_agent maps a kernel errno code to its POSIX atom for a normal stage" do
-      for {code, errno} <- @posix do
+      for {errno, code} <- %{enoent: 2, eproto: 71, emsgsize: 90} do
         assert %PErr{stage: :execve, errno: ^errno, code: ^code} = PErr.from_agent(code, :execve)
       end
     end
@@ -95,6 +125,44 @@ defmodule Linx.ErrorModelTest do
             PErr.from_agent(4242, :execve),
             PErr.from_agent(137, :agent_died)
           ] do
+        msg = Exception.message(err)
+        assert is_binary(msg) and msg != ""
+      end
+    end
+  end
+
+  describe "cross-subsystem uniformity" do
+    # One representative struct per subsystem, built through the public
+    # constructor. The contract: every %Linx.X.Error{} is an Exception,
+    # carries an :errno atom plus a :code from the shared Linx.Errno
+    # table, and renders a non-empty message. A new or reworked Error
+    # module that drifts from the shape fails here.
+    defp samples do
+      [
+        Linx.Process.Error.from_agent(2, :execve),
+        Linx.Tty.Error.from_nif(:open, :enoent),
+        Linx.Netlink.Error.from_errno(1),
+        Linx.Cgroup.Error.from_posix(:enoent, "/sys/fs/cgroup/x", :read),
+        Linx.Mount.Error.from_posix(:enoent, "/mnt/x", :mount),
+        Linx.User.Error.from_posix(:eperm, "/proc/1/uid_map", :set_uid_map),
+        Linx.Capabilities.Error.from_posix(:enoent, "/proc/1/status", :read),
+        Linx.Seccomp.Error.from_posix(:einval, :build),
+        Linx.Sysctl.Error.from_posix(
+          :enoent,
+          "net.ipv4.ip_forward",
+          "/proc/sys/net/ipv4/ip_forward",
+          :read
+        ),
+        Linx.Netfilter.Error.from_posix(:eperm, :push)
+      ]
+    end
+
+    test "every subsystem error is an Exception with :errno + :code from the shared table" do
+      for err <- samples() do
+        assert is_exception(err), "#{inspect(err.__struct__)} is not an Exception"
+        assert is_atom(err.errno)
+        assert err.code == Linx.Errno.code(err.errno)
+
         msg = Exception.message(err)
         assert is_binary(msg) and msg != ""
       end

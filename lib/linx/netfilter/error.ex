@@ -8,16 +8,11 @@ defmodule Linx.Netfilter.Error do
   `:code`, and `:message`, plus netfilter-specific context fields
   that are populated when the kernel surfaces them:
 
-    * `:operation` — what we were trying to do, as an atom. Covers
-      every public verb and every wire-level stage:
-
-      * Public-API stages: `:open`, `:close`, `:get_gen`, `:push`,
-        `:pull`, `:diff`, `:subscribe`, `:log_listen`.
-      * Wire-level batch stages: `:batch_begin`, `:batch_end`,
-        `:newtable`, `:newchain`, `:newrule`, `:newset`,
-        `:newsetelem`, `:newobj`, `:newflowtable`, `:delgen`.
-      * Namespace-acquisition stages (when opening a socket in
-        another netns): `:open_ns`, `:setns`, `:unshare`, `:thread`.
+    * `:operation` — what we were trying to do, as an atom:
+      `:push`, `:pull`, or `:create_table`. Batch rejections carry
+      `operation: :push` with `:msg_type` / `:batch_seq` naming the
+      offending inner message; socket-opening failures surface as
+      `Linx.Netlink`-level errors before this struct is ever built.
 
     * `:errno` — the POSIX errno as an atom (`:enoent`, `:eperm`,
       `:eacces`, `:einval`, `:erestart`, `:eopnotsupp`, …).
@@ -42,8 +37,10 @@ defmodule Linx.Netfilter.Error do
       within the batch. `nil` for non-batch failures.
 
     * `:attr_offset` — byte offset into the offending message at
-      which the kernel detected the problem (from
-      NLMSGERR_ATTR_OFFS, kernel ≥ 4.12). `nil` when not provided.
+      which the kernel detected the problem (NLMSGERR_ATTR_OFFS,
+      kernel ≥ 4.12). Reserved: Linx does not yet parse
+      NLMSGERR_ATTR_OFFS, so today this is only non-`nil` when a
+      caller sets it explicitly via `from_posix/3` opts.
 
     * `:ruleset_gen` — the ruleset generation at which the error
       occurred. Useful for `ERESTART` (BATCH_GENID mismatch)
@@ -95,32 +92,7 @@ defmodule Linx.Netfilter.Error do
     :ruleset_gen
   ]
 
-  # Public-API stages
-  @type operation ::
-          :open
-          | :close
-          | :get_gen
-          | :push
-          | :pull
-          | :diff
-          | :subscribe
-          | :log_listen
-          # Wire-level batch stages
-          | :batch_begin
-          | :batch_end
-          | :newtable
-          | :newchain
-          | :newrule
-          | :newset
-          | :newsetelem
-          | :newobj
-          | :newflowtable
-          | :delgen
-          # Namespace-acquisition stages
-          | :open_ns
-          | :setns
-          | :unshare
-          | :thread
+  @type operation :: :push | :pull | :create_table
 
   @type subsys :: :nftables | :ctnetlink | :queue | :ulog | nil
 
@@ -136,35 +108,6 @@ defmodule Linx.Netfilter.Error do
           ruleset_gen: non_neg_integer() | nil
         }
 
-  # POSIX errno table for the netlink paths netfilter operations can
-  # land on. Unmapped atoms keep `:code` at `nil`; the atom is still
-  # self-describing.
-  @code_of %{
-    eperm: 1,
-    enoent: 2,
-    esrch: 3,
-    eio: 5,
-    ebadf: 9,
-    eagain: 11,
-    enomem: 12,
-    eacces: 13,
-    efault: 14,
-    ebusy: 16,
-    eexist: 17,
-    enodev: 19,
-    einval: 22,
-    enospc: 28,
-    erofs: 30,
-    erange: 34,
-    enametoolong: 36,
-    enosys: 38,
-    eopnotsupp: 95,
-    eaddrinuse: 98,
-    erestart: 85,
-    enobufs: 105,
-    eprotonosupport: 93
-  }
-
   @doc """
   Builds a `%Linx.Netfilter.Error{}` from a posix-atom errno and the
   operation we attempted.
@@ -178,7 +121,7 @@ defmodule Linx.Netfilter.Error do
     %__MODULE__{
       operation: operation,
       errno: errno,
-      code: Map.get(@code_of, errno),
+      code: Linx.Errno.code(errno),
       message: Keyword.get(opts, :message),
       subsys: Keyword.get(opts, :subsys),
       msg_type: Keyword.get(opts, :msg_type),

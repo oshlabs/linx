@@ -59,23 +59,11 @@ defmodule Linx.Capabilities.Error do
           code: pos_integer() | nil
         }
 
-  # POSIX errno table for the procfs paths the read side can land
-  # on. Atoms outside this map keep `:code` at `nil`; the atom is
-  # still self-describing.
-  @code_of %{
-    eperm: 1,
-    enoent: 2,
-    eio: 5,
-    ebadf: 9,
-    enomem: 12,
-    eacces: 13,
-    efault: 14,
-    einval: 22
-  }
-
   @doc """
   Builds a `%Linx.Capabilities.Error{}` from a posix-atom errno,
-  the procfs path that failed, and the operation we attempted.
+  the procfs path that failed, and the operation we attempted. The
+  integer `:code` comes from the shared `Linx.Errno` table; atoms
+  outside it (`:bad_status`) keep `:code` at `nil`.
   """
   @spec from_posix(atom(), Path.t(), operation()) :: t()
   def from_posix(errno, path, operation) when is_atom(errno) do
@@ -83,7 +71,7 @@ defmodule Linx.Capabilities.Error do
       path: path,
       operation: operation,
       errno: errno,
-      code: Map.get(@code_of, errno)
+      code: Linx.Errno.code(errno)
     }
   end
 

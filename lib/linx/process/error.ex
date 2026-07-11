@@ -35,24 +35,6 @@ defmodule Linx.Process.Error do
 
   @type t :: %__MODULE__{stage: atom(), errno: atom(), code: integer() | nil}
 
-  # POSIX errno numbers the agent realistically reports across its stage
-  # table (linux/asm-generic/errno-base.h). An unmapped code falls
-  # through to :unknown; the integer is still kept in :code.
-  @posix %{
-    1 => :eperm,
-    2 => :enoent,
-    4 => :eintr,
-    5 => :eio,
-    9 => :ebadf,
-    11 => :eagain,
-    12 => :enomem,
-    13 => :eacces,
-    14 => :efault,
-    22 => :einval,
-    71 => :eproto,
-    90 => :emsgsize
-  }
-
   @doc """
   Builds an error from the agent's integer `code` and the `stage` atom.
 
@@ -66,7 +48,7 @@ defmodule Linx.Process.Error do
   end
 
   def from_agent(code, stage) when is_integer(code) and is_atom(stage) do
-    %__MODULE__{stage: stage, errno: Map.get(@posix, code, :unknown), code: code}
+    %__MODULE__{stage: stage, errno: Linx.Errno.atom(code), code: code}
   end
 
   @impl Exception
