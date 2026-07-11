@@ -9,6 +9,8 @@ defmodule Linx.MixProject do
       app: :linx,
       version: @version,
       elixir: "~> 1.18",
+      # test/support holds shared test helpers (Linx.TestSupport.*).
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       # Custom compilers for the project's native code, run as part of
       # `mix compile`:
@@ -40,6 +42,9 @@ defmodule Linx.MixProject do
       docs: docs()
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   defp package do
     [

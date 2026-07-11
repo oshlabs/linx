@@ -11,6 +11,7 @@ defmodule Linx.ReconcileIntegrationTest do
   latency layer).
   """
   use ExUnit.Case, async: false
+  import Linx.TestSupport.Eventually
 
   alias Linx.Netlink.{Rtnl, Socket}
   alias Linx.Netlink.Rtnl.{Address, Link}
@@ -110,25 +111,5 @@ defmodule Linx.ReconcileIntegrationTest do
     {:ok, want} = Linx.IP.parse(ip)
     {:ok, addrs} = Address.list(socket)
     Enum.any?(addrs, fn a -> a.address == want and a.prefixlen == prefixlen end)
-  end
-
-  # Polls `fun` until it returns truthy or the timeout elapses.
-  defp eventually(fun, timeout \\ 2_000, step \\ 25) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_eventually(fun, deadline, step)
-  end
-
-  defp do_eventually(fun, deadline, step) do
-    cond do
-      fun.() ->
-        true
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        false
-
-      true ->
-        Process.sleep(step)
-        do_eventually(fun, deadline, step)
-    end
   end
 end

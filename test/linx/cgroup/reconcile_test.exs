@@ -6,6 +6,7 @@ defmodule Linx.Cgroup.ReconcileTest do
   files and so is `:integration` (run via `./sudotest.sh`).
   """
   use ExUnit.Case, async: true
+  import Linx.TestSupport.Eventually
 
   alias Linx.Cgroup
   alias Linx.Cgroup.Reconcile
@@ -187,19 +188,6 @@ defmodule Linx.Cgroup.ReconcileTest do
 
       assert {:ok, report} = Linx.Reconcile.reconcile(pid)
       assert report.converged?
-    end
-  end
-
-  defp eventually(fun, timeout \\ 2_000, step \\ 25) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    do_eventually(fun, deadline, step)
-  end
-
-  defp do_eventually(fun, deadline, step) do
-    cond do
-      fun.() -> true
-      System.monotonic_time(:millisecond) >= deadline -> false
-      true -> Process.sleep(step) && do_eventually(fun, deadline, step)
     end
   end
 end

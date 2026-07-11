@@ -17,7 +17,7 @@ defmodule Linx.Netfilter.KernelAcceptanceTest do
 
   @moduletag :integration
 
-  alias Linx.Netfilter.{Chain, Expr, Object, Ruleset, Set, Verdict, Vmap, Wire}
+  alias Linx.Netfilter.{Chain, Expr, Flowtable, Object, Ruleset, Set, Verdict, Vmap, Wire}
   alias Linx.Netlink.{Nfnl, Socket}
 
   @table "nft_kernel_acceptance"
@@ -41,6 +41,10 @@ defmodule Linx.Netfilter.KernelAcceptanceTest do
     |> Ruleset.add_object!(
       @ref,
       Object.new!(:limit, "slow", %{type: :packets, rate: 10, per: 1, burst: 9, over: false})
+    )
+    |> Ruleset.add_flowtable!(
+      @ref,
+      Flowtable.new!("ft", hook: :ingress, priority: 0, devices: ["lo"])
     )
     |> Ruleset.add_set!(
       @ref,
@@ -193,10 +197,22 @@ defmodule Linx.Netfilter.KernelAcceptanceTest do
     assert table, "pushed table not found on pull"
     assert length(table.chains["input"].rules) == 13
 
-    # The pipapo set survived with its interval+concat flags.
+    # The pipapo set survived with its interval+concat flags — and,
+    # since the KEY_END/concat-id decode landed, its declared key type
+    # and authored elements too.
     ranges = table.sets["svc_ranges"]
     assert :interval in ranges.flags
     assert :concat in ranges.flags
+    assert ranges.key_type == {:concat, [:ipv4_addr, :inet_service]}
+
+    # Named objects and the flowtable survive pull (GETOBJ /
+    # GETFLOWTABLE dumps).
+    assert %Object{kind: :counter} = table.objects[{:counter, "hits"}]
+    assert %Object{kind: :quota, data: %{over: true}} = table.objects[{:quota, "monthly"}]
+    assert %Object{kind: :limit} = table.objects[{:limit, "slow"}]
+
+    ft = table.flowtables["ft"]
+    assert %Flowtable{hook: :ingress, devices: ["lo"]} = ft
 
     # Cleanup: replace with just the (empty) table; the owner flag
     # reaps it when the socket closes.
