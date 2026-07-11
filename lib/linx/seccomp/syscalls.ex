@@ -511,7 +511,6 @@ defmodule Linx.Seccomp.Syscalls do
   @x86_64_inv for {atom, n} <- @x86_64, into: %{}, do: {n, atom}
   @aarch64_inv for {atom, n} <- @aarch64, into: %{}, do: {n, atom}
 
-
   @doc """
   The current host architecture as an atom — wraps
   `Linx.Seccomp.arch/0`. Returned values: `:x86_64`, `:aarch64`,

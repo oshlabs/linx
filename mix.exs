@@ -289,16 +289,6 @@ defmodule Linx.MixProject do
           Linx.Netfilter.Decoder,
           Linx.Netfilter.Wire
         ],
-        "Netfilter — ~NFT sigil": [
-          Linx.NFT,
-          Linx.NFT.ParseError,
-          Linx.NFT.Tokenizer,
-          Linx.NFT.Parser,
-          Linx.NFT.Compiler,
-          Linx.NFT.RuntimeCompiler,
-          Linx.NFT.Runtime,
-          Linx.NFT.Formatter
-        ],
         "Netlink core": [
           Linx.Netlink,
           Linx.Netlink.Socket,

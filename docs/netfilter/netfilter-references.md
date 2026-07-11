@@ -38,8 +38,7 @@ source when interpretation is non-obvious.
 ## Man pages
 
 - **[`nft(8)`](https://manpages.debian.org/testing/nftables/nft.8.en.html)**
-  — userspace tool reference; the grammar `~NFT` parses is the
-  one documented here.
+  — userspace tool reference.
 - **[`libnftables(3)`](https://man.archlinux.org/man/extra/nftables/libnftables.3.en)**
   — official C library API; cross-reference for the JSON schema
   even though we don't use it.
@@ -67,8 +66,7 @@ source when interpretation is non-obvious.
 - **[Logging traffic](https://wiki.nftables.org/wiki-nftables/index.php/Logging_traffic)**
 - **[Flowtables](https://wiki.nftables.org/wiki-nftables/index.php/Flowtables)**
 - **[Scripting](https://wiki.nftables.org/wiki-nftables/index.php/Scripting)**
-  — `nftables.conf` file conventions; reference for the `~NFT` /
-  `Linx.NFT.Conf` parser scope.
+  — `nftables.conf` file conventions.
 - **[List of updates since Linux kernel 3.13](https://wiki.nftables.org/wiki-nftables/index.php/List_of_updates_since_Linux_kernel_3.13)**
   — per-version feature additions; lookup table for kernel-floor
   decisions.
@@ -76,73 +74,8 @@ source when interpretation is non-obvious.
   — wire-format internals; the right reading list for codec
   implementers.
 
-## nftables source (grammar reference for `~NFT`)
+## nftables source
 
-- **[`src/parser_bison.y`](https://git.netfilter.org/nftables/plain/src/parser_bison.y)**
-  — full bison grammar, ~6,594 lines, ~471 left-hand-side
-  non-terminals. The reference for what `~NFT` parses (subset)
-  and emits.
-- **[`src/scanner.l`](https://git.netfilter.org/nftables/plain/src/scanner.l)**
-  — flex lexer with 50+ start conditions; reference for
-  `Linx.NFT.Tokenizer`'s start-condition stack.
 - **[`libnftnl`](https://git.netfilter.org/libnftnl/)** — readable
   netlink-message construction reference (we don't link it, but
   it's the canonical implementation of the wire format).
-
-## HEEx implementation (model for `~NFT`)
-
-- **[`phoenix_live_view/lib/phoenix_live_view/tag_engine/tokenizer.ex`](https://github.com/phoenixframework/phoenix_live_view/blob/main/lib/phoenix_live_view/tag_engine/tokenizer.ex)**
-  (~773 LOC) — the char-by-char tokenizer pattern
-  `Linx.NFT.Tokenizer` mirrors.
-- **[`phoenix_live_view/lib/phoenix_live_view/tag_engine/parser.ex`](https://github.com/phoenixframework/phoenix_live_view/blob/main/lib/phoenix_live_view/tag_engine/parser.ex)**
-  (~731 LOC) — the token-stream parser pattern.
-- **[`phoenix_live_view/lib/phoenix_live_view/tag_engine/compiler.ex`](https://github.com/phoenixframework/phoenix_live_view/blob/main/lib/phoenix_live_view/tag_engine/compiler.ex)**
-  (~1348 LOC) — the AST-to-compiled-Elixir pattern.
-- **[`phoenix_live_view/lib/phoenix_live_view/html_formatter.ex`](https://github.com/phoenixframework/phoenix_live_view/blob/main/lib/phoenix_live_view/html_formatter.ex)**
-  (~657 LOC) — `mix format` plugin reference for the formatter.
-
-## Production-shape references
-
-- **[Kubernetes blog — nftables kube-proxy mode (Feb 2025)](https://kubernetes.io/blog/2025/02/28/nftables-kube-proxy/)**
-  — the canonical "scalable NAT via nftables" design: vmaps
-  with concatenated keys for service dispatch. The shape
-  Linx.Netfilter should make ergonomic.
-- **[ulogd2 documentation](https://www.netfilter.org/projects/ulogd/)**
-  — reference NFLOG consumer; useful for understanding per-group
-  worker patterns and qthresh / timeout tuning.
-- **[firewalld nftables backend (2019 post-mortem)](https://firewalld.org/2019/09/libnftables-JSON)**
-  — large-scale nftables consumer; informative on edge cases of
-  the JSON form (which Linx avoids).
-- **[Hairpin NAT with nftables — chromic.org](https://chromic.org/blog/hairpin-nat-with-nftables/)**
-  — the DNAT+SNAT pattern Linx.Netfilter examples will document.
-
-## Adjacent userspace tooling
-
-- **[`nft`](https://www.netfilter.org/projects/nftables/) (the CLI)**
-  — userspace tool; everything Linx.Netfilter does could
-  alternatively be done via `nft`. We don't shell to it; the
-  point of Linx is to be the in-Elixir equivalent.
-- **[`google/nftables`](https://pkg.go.dev/github.com/google/nftables)**
-  (Go) — pure-Go reimplementation of libnftnl. Closest precedent
-  for what we're building. ~15 kloc; informative for sizing the
-  codec milestones.
-- **[`nftnl-rs`](https://github.com/mullvad/nftnl-rs)** / **[`nftables-rs`](https://github.com/nftables-rs/nftables-rs)** (Rust)
-  — low-level netlink and JSON-shim respectively.
-- **[`nftables` on hex.pm](https://hex.pm/packages/nftables)** —
-  pre-existing Elixir wrapper (libnftables JSON via a Zig port);
-  different architecture from Linx, but useful prior art to know
-  about.
-
-## In-repo cross-references
-
-- `Linx.Netlink` — `Linx.Netlink.Rtnl`'s codec DSL +
-  socket plumbing; `Linx.Netlink.Nfnl` mirrors the family-specific
-  parts for netfilter.
-- `Linx.Seccomp` — the value-type-with-codec precedent
-  (`%Linx.Seccomp.Filter{}` is the small-scale version of what
-  `%Linx.Netfilter.Ruleset{}` is at large scale).
-- `Linx.Process` — the checkpoint composition story;
-  every cross-namespace verb (Mount, User, Capabilities, Seccomp,
-  Sysctl, Netfilter) hooks in the same way.
-- `Linx.Sysctl` — the most recent "build a subsystem from
-  scratch" template; Netfilter's milestone shape borrows from it.

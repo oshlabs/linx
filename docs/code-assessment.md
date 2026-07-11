@@ -210,16 +210,14 @@ features, and coverage/validation gaps. Roughly ordered by priority.
    and demuxes replies to waiters by seq) is unbuilt. Not required as long as
    callers open one socket per concurrent user, which the docs now mandate.
 
-### `~NFT` feature gaps (deferred; also in `PLAN.md`)
+### `~NFT` feature gaps
 
-6. **Ranges over host-byte-order fields** (`meta mark 10-20`, `ct mark`
-   ranges). M2 makes these raise a clear compile error rather than mis-encode.
-   Real support needs a byteorder-conversion expression before the set lookup
-   (intervals are compared in memcmp order, which isn't numeric order for a
-   native-endian key on little-endian hosts).
-7. ~~Concatenated set types and pipapo-backed concatenated ranges.~~
-   **Done** — landed kernel-verified in the NFT-parity passes
-   (`e60ad2d`, `9711855`, 2026-07-02); see `NFT-PLAN.md`.
+6. / 7. **Moot** — the `~NFT` text frontend was removed (branch
+   `remove-nft`): an unconsumed approximation of nft's own frontend. The
+   pipeline DSL is the authoring surface; the encoder-level capabilities the
+   parity work produced (concatenated keys, pipapo intervals, objects,
+   dynsets, verdict maps) remain, kernel-verified by
+   `test/linx/netfilter/kernel_acceptance_test.exs`.
 
 ### Native hardening & fuzzing (deferred; also in `PLAN.md`)
 

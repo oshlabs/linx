@@ -719,7 +719,7 @@ defmodule Linx.Netfilter.Encoder do
   end
 
   # Classifies one key term as a scalar or a range and renders the wire
-  # bytes for its bound(s). Range shapes: `{:range, lo, hi}` (the ~NFT
+  # bytes for its bound(s). Range shapes: `{:range, lo, hi}` (the
   # compiler's form), a bare `{lo, hi}` integer pair (accepted by
   # `Set.Element.check/2` for ports), and textual CIDR ("10.0.0.0/8").
   defp normalize_key({:range, lo, hi}, type),

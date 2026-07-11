@@ -21,8 +21,8 @@ defmodule Linx do
   **Networking**
     * `Linx.Netlink` / `Linx.Netlink.Rtnl` — an `AF_NETLINK` client; rtnetlink
       links, addresses, routes, neighbours, rules, and stats.
-    * `Linx.Netfilter` — nf_tables over `NETLINK_NETFILTER`: the `~NFT` sigil and
-      pipeline DSL, `push`/`pull`/`diff`, socket-owned tables, a live monitor.
+    * `Linx.Netfilter` — nf_tables over `NETLINK_NETFILTER`: the pipeline
+      DSL, `push`/`pull`/`diff`, socket-owned tables, a live monitor.
 
   **Resource control**
     * `Linx.Cgroup` — cgroup v2 via direct `/sys/fs/cgroup` I/O: typed

@@ -10,7 +10,7 @@ connection tracking, and packet-event streams — reached over the
 `NETLINK_NETFILTER` family. `Linx.Netfilter` represents a whole ruleset
 (`%Ruleset{}`: tables → chains → ordered rules, plus sets, maps, vmaps and named
 objects) as ordinary, inspectable data, with four verbs over it: **build** a
-ruleset (pipeline DSL or `~NFT` sigil), **pull** the kernel's current state into
+ruleset with the pipeline DSL, **pull** the kernel's current state into
 a value, **diff** two rulesets into a patch, and **push** a ruleset to the
 kernel. Every mutation rides a mandatory `BATCH_BEGIN`/`BATCH_END` transaction:
 the kernel applies the whole batch or rejects it whole. Kernel state lives in the
@@ -38,7 +38,7 @@ closes, so the firewall's lifetime is the owning supervisor's lifetime.
 
 ```mermaid
 flowchart LR
-    desired["desired Ruleset<br/>(build / ~NFT)"] --> diff["diff"]
+    desired["desired Ruleset<br/>(build)"] --> diff["diff"]
     pull["pull<br/>(kernel state)"] --> diff
     diff -->|"minimal patch"| push["push(mode: :reconcile)<br/>one atomic batch + GENID CAS"]
     push --> kernel["kernel nftables"]

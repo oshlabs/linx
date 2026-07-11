@@ -1,5 +1,0 @@
-# 00 — empty table sanity check
-# The simplest possible round-trip subject: a table with no body.
-
-table inet empty {
-}

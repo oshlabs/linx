@@ -70,17 +70,26 @@ my_gid = System.cmd("id", ["-g"]) |> elem(0) |> String.trim() |> String.to_integ
 :ok = Rtnl.Route.add_default(ns, "10.0.0.1")
 
 # Firewall:  default drop, allow established + ssh; rules vanish when we do.
+alias Linx.Netfilter.{Expr, Ruleset, Wire}
+established = <<Wire.ct_state_bits(:established)::big-32>>
+
+guard =
+  Ruleset.new()
+  |> Ruleset.add_table!(:inet, "guard")
+  |> Ruleset.add_chain!({:inet, "guard"}, "input",
+    type: :filter, hook: :input, priority: 0, policy: :drop)
+  |> Ruleset.add_rule!({:inet, "guard"}, "input", [
+    Expr.ct(:state), Expr.bitwise(established, <<0::32>>),
+    Expr.cmp(:neq, <<0::32>>), Expr.immediate(:accept)
+  ])
+  |> Ruleset.add_rule!({:inet, "guard"}, "input", [
+    Expr.meta(:l4proto), Expr.cmp(:eq, <<6>>),
+    Expr.payload(:tcp_dport), Expr.cmp(:eq, <<22::big-16>>),
+    Expr.immediate(:accept)
+  ])
+
 {:ok, ct_nfnl} = Linx.Netlink.Nfnl.open({:pid, host_pid})
-:ok = Linx.Netfilter.push(ct_nfnl, ~NFT"""
-  table inet guard {
-    chain input {
-      type filter hook input priority 0
-      policy drop
-      ct state established accept
-      tcp dport 22 accept
-    }
-  }
-""")
+:ok = Linx.Netfilter.push(ct_nfnl, guard)
 
 # Privilege: only cap_net_bind_service.
 all = Linx.Capabilities.Constants.all()
@@ -122,7 +131,7 @@ The subsystems are independent — you can spawn without namespaces, use netlink
 
 - **`Linx.Netlink`** — an `AF_NETLINK` client with rtnetlink (links / addresses / routes / neighbours / rules / stats — full CRUD across IPv4 and IPv6) and nfnetlink (surfaced separately as `Linx.Netfilter`). Pure-Elixir encode/decode; a NIF only for entering another netns on a throwaway thread. `Rtnl.open({:pid, n})` binds a socket to a child's network namespace for its whole life. See [the Netlink overview](https://hexdocs.pm/linx/netlink-overview.html).
 
-- **`Linx.Netfilter`** — nf_tables (the iptables / ip6tables / ebtables successor) over `NETLINK_NETFILTER`. A `%Linx.Netfilter.Ruleset{}` is plain data; build it with the pipeline DSL or the compile-time `~NFT` sigil (real nft syntax), then `push` / `pull` / `diff`. Tables are **socket-owned by default** — when the supervisor that opened the socket dies, the kernel atomically destroys the rules. Live `subscribe/1` monitor + NFLOG `log_listen/2`, plus a `mix format` plugin for `~NFT` bodies and `.nft` files. See [the Netfilter overview](https://hexdocs.pm/linx/netfilter-overview.html).
+- **`Linx.Netfilter`** — nf_tables (the iptables / ip6tables / ebtables successor) over `NETLINK_NETFILTER`. A `%Linx.Netfilter.Ruleset{}` is plain data; build it with the pipeline DSL, then `push` / `pull` / `diff`. Tables are **socket-owned by default** — when the supervisor that opened the socket dies, the kernel atomically destroys the rules. Live `subscribe/1` monitor + NFLOG `log_listen/2`. See [the Netfilter overview](https://hexdocs.pm/linx/netfilter-overview.html).
 
 - **Value types** — `Linx.IP` (with `Linx.IP.Subnet`) and `Linx.MAC`. Each has a compile-time sigil (`~IP`, `~MAC`) that `Inspect` round-trips. Decoded netlink fields carry these structs directly; verbs accept either the struct or the equivalent string.
 

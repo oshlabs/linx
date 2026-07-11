@@ -28,14 +28,11 @@ unprivileged suite. Still open:
 
 ## Deferred features
 
-The `~NFT` parser/compiler now has its own roadmap to full nftables parity —
-see `NFT-PLAN.md`, which is authoritative for `~NFT` state. (Concatenated set
-types and pipapo interval concatenations, once listed here, landed 2026-07-02
-kernel-verified; the one `~NFT` item below is kept here only until it lands.)
+(The `~NFT` text frontend and its parity roadmap were removed on the
+`remove-nft` branch — an unconsumed approximation of nft's own frontend that
+set expectations of exact parity it couldn't honor. The pipeline DSL is the
+authoring surface; the frontend lives in git history if ever wanted again.)
 
-- **`~NFT` ranges over host-byte-order fields** (`meta mark 10-20`): needs a
-  byteorder-conversion expression before the set lookup; the compiler
-  currently refuses with a clear error rather than mis-encoding.
 - **`openat2(RESOLVE_BENEATH)` hardening** for `linx_mount`'s target-file
   creation when used against live (adversarial) containers — the final
   component is already `O_EXCL|O_NOFOLLOW`-protected.

@@ -7,8 +7,7 @@ defmodule Linx.Netfilter.Ruleset do
   `pull/1..2` reads back, and what `diff/2` takes pairs of. The
   pipeline DSL — `new/0`, `add_table/3`, `add_chain/4`,
   `add_rule/4`, `add_set/3`, `add_map/3`, `add_object/3`,
-  `add_flowtable/3` — is how authoring-time code builds one. The
-  `~NFT` sigil compiles to the same DSL calls.
+  `add_flowtable/3` — is how authoring-time code builds one.
 
   ## Fields
 

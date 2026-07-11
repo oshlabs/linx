@@ -107,9 +107,9 @@ defmodule Linx.Netfilter.Expr do
   `value` is a raw binary of the right length (1/2/4/16 bytes
   depending on what was loaded into `sreg`).
 
-  Most callers don't construct `cmp/3` directly — the high-level
-  `~NFT` sigil and pipeline helpers compose `payload + cmp`
-  into the natural "tcp dport 22" shape.
+  Most callers don't construct `cmp/3` directly — the pipeline
+  helpers compose `payload + cmp` into the natural "tcp dport 22"
+  shape.
 
       iex> Expr.cmp(:eq, <<22::big-16>>)
       #Linx.Netfilter.Expr<cmp>

@@ -225,7 +225,7 @@ defmodule Linx.Netfilter.Set.Element do
   # Loose element-shape checking — just catches obvious mismatches
   # at construction time. Strict validation is not yet implemented.
 
-  # `{:range, lo, hi}` — an interval element (the ~NFT compiler's form for
+  # `{:range, lo, hi}` — an interval element (the canonical form for
   # `22-25` / CIDR-in-set). Both bounds must pass the scalar check; the
   # encoder emits the start/end pair.
   def check({:range, lo, hi}, type) do

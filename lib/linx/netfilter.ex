@@ -21,7 +21,7 @@ defmodule Linx.Netfilter do
   containing ordered rules, plus sets/maps/vmaps and named objects.
   Pure Elixir values, freely composable and inspectable. Four verbs:
 
-    * `build` — construct via pipeline DSL or `~NFT` sigil.
+    * `build` — construct via the pipeline DSL.
     * `push/2` — write to the kernel atomically (`:replace` rebuilds,
       `:reconcile` computes the minimal diff).
     * `pull/1..2` — read kernel state into a ruleset value.
@@ -76,21 +76,12 @@ defmodule Linx.Netfilter do
   land in the child's nftables instance. Same value type, same
   verbs.
 
-  ## Authoring surfaces: peers, not layers
+  ## Authoring
 
-  Two authoring surfaces produce the same `%Ruleset{}`:
-
-    * **Pipeline DSL** —
-      `Ruleset.new() |> Ruleset.add_table(...) |> Table.add_chain(...) |> Chain.add_rule(...)` —
-      for runtime-shaped rulesets (interfaces discovered at boot,
-      IPs from config).
-    * **`~NFT` sigil** — `~NFT"table inet myapp { chain ... }"` —
-      for compile-time-authored rulesets with safe Elixir
-      interpolation and lossless round-trip to `nftables.conf`
-      files. Modelled on Phoenix LiveView's HEEx.
-
-  Both call the same validator-setter functions; both produce the
-  same value.
+  Rulesets are authored with the pipeline DSL —
+  `Ruleset.new() |> Ruleset.add_table(...) |> Table.add_chain(...) |> Chain.add_rule(...)` —
+  whether shaped at runtime (interfaces discovered at boot, IPs from
+  config) or written out literally in source.
 
   The setters use `add_*` (`add_table` / `add_chain` / `add_rule`), not
   the `create_*` of `Linx.Cgroup` or `Linx.Netlink.Rtnl`, deliberately:
@@ -116,8 +107,7 @@ defmodule Linx.Netfilter do
   the only coupling, exactly the way `Linx.Sysctl` / `Linx.Mount` /
   every other subsystem composes.
 
-  See `docs/netfilter/netfilter-overview.md` for design notes and
-  `NFT-PLAN.md` for intentionally deferred work.
+  See `docs/netfilter/netfilter-overview.md` for design notes.
 
   ## References
 
