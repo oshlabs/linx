@@ -83,9 +83,9 @@ authoring surface; the frontend lives in git history if ever wanted again.)
   one-driver-at-a-time limitation, which suffices as long as callers open
   one socket per concurrent user (the docs mandate this).
 
-- **Sysctl ns identity: `pidfd` over re-verify.** `linx_sysctl.c`'s post-open
-  stat re-verification *narrows* the pid-reuse window rather than eliminating
-  it the way `linx_process.c`'s pinned-dirfd approach does. A
-  `pidfd_open` + `pidfd`-relative resolution would be strictly stronger; the
-  paths are opaque binaries there (possibly bind-mounted netns files), which
-  is why the cheaper re-verify was used.
+- **Sysctl/mount ns identity: `pidfd` over re-verify.** `linx_sysctl.c`'s and
+  `linx_mount.c`'s post-open stat re-verification *narrows* the pid-reuse
+  window rather than eliminating it the way `linx_process.c`'s pinned-dirfd
+  approach does. A `pidfd_open` + `pidfd`-relative resolution would be
+  strictly stronger; the paths are opaque binaries there (possibly
+  bind-mounted netns files), which is why the cheaper re-verify was used.

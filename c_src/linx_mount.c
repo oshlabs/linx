@@ -125,6 +125,16 @@ static char *binary_to_cstr(ErlNifEnv *env, ERL_NIF_TERM term)
 	return s;
 }
 
+/* enif_free is not documented to accept NULL (current OTP tolerates
+ * it, but that's an allocator implementation detail); the badarg
+ * cleanup paths below free whichever of their binary_to_cstr results
+ * succeeded, so guard here. */
+static void free_cstr(char *p)
+{
+	if (p)
+		enif_free(p);
+}
+
 /* --- version/0 ---------------------------------------------------------- */
 
 static ERL_NIF_TERM version(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[])
@@ -202,6 +212,22 @@ static int enter_target_ns(struct ns_job_result *r, const char *ns_path)
 		return -1;
 	}
 
+	/* Pid-reuse narrowing, mirroring linx_sysctl's open_ns_fds: the
+	 * path (typically /proc/<pid>/ns/mnt) must still resolve to the
+	 * namespace object we hold, so a target that died and had its
+	 * pid recycled around the open is caught as an inode mismatch
+	 * -> ESRCH, before root performs mount/umount/pivot_root in an
+	 * unrelated process's namespace. Same residual window as
+	 * linx_sysctl; pidfd-based resolution is the tracked full fix. */
+	struct stat now, held;
+	if (stat(ns_path, &now) < 0 || fstat(ns, &held) < 0 ||
+	    now.st_ino != held.st_ino || now.st_dev != held.st_dev) {
+		r->err = ESRCH;
+		r->stage = "open_ns";
+		close(ns);
+		return -1;
+	}
+
 	if (setns(ns, CLONE_NEWNS) < 0) {
 		r->err = errno;
 		r->stage = "setns";
@@ -264,6 +290,19 @@ static void do_mount_in_pidns(struct mount_job *j)
 	if (pidns < 0) {
 		j->r.err = errno;
 		j->r.stage = "open_pidns";
+		return;
+	}
+
+	/* Same pid-reuse narrowing as enter_target_ns: the mnt-ns and
+	 * pid-ns fds were resolved from one target pid on the Elixir
+	 * side; refuse to splice the mount namespace of one process
+	 * with the pid namespace of a recycled imposter. */
+	struct stat now, held;
+	if (stat(j->pidns_path, &now) < 0 || fstat(pidns, &held) < 0 ||
+	    now.st_ino != held.st_ino || now.st_dev != held.st_dev) {
+		j->r.err = ESRCH;
+		j->r.stage = "open_pidns";
+		close(pidns);
 		return;
 	}
 
@@ -453,9 +492,9 @@ static ERL_NIF_TERM nif_mount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
 	char *pidns_path = binary_to_cstr(env, argv[6]);
 
 	if (!target || !fstype || !source || !data || !ns_path || !pidns_path) {
-		enif_free(source);  enif_free(target);
-		enif_free(fstype);  enif_free(data);
-		enif_free(ns_path); enif_free(pidns_path);
+		free_cstr(source);  free_cstr(target);
+		free_cstr(fstype);  free_cstr(data);
+		free_cstr(ns_path); free_cstr(pidns_path);
 		return enif_make_badarg(env);
 	}
 
@@ -501,9 +540,9 @@ static ERL_NIF_TERM nif_mount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
 		}
 	}
 
-	enif_free(source);  enif_free(target);
-	enif_free(fstype);  enif_free(data);
-	enif_free(ns_path); enif_free(pidns_path);
+	free_cstr(source);  free_cstr(target);
+	free_cstr(fstype);  free_cstr(data);
+	free_cstr(ns_path); free_cstr(pidns_path);
 
 	return result;
 }
@@ -523,8 +562,8 @@ static ERL_NIF_TERM nif_umount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
 	char *ns_path = binary_to_cstr(env, argv[2]);
 
 	if (!target || !ns_path) {
-		enif_free(target);
-		enif_free(ns_path);
+		free_cstr(target);
+		free_cstr(ns_path);
 		return enif_make_badarg(env);
 	}
 
@@ -555,8 +594,8 @@ static ERL_NIF_TERM nif_umount(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv
 		}
 	}
 
-	enif_free(target);
-	enif_free(ns_path);
+	free_cstr(target);
+	free_cstr(ns_path);
 
 	return result;
 }
@@ -578,9 +617,9 @@ static ERL_NIF_TERM nif_pivot_root(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
 	char *ns_path  = binary_to_cstr(env, argv[2]);
 
 	if (!new_root || !put_old || !ns_path) {
-		enif_free(new_root);
-		enif_free(put_old);
-		enif_free(ns_path);
+		free_cstr(new_root);
+		free_cstr(put_old);
+		free_cstr(ns_path);
 		return enif_make_badarg(env);
 	}
 
@@ -603,9 +642,9 @@ static ERL_NIF_TERM nif_pivot_root(ErlNifEnv *env, int argc, const ERL_NIF_TERM 
 			: ok_atom(env);
 	}
 
-	enif_free(new_root);
-	enif_free(put_old);
-	enif_free(ns_path);
+	free_cstr(new_root);
+	free_cstr(put_old);
+	free_cstr(ns_path);
 
 	return result;
 }

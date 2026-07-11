@@ -76,6 +76,9 @@ defmodule Linx.Mount do
     remount: 0x20,
     mandlock: 0x40,
     dirsync: 0x80,
+    # MS_NOSYMFOLLOW, Linux >= 5.10 — refuse to follow symlinks on
+    # this mount; pairs with the symlink hardening elsewhere in Linx.
+    nosymfollow: 0x100,
     noatime: 0x400,
     nodiratime: 0x800,
     bind: 0x1000,
@@ -188,7 +191,9 @@ defmodule Linx.Mount do
           propagation: propagation,
           fstype: fstype,
           source: unescape(source),
-          super_options: super_options
+          # The kernel octal-escapes super options too (e.g. SELinux
+          # contexts containing spaces).
+          super_options: unescape(super_options)
         }
       ]
     else
@@ -527,6 +532,8 @@ defmodule Linx.Mount do
     * `:flags` — flag atoms (`:ro`, `:nosuid`, `:nodev`, etc.) to
       apply. Reuses the catalog from `mount/4`.
     * `:data` — filesystem-specific options string.
+    * `:in` — target mount namespace, same shapes as `mount/4`
+      (`:self`, `{:pid, n}`, `{:path, p}`).
 
   Returns `:ok` or `{:error, %Linx.Mount.Error{operation: :mount}}`.
   """

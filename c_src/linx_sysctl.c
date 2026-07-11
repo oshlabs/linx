@@ -309,8 +309,26 @@ static int read_proc_file(const char *path, char **out_buf, size_t *out_len)
 	size_t len = 0;
 	for (;;) {
 		if (len == cap) {
-			if (cap >= LINX_SYSCTL_READ_MAX)
-				break;
+			if (cap >= LINX_SYSCTL_READ_MAX) {
+				/* The file still has bytes past the cap. A silently
+				 * truncated read must not look like success -- this
+				 * value feeds reconcile comparisons -- so probe one
+				 * byte: EOF right here means the file was exactly
+				 * cap-sized (fine); more data means EFBIG. */
+				char probe;
+				ssize_t p;
+				do {
+					p = read(fd, &probe, 1);
+				} while (p < 0 && errno == EINTR);
+
+				if (p == 0)
+					break;
+
+				int e = p < 0 ? errno : EFBIG;
+				enif_free(buf);
+				close(fd);
+				return e;
+			}
 			size_t new_cap = cap * 2;
 			if (new_cap > LINX_SYSCTL_READ_MAX)
 				new_cap = LINX_SYSCTL_READ_MAX;
