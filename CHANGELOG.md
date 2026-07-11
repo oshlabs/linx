@@ -140,6 +140,57 @@ back and compare):
   (content-fingerprint staleness instead of mtime), and compile to a temp
   path with an atomic rename.
 
+### Review pass (2026-07-11)
+
+A follow-up whole-library review landed a second round of fixes:
+
+- **Shared errno table.** `Linx.Errno` replaces the ten per-subsystem
+  errno↔code maps (which had drifted apart); every `%Linx.*.Error{}`
+  resolves through it, and `lib/linx.ex` documents the cross-subsystem
+  error model. Type-level corrections: `Linx.Mount.Error` gains the five
+  stages the code actually produces, `Linx.Sysctl.Error` drops a phantom
+  `:chdir`, `Linx.Netfilter.Error.operation` shrinks to the three atoms
+  actually constructed (`:push | :pull | :create_table` — **breaking** if
+  you matched the old aspirational list), `Linx.User.setup_maps/2`
+  documents its `{:bad_setup, _}` shape.
+- **Seccomp cross-arch table fix.** `setsid`/`sendfile` were missing from
+  the x86_64 map and `setrlimit`/`renameat` from aarch64 — a portable
+  allow-list naming one silently failed to allow it on the other arch. An
+  invariant test pins every remaining asymmetry as genuinely single-arch.
+- **Netfilter: objects and flowtables survive `pull`** (`GETOBJ` /
+  `GETFLOWTABLE` dumps) **and flowtables push** (`NEWFLOWTABLE` encoding,
+  netdev-ingress hook, device list, `:hw_offload`/`:counter` flags) —
+  previously `to_batch` silently discarded `add_flowtable` data.
+  `validate_for_reconcile` rejects objects/flowtables (and anonymous
+  set/vmap literals) in desired rulesets rather than silently never
+  creating them.
+- **Netfilter decoder symmetry**: `log`/`quota`/`objref` expressions and
+  pipapo `KEY_END`/concat-type-id decoding — pulled rulesets containing
+  them now compare equal instead of churning `:replace_rule` every
+  reconcile pass. The encoder's silent empty-data fallback now **raises**
+  for unknown expressions; rule comments are bounded at 253 bytes; named
+  chain priorities are validated per family at build time; textual IPs are
+  refused where a set key type must be inferred.
+- **Silently-swallowed netlink failures surface**: socket bind errors
+  (previously a deaf Monitor with no error anywhere), NFLOG config NACKs
+  (previously `log_listen` succeeded and never delivered), and lost
+  replies (`Request.talk` gains a per-datagram timeout, default 5s —
+  **behavior change** from blocking forever).
+- **Native hardening follow-through**: `linx_mount.c` re-verifies
+  namespace identity after opening `/proc/<pid>/ns/{mnt,pid}` (the
+  pid-reuse narrowing its siblings already had); `linx_sysctl.c` returns
+  `EFBIG` instead of silently truncating reads at 64 KiB;
+  `netlink_socket.c` rejects embedded NUL in netns paths; `linx_tty.c`
+  restores termios on its alloc-failure path; `Linx.Tty.attach/2`'s
+  setup window can no longer strand the terminal raw if the port open
+  raises; `Linx.Process` checks the agent binary is executable, not just
+  present.
+- **Reconcile convergence fix**: a desired string value with a trailing
+  newline now converges instead of being rewritten (and reported applied)
+  every pass; `Linx.Cgroup.create/1` verifies an `EEXIST` target is a
+  directory; `Linx.Mount` gains `:nosymfollow` (MS_NOSYMFOLLOW, ≥ 5.10)
+  and unescapes mountinfo `super_options`.
+
 ### CI
 
 - New privileged job runs the full `:integration` suite as root; an aarch64
