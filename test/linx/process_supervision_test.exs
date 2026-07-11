@@ -175,6 +175,78 @@ defmodule Linx.ProcessSupervisionTest do
     end
   end
 
+  describe "orphan_policy — unclean session death (terminate/2 skipped)" do
+    # `Process.exit(session, :kill)` is the in-test stand-in for an unclean
+    # VM death: it skips terminate/2 (no graceful reap command), the Port
+    # closes with the session, and the agent sees a bare POLLHUP on its
+    # BEAM channel — exactly what a Ctrl-C abort / kill -9 of the VM
+    # produces. The exit signal also reaches us over the spawn/1 link, so
+    # trap exits.
+    setup do
+      Process.flag(:trap_exit, true)
+      :ok
+    end
+
+    test "default ({:kill, 5000}): the workload dies with the session" do
+      {:ok, s} = P.spawn(argv: ["/bin/sleep", "60"], auto_proceed: true)
+      assert_receive {:linx_process, :running}, 2_000
+      {:ok, host_pid} = P.host_pid(s)
+      assert File.dir?("/proc/#{host_pid}")
+
+      Process.exit(s, :kill)
+
+      # /bin/sleep dies on the initial SIGTERM — well inside the grace.
+      assert await_gone("/proc/#{host_pid}", 100)
+    end
+
+    test "{:kill, grace}: a SIGTERM-immune workload survives the grace, then is SIGKILLed" do
+      # SIG_IGN survives execve, so the sleep itself ignores SIGTERM and
+      # only the post-grace SIGKILL can take it down. The marker file
+      # gates the kill on the trap actually being installed — :running
+      # only means the shell has execve'd, not that it has run `trap`.
+      marker = Path.join(System.tmp_dir!(), "linx-orphan-#{System.unique_integer([:positive])}")
+      on_exit(fn -> File.rm(marker) end)
+
+      {:ok, s} =
+        P.spawn(
+          argv: ["/bin/sh", "-c", ~s(trap "" TERM; : > #{marker}; exec sleep 60)],
+          auto_proceed: true,
+          orphan_policy: {:kill, 1_000}
+        )
+
+      assert_receive {:linx_process, :running}, 2_000
+      {:ok, host_pid} = P.host_pid(s)
+      assert await_present(marker, 100)
+
+      Process.exit(s, :kill)
+
+      # Early in the grace window the workload must still be running —
+      # the agent escalates at the deadline, not on the hangup.
+      Process.sleep(100)
+      assert File.dir?("/proc/#{host_pid}")
+
+      # ...and after the grace expires, SIGKILL reaps it.
+      assert await_gone("/proc/#{host_pid}", 150)
+    end
+
+    test ":linger: the orphan keeps running after the session dies" do
+      {:ok, s} =
+        P.spawn(argv: ["/bin/sleep", "60"], auto_proceed: true, orphan_policy: :linger)
+
+      assert_receive {:linx_process, :running}, 2_000
+      {:ok, host_pid} = P.host_pid(s)
+
+      Process.exit(s, :kill)
+
+      Process.sleep(300)
+      assert File.dir?("/proc/#{host_pid}")
+
+      # Clean up the deliberate orphan; its agent reaps it and exits.
+      System.cmd("kill", ["-9", Integer.to_string(host_pid)])
+      assert await_gone("/proc/#{host_pid}", 100)
+    end
+  end
+
   describe "under a DynamicSupervisor" do
     test "restarts on abnormal exit, with the same arguments (:transient)" do
       # max_restarts high so the (intentionally looping) child doesn't trip the
@@ -209,6 +281,17 @@ defmodule Linx.ProcessSupervisionTest do
 
       assert_receive {:linx_process, :exited, 0}, 3_000
       refute_receive {:linx_process, :exited, 0}, 500
+    end
+  end
+
+  defp await_present(_path, 0), do: false
+
+  defp await_present(path, attempts) do
+    if File.exists?(path) do
+      true
+    else
+      Process.sleep(20)
+      await_present(path, attempts - 1)
     end
   end
 

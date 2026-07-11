@@ -38,6 +38,12 @@
  * {:status, :exited, code} or {:status, :signaled, signum} terminates
  * the session. Pre-exec failures arrive as {:error, errno, stage}.
  *
+ * If the BEAM channel closes mid-run without the graceful reap (the VM
+ * died -- terminate/2 never sent {:signal, 9}), the request's
+ * :orphan_policy decides the workload's fate: {:kill, grace_ms} (the
+ * default, 5000 ms) SIGTERMs it, waits out the grace, then SIGKILLs;
+ * :linger lets it finish naturally. See supervise().
+ *
  * THE RELAY
  * ---------
  * The agent process talks to the BEAM on fd 3/4. The cloned child does not
@@ -131,6 +137,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/capability.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -152,6 +159,7 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CTL_IN	3
@@ -395,7 +403,13 @@ struct stdio_dir {
  *   stdio[]   -- per-fd directive for fd 0/1/2. Defaults: INHERIT.
  *   pty       -- 1 if :stdio was the atom :pty; all three fds then point
  *                at a single PTY slave with the child as session leader.
- *                Mutually exclusive with `stdio[]`.  */
+ *                Mutually exclusive with `stdio[]`.
+ *   orphan_kill / orphan_grace_ms -- what supervise() does when fd 3
+ *                closes while the workload runs (the BEAM died without
+ *                the graceful reap): kill (SIGTERM, grace, SIGKILL) or
+ *                linger (let the orphan finish). Wire key
+ *                :orphan_policy, either {:kill, ms} or :linger;
+ *                default {:kill, 5000}.  */
 struct request {
 	enum req_mode mode;
 	pid_t target;
@@ -407,6 +421,9 @@ struct request {
 	int pty;
 	int no_new_privs; /* set PR_SET_NO_NEW_PRIVS in child before checkpoint */
 	char *cwd;        /* chdir() target in the child before execve; NULL = inherit */
+	int orphan_kill;  /* on BEAM-channel loss post-:running: 1 = SIGTERM,
+	                   * grace, SIGKILL; 0 = let the orphan finish (:linger) */
+	int orphan_grace_ms; /* SIGTERM-to-SIGKILL grace when orphan_kill */
 };
 
 static void free_str_array(char **arr)
@@ -656,8 +673,13 @@ static int decode_request(const uint8_t *buf, int len, struct request *req)
 	(void)len;
 
 	/* Sane defaults. all_ns is meaningful only in enter mode and is
-	 * lowered the moment the caller mentioned :namespaces explicitly. */
+	 * lowered the moment the caller mentioned :namespaces explicitly.
+	 * The orphan policy defaults to kill-with-5s-grace: without adoption
+	 * (which Linx doesn't have), an orphan is a leak on every path, so
+	 * lingering is the opt-in, not the default. */
 	req->all_ns = 1;
+	req->orphan_kill = 1;
+	req->orphan_grace_ms = 5000;
 
 	int idx = 0, version;
 	if (ei_decode_version((const char *)buf, &idx, &version) < 0)
@@ -716,6 +738,36 @@ static int decode_request(const uint8_t *buf, int len, struct request *req)
 			if (ei_decode_boolean((const char *)buf, &idx, &b) < 0)
 				return -1;
 			req->no_new_privs = b ? 1 : 0;
+		} else if (strcmp(key, "orphan_policy") == 0) {
+			/* Either the atom :linger or the tuple {:kill, ms}. */
+			int type, sz;
+			if (ei_get_type((const char *)buf, &idx, &type, &sz) < 0)
+				return -1;
+			if (type == ERL_SMALL_TUPLE_EXT ||
+			    type == ERL_LARGE_TUPLE_EXT) {
+				int parity;
+				char ptag[MAXATOMLEN];
+				long grace;
+				if (ei_decode_tuple_header((const char *)buf,
+							   &idx, &parity) < 0 ||
+				    parity != 2 ||
+				    ei_decode_atom((const char *)buf, &idx,
+						   ptag) < 0 ||
+				    strcmp(ptag, "kill") != 0 ||
+				    ei_decode_long((const char *)buf, &idx,
+						   &grace) < 0 ||
+				    grace < 0 || grace > INT_MAX)
+					return -1;
+				req->orphan_kill = 1;
+				req->orphan_grace_ms = (int)grace;
+			} else {
+				char ptag[MAXATOMLEN];
+				if (ei_decode_atom((const char *)buf, &idx,
+						   ptag) < 0 ||
+				    strcmp(ptag, "linger") != 0)
+					return -1;
+				req->orphan_kill = 0;
+			}
 		} else {
 			/* Skip unknown keys -- the BEAM may carry extras we
 			 * don't yet understand; future-compatibility. */
@@ -1758,6 +1810,14 @@ static int pty_wbuf_flush(struct pty_wbuf *w, int fd)
 	return 0;
 }
 
+/* Milliseconds on CLOCK_MONOTONIC -- the orphan-kill grace clock. */
+static int64_t mono_ms(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
 /* The post-exec supervise loop. Dispatches three kinds of BEAM commands
  * on CTL_IN -- {:signal, n} (forward to the workload), {:pty_in, binary}
  * (write to the PTY master, PTY mode only), and {:pty_winsize, {r, c,
@@ -1767,13 +1827,23 @@ static int pty_wbuf_flush(struct pty_wbuf *w, int fd)
  * terminal event ({:status, :exited, _} or {:status, :signaled, _})
  * and returns when the child is gone.
  *
+ * A POLLHUP on fd 3 means the BEAM disappeared without the graceful
+ * reap (terminate/2 never ran -- Ctrl-C abort, kill -9 beam). What
+ * happens next is the request's orphan policy: with orphan_kill the
+ * workload gets SIGTERM, orphan_grace_ms to exit on its own, then
+ * SIGKILL (SIGTERM alone is not enough -- a pid-namespace init with no
+ * handler swallows it; only SIGKILL is forcible from the parent ns).
+ * Without orphan_kill (:linger) the workload finishes naturally.
+ * Either way we stop polling fd 3 and stay until the child is reaped.
+ *
  * SIGCHLD is captured via signalfd (set up in main, blocked from normal
  * delivery in the agent's signal mask); the child unblocks SIGCHLD again
  * before execve, so the workload sees default semantics.
  *
  * `pty_master` is -1 when stdio is not :pty; otherwise it's the parent's
  * end of the PTY pair created before clone/fork. */
-static void supervise(pid_t child_pid, int sigfd, int pty_master)
+static void supervise(pid_t child_pid, int sigfd, int pty_master,
+		      int orphan_kill, int orphan_grace_ms)
 {
 	struct pollfd pfds[3] = {
 		{ .fd = CTL_IN,    .events = POLLIN },
@@ -1785,6 +1855,11 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 	 * the poll-failure return). */
 	struct pty_wbuf wbuf = { 0 };
 
+	/* Orphan-kill grace clock: -1 until fd 3 hups with the kill
+	 * policy, then the CLOCK_MONOTONIC ms at which SIGKILL is due. */
+	int64_t kill_deadline = -1;
+	int sigkill_sent = 0;
+
 	for (;;) {
 		/* Ask for writability only while input is pending -- POLLOUT
 		 * on an idle PTY master is a busy loop. */
@@ -1792,7 +1867,15 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 			pfds[2].events =
 				POLLIN | (wbuf.len > 0 ? POLLOUT : 0);
 
-		int rc = poll(pfds, 3, -1);
+		/* Block indefinitely unless the SIGTERM grace is running --
+		 * then wake at the deadline to escalate. */
+		int timeout = -1;
+		if (kill_deadline >= 0 && !sigkill_sent) {
+			int64_t left = kill_deadline - mono_ms();
+			timeout = left > 0 ? (int)left : 0;
+		}
+
+		int rc = poll(pfds, 3, timeout);
 		if (rc < 0) {
 			if (errno == EINTR)
 				continue;
@@ -1802,10 +1885,16 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 			return;
 		}
 
+		/* Grace expired (whether poll timed out or returned events
+		 * on the way) -- escalate to SIGKILL, once. */
+		if (kill_deadline >= 0 && !sigkill_sent &&
+		    mono_ms() >= kill_deadline) {
+			kill(child_pid, SIGKILL);
+			sigkill_sent = 1;
+		}
+
 		/* BEAM command on fd 3: {:signal, n}, {:pty_in, bytes},
-		 * or {:pty_winsize, {r, c, xp, yp}}. A POLLHUP on fd 3
-		 * means the BEAM disappeared -- keep going so the child
-		 * finishes naturally, but stop polling that side. */
+		 * or {:pty_winsize, {r, c, xp, yp}}. */
 		if (pfds[0].revents & POLLIN) {
 			struct post_running_cmd cmd = { 0 };
 			int r = read_post_running_command(&cmd);
@@ -1858,8 +1947,18 @@ static void supervise(pid_t child_pid, int sigfd, int pty_master)
 				pfds[0].fd = -1;
 			}
 		}
-		if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL))
-			pfds[0].fd = -1; /* poll(2) ignores fd < 0 */
+		/* The BEAM disappeared without reaping. Stop polling fd 3
+		 * (poll(2) ignores fd < 0) and apply the orphan policy:
+		 * start the SIGTERM-grace-SIGKILL sequence, or let the
+		 * orphan finish. Guard on kill_deadline so a stray second
+		 * hup can't rearm the clock. */
+		if (pfds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) {
+			pfds[0].fd = -1;
+			if (orphan_kill && kill_deadline < 0 && !sigkill_sent) {
+				kill(child_pid, SIGTERM);
+				kill_deadline = mono_ms() + orphan_grace_ms;
+			}
+		}
 
 		/* SIGCHLD fired. Drain the signalfd (SFD_NONBLOCK; the loop
 		 * returns EAGAIN when empty) and waitpid the workload. */
@@ -2328,7 +2427,8 @@ int main(void)
 		return 4;
 	}
 
-	supervise(pid, sigfd, pty_master);
+	supervise(pid, sigfd, pty_master,
+		  req.orphan_kill, req.orphan_grace_ms);
 	close(sigfd);
 	if (pty_master >= 0)
 		close(pty_master);

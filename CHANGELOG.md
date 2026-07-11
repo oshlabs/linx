@@ -191,6 +191,21 @@ A follow-up whole-library review landed a second round of fixes:
   directory; `Linx.Mount` gains `:nosymfollow` (MS_NOSYMFOLLOW, ≥ 5.10)
   and unescapes mountinfo `super_options`.
 
+### Changed — orphan policy on unclean VM death (behavior change)
+
+- **`Linx.Process` workloads no longer outlive an uncleanly-dying VM by
+  default.** When the BEAM channel closes without the graceful reap
+  (Ctrl-C abort, `kill -9 beam.smp` — any path where `terminate/2` never
+  runs), the agent now SIGTERMs the workload, waits a grace period, then
+  SIGKILLs it (the escalation matters: a PID-namespace init with no
+  SIGTERM handler swallows the SIGTERM). Previously the workload was
+  left to finish naturally — a leak in every scenario, since Linx has no
+  orphan re-adoption. The new `:orphan_policy` option on `spawn/1` /
+  `enter/2` controls this: `{:kill, grace_ms}` (default `{:kill, 5000}`)
+  or `:linger` for the old let-it-finish semantics. Graceful teardowns
+  (`GenServer.stop`, supervisor `:shutdown`, crashing linked callers)
+  are unaffected — they reap immediately via `terminate/2` as before.
+
 ### CI
 
 - New privileged job runs the full `:integration` suite as root; an aarch64

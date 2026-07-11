@@ -283,6 +283,20 @@ defmodule Linx.Process do
       supervised child blocks at `:ready` forever, since the supervisor holds
       the session pid, not the owner.
     * `:stdio` — workload fd 0/1/2 plumbing. See "Stdio plumbing" below.
+    * `:orphan_policy` — what the agent does with a *running* workload when
+      the BEAM channel closes without the graceful reap, i.e. the VM died
+      uncleanly (Ctrl-C abort, `kill -9 beam.smp`) so `terminate/2` never
+      ran. `{:kill, grace_ms}` (default `{:kill, 5000}`) sends SIGTERM,
+      waits `grace_ms`, then SIGKILLs — the escalation matters because a
+      PID-namespace init with no SIGTERM handler swallows the SIGTERM;
+      only SIGKILL is forcible from outside. `:linger` preserves the old
+      behaviour: the orphan finishes naturally, unsupervised. Every
+      graceful teardown (`GenServer.stop`, supervisor `:shutdown`, a
+      crashing linked caller) reaps explicitly and never consults this
+      policy. Note that killing the direct child does not kill *its*
+      descendants unless they share a fresh PID namespace — put the
+      workload in one (or a cgroup) when whole-tree cleanup must be
+      guaranteed.
 
   ## Stdio plumbing
 
@@ -354,6 +368,9 @@ defmodule Linx.Process do
       inherit.
     * `:owner` — pid to receive lifecycle events. Defaults to the
       caller.
+
+  `:stdio`, `:cwd`, `:no_new_privs` and `:orphan_policy` work as in
+  `spawn/1`.
   """
   @spec enter(pos_integer, keyword) :: {:ok, t()} | {:error, term}
   def enter(target_pid, opts)
@@ -691,12 +708,14 @@ defmodule Linx.Process do
          {:ok, env} <- fetch_env(opts),
          {:ok, stdio} <- fetch_stdio(opts),
          {:ok, cwd} <- fetch_cwd(opts),
-         {:ok, nnp} <- fetch_no_new_privs(opts) do
+         {:ok, nnp} <- fetch_no_new_privs(opts),
+         {:ok, orphan} <- fetch_orphan_policy(opts) do
       request = %{argv: argv, namespaces: namespaces}
       request = if env, do: Map.put(request, :env, env), else: request
       request = if stdio, do: Map.put(request, :stdio, stdio), else: request
       request = if cwd, do: Map.put(request, :cwd, cwd), else: request
       request = if nnp, do: Map.put(request, :no_new_privs, true), else: request
+      request = if orphan, do: Map.put(request, :orphan_policy, orphan), else: request
       {:ok, request}
     end
   end
@@ -710,13 +729,15 @@ defmodule Linx.Process do
          {:ok, env} <- fetch_env(opts),
          {:ok, stdio} <- fetch_stdio(opts),
          {:ok, cwd} <- fetch_cwd(opts),
-         {:ok, nnp} <- fetch_no_new_privs(opts) do
+         {:ok, nnp} <- fetch_no_new_privs(opts),
+         {:ok, orphan} <- fetch_orphan_policy(opts) do
       request = %{target: target_pid, argv: argv}
       request = if namespaces, do: Map.put(request, :namespaces, namespaces), else: request
       request = if env, do: Map.put(request, :env, env), else: request
       request = if stdio, do: Map.put(request, :stdio, stdio), else: request
       request = if cwd, do: Map.put(request, :cwd, cwd), else: request
       request = if nnp, do: Map.put(request, :no_new_privs, true), else: request
+      request = if orphan, do: Map.put(request, :orphan_policy, orphan), else: request
       {:ok, request}
     end
   end
@@ -728,6 +749,28 @@ defmodule Linx.Process do
       :error -> {:ok, nil}
       {:ok, cwd} when is_binary(cwd) -> {:ok, cwd}
       {:ok, other} -> {:error, {:bad_cwd, other}}
+    end
+  end
+
+  # What the agent does with the workload when the BEAM channel closes
+  # mid-run *without* the graceful reap — i.e. the VM died uncleanly
+  # (Ctrl-C abort, kill -9) and terminate/2 never ran. {:kill, grace_ms}:
+  # SIGTERM, grace, SIGKILL. :linger: let the orphan finish naturally.
+  # Absent → omit from the wire; the agent's built-in default is
+  # {:kill, 5000}. The grace ceiling mirrors the agent's INT_MAX bound.
+  defp fetch_orphan_policy(opts) do
+    case Keyword.fetch(opts, :orphan_policy) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, :linger} ->
+        {:ok, :linger}
+
+      {:ok, {:kill, ms}} when is_integer(ms) and ms >= 0 and ms <= 2_147_483_647 ->
+        {:ok, {:kill, ms}}
+
+      {:ok, other} ->
+        {:error, {:bad_orphan_policy, other}}
     end
   end
 
@@ -1373,18 +1416,19 @@ defmodule Linx.Process do
   end
 
   # Reap the workload if it is still live, so a supervised shutdown/restart
-  # never leaks the OS process. The agent does NOT kill its child merely
-  # because the BEAM channel closed (it lets an orphan finish), so we ask it
-  # to: a running workload gets SIGKILL, one parked at the checkpoint gets
-  # :abort. The command bytes reach the agent's pipe before the port closes,
-  # so the agent kills + waitpids the child before it ever sees EOF.
+  # never leaks the OS process: a running workload gets SIGKILL, one parked
+  # at the checkpoint gets :abort. The command bytes reach the agent's pipe
+  # before the port closes, so the agent kills + waitpids the child before
+  # it ever sees EOF.
   #
   # This is the graceful path. Because init/1 traps exits, it covers
   # GenServer.stop, supervisor :shutdown, and a crashing linked caller --
-  # terminate/2 runs for all of them. Only a brutal `Process.exit(pid,
-  # :kill)` skips terminate, and the agent then lets the orphan finish --
-  # so avoid :kill when reaping must be guaranteed (supervisors only use
-  # it after the :shutdown timeout expires).
+  # terminate/2 runs for all of them. A brutal `Process.exit(pid, :kill)`
+  # (or an unclean VM death) skips terminate; the agent then falls back to
+  # the session's :orphan_policy -- SIGTERM/grace/SIGKILL by default,
+  # :linger to let the orphan finish. So a skipped terminate is no longer
+  # a leak, but the graceful path stays preferable: it reaps immediately
+  # instead of after the grace.
   defp reap(%{result: result}) when result != nil, do: :ok
   defp reap(%{port: nil}), do: :ok
 

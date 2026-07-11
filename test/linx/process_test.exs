@@ -28,6 +28,19 @@ defmodule Linx.ProcessTest do
     test "rejects a non-binary :cwd" do
       assert {:error, {:bad_cwd, 42}} = P.spawn(argv: ["/bin/true"], cwd: 42)
     end
+
+    test "rejects an unknown :orphan_policy" do
+      assert {:error, {:bad_orphan_policy, :nuke}} =
+               P.spawn(argv: ["/bin/true"], orphan_policy: :nuke)
+    end
+
+    test "rejects a {:kill, grace} with a negative or non-integer grace" do
+      assert {:error, {:bad_orphan_policy, {:kill, -1}}} =
+               P.spawn(argv: ["/bin/true"], orphan_policy: {:kill, -1})
+
+      assert {:error, {:bad_orphan_policy, {:kill, :fast}}} =
+               P.spawn(argv: ["/bin/true"], orphan_policy: {:kill, :fast})
+    end
   end
 
   describe "spawn/1 → proceed/1 → exit (no namespaces, no root)" do
