@@ -224,9 +224,11 @@ defmodule Linx.Netfilter do
   Modes:
 
     * `:replace` (default) — for each table in `ruleset`, the
-      kernel sees `DESTROYTABLE` (silent-if-missing, 6.3+) then
+      kernel sees `DESTROYTABLE` (silent-if-missing) then
       `NEWTABLE` plus all its chains and rules. Other tables in
-      the netns are untouched.
+      the netns are untouched. **Requires kernel ≥ 6.3** (where the
+      `DESTROY*` messages landed) — older kernels reject the batch
+      outright.
     * `:reconcile` — minimal-diff push with `NFTA_BATCH_GENID`
       CAS for cooperative concurrency.
 
@@ -600,7 +602,12 @@ defmodule Linx.Netfilter do
       scope: tables within family, the rest within their table).
     * Rules within a chain — `:tag` when set, positional index
       otherwise. Mixed-tag chains fall back to a full rebuild.
-    * Set elements — the element value itself.
+    * Set elements — the element value itself, by raw term equality.
+      Author elements in *decoded* shapes (`{10, 0, 0, 5}`, `443`,
+      `{:range, lo, hi}` — what `pull` returns), not strings: a
+      desired `"10.0.0.5"` and a pulled `{10, 0, 0, 5}` are the same
+      wire key but compare unequal, diffing as a delete+add on every
+      pass.
 
   Rule attribute changes use `NLM_F_REPLACE` over the
   kernel-assigned handle carried by `from`'s rule (so you must
@@ -630,8 +637,8 @@ defmodule Linx.Netfilter do
   Returns `{:ok, monitor_pid}`. The owner then receives:
 
     * `{:linx_netfilter, :event, %Linx.Netfilter.Event{}}` per
-      committed change (one `:new_gen` followed by one event per
-      mutated entity).
+      committed change (one event per mutated entity, followed by
+      the commit's closing `:new_gen`).
     * `{:linx_netfilter, :resync_needed}` when the monitor socket
       overflows (`ENOBUFS`) — the owner should re-pull state.
 

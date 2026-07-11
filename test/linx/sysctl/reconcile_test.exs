@@ -22,9 +22,17 @@ defmodule Linx.Sysctl.ReconcileTest do
                })
     end
 
-    test "a binary desired compares exactly (whitespace is significant)" do
+    test "a binary desired compares trailing-trimmed (read/2 trims), interior exact" do
       assert [] == Reconcile.diff(%{"k" => "abc"}, %{"k" => "abc"})
-      assert [{:set, "k", "abc "}] == Reconcile.diff(%{"k" => "abc"}, %{"k" => "abc "})
+
+      # read/2 hands back trim_trailing'ed values, so a desired with
+      # trailing whitespace must still converge — the old exact compare
+      # rewrote such a key on every pass, forever.
+      assert [] == Reconcile.diff(%{"k" => "abc"}, %{"k" => "abc\n"})
+      assert [] == Reconcile.diff(%{"k" => "abc"}, %{"k" => "abc "})
+
+      # Interior whitespace stays significant for free-form knobs.
+      assert [{:set, "k", "a  bc"}] == Reconcile.diff(%{"k" => "a bc"}, %{"k" => "a  bc"})
     end
 
     test "a differing value yields a :set" do

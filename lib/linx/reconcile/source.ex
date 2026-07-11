@@ -23,6 +23,8 @@ defmodule Linx.Reconcile.Source do
   verbatim into every callback:
 
     * sysctl — the `:in` target (`:self`, `{:pid, n}`, `{:path, p}`);
+    * cgroup — the cgroup directory path (the handle every `Linx.Cgroup`
+      verb takes);
     * rtnl — a `t:Linx.Netlink.Socket.netns/0` (`:host`, `{:pid, n}`,
       `{:path, p}`), the source opening a short-lived socket per pass.
 
@@ -37,11 +39,23 @@ defmodule Linx.Reconcile.Source do
     * `:last_applied` — the updated ownership state to thread into the next
       pass.
 
-  Both `Linx.Sysctl.Reconcile.Report` and `Linx.Netlink.Rtnl.Reconcile.Report`
-  carry these (alongside `:applied`/`:failed`/`:pending`). `{:error, reason}` is
-  reserved for a pass that could not run at all (could not observe the kernel,
-  an invalid desired state) — the loop keeps the previous `last_applied` and
-  retries on the next tick.
+  `Linx.Sysctl.Reconcile.Report`, `Linx.Cgroup.Reconcile.Report`, and
+  `Linx.Netlink.Rtnl.Reconcile.Report` all carry these (alongside
+  `:applied`/`:failed`/`:pending`). `{:error, reason}` is reserved for a pass
+  that could not run at all (could not observe the kernel, an invalid desired
+  state) — the loop keeps the previous `last_applied` and retries on the next
+  tick.
+
+  ## Why no netfilter adapter (yet)
+
+  `Linx.Netfilter` has both halves — `push(mode: :reconcile)` with
+  generation-CAS and a Monitor for `subscribe` — but its ownership story
+  differs from the flat-KV sources: convergence is judged against a pulled
+  ruleset snapshot under a generation id, not against a `last_applied` map,
+  and a CAS loss means "re-pull and recompute", not "retry the same ops".
+  Squeezing that into this report contract would bend both; drive
+  `Linx.Netfilter.push/3` + `Linx.Netfilter.subscribe/1` directly (a
+  ~15-line loop) until a netfilter-shaped adapter design earns its place.
 
   ## Litmus test
 

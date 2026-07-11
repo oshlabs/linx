@@ -5,26 +5,27 @@ defmodule Linx.Netfilter.Set do
 
   Sets are the kernel's high-performance match primitive: a rule
   saying "if source IP is in @blocklist drop" hashes once into the
-  set rather than scanning a hundred individual rules.
-  Concatenations, dynamic sets, and intervals are not yet
-  implemented (see `docs/netfilter/netfilter-overview.md`).
+  set rather than scanning a hundred individual rules. Intervals
+  (`:interval` flag — ranges and CIDRs), concatenated keys
+  (`{:concat, [...]}`), and dynamic sets (`:dynamic` +
+  `Linx.Netfilter.Expr.dynset/2`) are all supported and
+  kernel-verified; see `docs/netfilter/netfilter-examples.md` for
+  recipes.
 
   ## Fields
 
     * `:name` — set name (unique within the table).
     * `:table` — owning table's name; `nil` for free-standing sets.
-    * `:key_type` — element-type atom. The basic atomic types are
-      accepted: `:ipv4_addr`, `:ipv6_addr`, `:ether_addr`,
-      `:inet_proto`, `:inet_service`, `:mark`, `:ifname`.
-      Concatenations (`{:concat, [type1, type2, ...]}`) are not yet
-      implemented.
-    * `:flags` — list. Currently accepted: `:constant`,
-      `:interval`, `:timeout`, `:dynamic`, `:auto_merge`,
-      `:anonymous`. The timeout / dynamic / interval flags are not
-      yet fully implemented; the value-type slot is here today.
+    * `:key_type` — element-type atom (`:ipv4_addr`, `:ipv6_addr`,
+      `:ether_addr`, `:inet_proto`, `:inet_service`, `:mark`,
+      `:ifname`) or a concatenation `{:concat, [type1, type2, ...]}`
+      (`type ipv4_addr . inet_service` in nft syntax) — elements are
+      then lists with one part per field.
+    * `:flags` — list: `:constant`, `:interval`, `:timeout`,
+      `:dynamic`, `:auto_merge`, `:anonymous`.
     * `:elements` — list of element values matching `:key_type`.
-      Element-type validation is a basic check; strict validation
-      is not yet implemented.
+      With `:interval`, elements may be `{:range, lo, hi}` or CIDR
+      strings; scalar members are the degenerate one-key interval.
     * `:timeout` — default element lifetime in ms; `nil` for no
       timeout (default).
     * `:gc_interval` — kernel's gc cadence in ms; `nil` to let the
@@ -64,8 +65,10 @@ defmodule Linx.Netfilter.Set do
     elements: []
   ]
 
-  @type key_type ::
+  @type atomic_key_type ::
           :ipv4_addr | :ipv6_addr | :ether_addr | :inet_proto | :inet_service | :mark | :ifname
+
+  @type key_type :: atomic_key_type() | {:concat, [atomic_key_type()]}
 
   @type flag :: :constant | :interval | :timeout | :dynamic | :auto_merge | :anonymous
 

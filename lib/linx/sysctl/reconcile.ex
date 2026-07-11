@@ -254,7 +254,11 @@ defmodule Linx.Sysctl.Reconcile do
     tokens(raw) == Enum.map(desired, &Integer.to_string/1)
   end
 
-  defp same_value?(raw, desired) when is_binary(desired), do: raw == desired
+  # `raw` comes back trimmed from read/2, so trim the desired side too —
+  # otherwise a desired binary with a trailing newline can never converge
+  # and is rewritten (and reported applied) every pass, forever.
+  defp same_value?(raw, desired) when is_binary(desired),
+    do: raw == String.trim_trailing(desired)
 
   defp tokens(raw), do: String.split(raw, ~r/\s+/, trim: true)
 

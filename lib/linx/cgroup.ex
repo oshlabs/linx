@@ -99,9 +99,22 @@ defmodule Linx.Cgroup do
   @spec create(Path.t()) :: {:ok, cgroup()} | {:error, Error.t()}
   def create(path) when is_binary(path) do
     case File.mkdir(path) do
-      :ok -> {:ok, path}
-      {:error, :eexist} -> {:ok, path}
-      {:error, posix} -> {:error, Error.from_posix(posix, path, :create)}
+      :ok ->
+        {:ok, path}
+
+      {:error, :eexist} ->
+        # Idempotency holds only if what exists is a directory — a
+        # regular file at `path` (wrong path, not cgroupfs) would
+        # otherwise be blessed as a cgroup handle and every later verb
+        # would fail confusingly.
+        if File.dir?(path) do
+          {:ok, path}
+        else
+          {:error, Error.from_posix(:enotdir, path, :create)}
+        end
+
+      {:error, posix} ->
+        {:error, Error.from_posix(posix, path, :create)}
     end
   end
 

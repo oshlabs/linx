@@ -253,7 +253,10 @@ defmodule Linx.Cgroup.Reconcile do
   defp same_value?(raw, {quota, period}),
     do: tokens(raw) == [Integer.to_string(quota), Integer.to_string(period)]
 
-  defp same_value?(raw, value) when is_binary(value), do: raw == value
+  # `raw` comes back trimmed from read/2, so trim the desired side too —
+  # otherwise a desired binary with a trailing newline can never converge
+  # and is rewritten (and reported applied) every pass, forever.
+  defp same_value?(raw, value) when is_binary(value), do: raw == String.trim_trailing(value)
 
   # Render a desired value to the text the kernel's interface file expects.
   defp render(:max), do: "max"
