@@ -6,9 +6,65 @@ All notable changes to Linx are documented here. The format is based on
 
 ## [Unreleased]
 
-Full remediation of the deep code assessment (`docs/code-assessment.md`) —
-4 critical, 15 major, 18 minor, and 9 build/test findings, all fixed with
-test coverage. Highlights:
+Two efforts land here: full remediation of the deep code assessment
+(`docs/code-assessment.md`) — 4 critical, 15 major, 18 minor, and 9 build/test
+findings, all fixed with test coverage — and the first six passes of the `~NFT`
+parity roadmap (`NFT-PLAN.md`), kernel-verified throughout.
+
+### Added — `~NFT` parity (toward full nftables syntax)
+
+- **Verification harnesses.** A differential test runs real `nft --check -f`
+  (unprivileged, via `unshare -r -n`) over every fixture *and* over
+  `Linx.NFT.format/1` output — whatever Linx emits is guaranteed loadable by
+  nft. A kernel-acceptance test pushes the new encodings through a live
+  netlink socket and reads them back. An aspirational real-world corpus
+  ratchets coverage: 9/9 fixtures fully supported.
+- **Protocol-context dependency generation** (nft evaluate.c's `proto_ctx`):
+  transport matches auto-materialise a `meta l4proto` guard, and ip/ip6 header
+  matches in `inet` chains a `meta nfproto` guard — fixing a real correctness
+  bug where `tcp dport 22` compiled to a bare offset load that also matched
+  UDP packets. Contradictory hand-written guards are located errors.
+- **Concatenations end-to-end**: set declarations (`type ipv4_addr .
+  inet_service`), elements, and rule-side selectors; `flags interval`
+  concatenated sets use the kernel ≥ 5.6 pipapo encoding
+  (`NFT_SET_CONCAT` + per-field bounds), so `10.0.0.0/24 . 80-443`-style
+  elements work.
+- **Dynamic-set statements** (`add @set { key timeout 5m }` with nested
+  `limit`/`counter`) — the fail2ban building block.
+- **Bitwise/flag matching**: `tcp flags syn` (implicit bit test), masked
+  compares (`tcp flags & (fin|syn|rst|ack) == syn`, `ct mark & 0xff == 0x4`),
+  and symbolic tcp-flag names.
+- **Named counter, quota, and limit objects** (NEWOBJ + objref), the inline
+  `quota` statement, and `limit rate` statements.
+- **Verdict maps** (named and inline anonymous), `define`/`$var` substitution
+  with did-you-mean, `dnat` to `addr:port`, `iif`/`oif` by name, ip6
+  `nexthdr`/`hoplimit`, kind-keyed icmp/icmpv6 type names, and log flags
+  (a plain `log` no longer silently becomes nflog group 5000).
+- **`include` resolution** in `parse/2`/`parse_file/2` with nft-compatible
+  semantics: relative to the including file, then `:include_paths`; glob
+  support; nesting capped at 16 plus cycle detection; located errors inside
+  included files. The `~NFT` sigil rejects `include` (inline source has no
+  base directory).
+- **Multi-error reporting**: the parser recovers at statement boundaries
+  instead of stopping at the first error (capped at 10, nft's
+  `parser_max_errors`); `ParseError` gains an `others` field, single-error
+  output is byte-identical to before.
+- **scanner.l-faithful lexing**: octal literals, nft-exact quoted strings,
+  dotted/slashed bare strings (`example.com`), compound timestrings
+  (`1h30m10s`).
+
+### Fixed — `~NFT` wire correctness
+
+- **`NFTA_SET_TIMEOUT` is milliseconds** — `timeout 1h` used to install a
+  3.6-second element timeout.
+- **`meta nfproto`/`l4proto` wire keys** were emitted as 12/13
+  (`NFT_META_NFTRACE`/`RTCLASSID` in the kernel enum) instead of 15/16.
+- `udp dport` no longer renders as `tcp dport` (and icmpv6 as icmp) in
+  formatted output; formatter output re-parses to the identical ruleset.
+- `ct_state` was missing from the Set/Map key-type whitelists (anonymous
+  `ct state vmap` died at push time); plain (non-interval) concatenated sets
+  no longer emit `NFTA_SET_DESC_CONCAT`, which the kernel rejects without the
+  `NFT_SET_CONCAT` flag.
 
 ### Security
 
@@ -24,7 +80,10 @@ test coverage. Highlights:
   Port boundaries. **Mount target creation** no longer follows symlinks
   (`O_EXCL|O_NOFOLLOW`). **Kernel-controlled rule userdata** no longer interns
   unbounded atoms. Native builds get `-fstack-protector-strong`,
-  `_FORTIFY_SOURCE=2`, and full RELRO.
+  `_FORTIFY_SOURCE=2`, and full RELRO; the `linx_process` Port binary — the
+  one artifact that runs `clone`/`setns`/`execve` as root — is additionally
+  built PIE (`-fPIE -pie`) so it gets ASLR regardless of the host compiler's
+  default.
 
 ### Fixed
 
@@ -95,6 +154,8 @@ test coverage. Highlights:
 - New privileged job runs the full `:integration` suite as root; an aarch64
   leg exercises the arm64 syscall tables on real hardware; the seccomp
   kernel-acceptance tests (no root needed) run in the default suite.
+- Dialyzer (via `dialyxir`) runs in CI with a cached PLT, enforcing the
+  project's `@spec`-on-every-public-function policy.
 
 ## [0.2.0] - 2026-06-06
 

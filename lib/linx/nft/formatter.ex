@@ -14,9 +14,10 @@ defmodule Linx.NFT.Formatter do
   ## Per-construct policy
 
     * Tables are emitted in `{family, name}` order.
-    * Inside each table: chains first, then sets, then maps and
-      vmaps. (Element-order across these blocks is independent of
-      original source.)
+    * Inside each table: objects first, then sets, then maps and
+      vmaps, then chains — declarations before the chains whose
+      rules reference them. (Element-order across these blocks is
+      independent of original source.)
     * Chains emit the full base header (`type hook priority`) on
       one line, then `policy X` on the next (if set), a blank
       line, then one rule per line.

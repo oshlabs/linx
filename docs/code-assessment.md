@@ -7,11 +7,12 @@ document records **what was fixed** (all 46) and **what still needs doing**
 (follow-through, deferred features, and test/validation gaps that the
 remediation surfaced but did not close).
 
-> **Status: remediation complete (2026-07-02).** Every finding below is fixed
-> and covered by a test. Verified green by the full unprivileged suite (1075
-> tests) *and* the full privileged suite (`./sudotest.sh` — 1233 tests, 0
-> failures) on Linux 6.x. The change set was still uncommitted at the time of
-> writing — see "Remaining work → Process" below.
+> **Status: remediation complete and landed (2026-07-02, committed as
+> `ceaeb2a`).** Every finding below is fixed and covered by a test. Verified
+> green by the full unprivileged suite (1075 tests) *and* the full privileged
+> suite (`./sudotest.sh` — 1233 tests, 0 failures) on Linux 6.x, and since
+> then by GitHub CI on every push to `main` — including the privileged root
+> job and the aarch64 leg this pass introduced.
 >
 > The full per-finding analysis (Where / Defect / Failure / Fix, with line
 > numbers accurate post-0.2.0) lives in this file's git history. It is condensed
@@ -179,21 +180,11 @@ Nothing below is a regression or a known-broken path — the remediation is
 self-consistent and green. These are follow-throughs, deliberately-deferred
 features, and coverage/validation gaps. Roughly ordered by priority.
 
-### Process (do first)
+### Process
 
-1. **Commit the change set.** ~54 files are uncommitted (one large working
-   tree). It slices naturally along the assessment's severity clusters
-   (seccomp/x32, netlink-receive, netfilter-element-layer, process/tty,
-   sysctl, build/CI) if reviewable commits are wanted; the CHANGELOG
-   `[Unreleased]` section is already written.
-2. **Actually run the new CI jobs.** The privileged root job and the aarch64
-   leg are authored but have only ever run locally. On first push: watch them
-   go green, triage what the GitHub runner kernel actually supports (some
-   `:integration` cases may need capability tags or `unshare`-based setup),
-   start the privileged job non-required, and promote it to required once
-   stable. The local run needed `MIX_HOME` forwarded and real (non-shim)
-   binaries under sudo — the workflow already does this, but the runner
-   environment differs.
+1. ~~Commit the change set.~~ **Done** — landed as `ceaeb2a` (2026-07-02).
+2. ~~Actually run the new CI jobs.~~ **Done** — the privileged root job and
+   the aarch64 leg run green on every push to `main` since `1aff5b6`.
 3. **Decide the release vehicle for M13.** The owner-flag default is a
    behaviour change for existing users. Confirm it should ship as-is (it aligns
    code with the long-documented guarantee) and that a minor-version bump +
@@ -226,10 +217,9 @@ features, and coverage/validation gaps. Roughly ordered by priority.
    Real support needs a byteorder-conversion expression before the set lookup
    (intervals are compared in memcmp order, which isn't numeric order for a
    native-endian key on little-endian hosts).
-7. **Concatenated set types** (`type ipv4_addr . inet_service`) and the
-   pipapo-backed concatenated ranges that come with them (the modern
-   `NFTA_SET_ELEM_KEY_END` encoding, kernel ≥ 5.6). The compiler currently
-   raises "not yet supported" for these.
+7. ~~Concatenated set types and pipapo-backed concatenated ranges.~~
+   **Done** — landed kernel-verified in the NFT-parity passes
+   (`e60ad2d`, `9711855`, 2026-07-02); see `NFT-PLAN.md`.
 
 ### Native hardening & fuzzing (deferred; also in `PLAN.md`)
 
