@@ -191,6 +191,24 @@ defmodule Linx.SeccompTest do
       assert map_size_of_inverse(:x86_64) == MapSet.size(Syscalls.all(:x86_64))
       assert map_size_of_inverse(:aarch64) == MapSet.size(Syscalls.all(:aarch64))
     end
+
+    # The module doc promises that single-arch presence means the
+    # syscall genuinely doesn't exist on the other architecture. A
+    # syscall accidentally added to only one map makes a portable
+    # allow-list silently not allow it on the other arch, so every
+    # asymmetry must be on this explicit, kernel-verified list.
+    @x86_64_only ~w(access arch_prctl chmod chown dup2 epoll_wait eventfd
+                    fork inotify_init ioperm iopl lstat mkdir open pause
+                    pipe poll readlink rename rmdir select signalfd stat
+                    symlink unlink vfork)a
+
+    test "every cross-arch asymmetry is a documented single-arch syscall" do
+      x = Syscalls.all(:x86_64)
+      a = Syscalls.all(:aarch64)
+
+      assert Enum.sort(MapSet.difference(x, a)) == Enum.sort(@x86_64_only)
+      assert MapSet.difference(a, x) == MapSet.new()
+    end
   end
 
   # Build the inverse number → atom map size by going through every
