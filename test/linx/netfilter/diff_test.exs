@@ -378,4 +378,30 @@ defmodule Linx.Netfilter.DiffTest do
                Diff.validate_for_reconcile(rs)
     end
   end
+
+  describe "validate_for_reconcile/1 — objects and flowtables" do
+    test "a desired ruleset with a named object is rejected" do
+      {:ok, obj} = Linx.Netfilter.Object.new(:counter, "hits", %{packets: 0, bytes: 0})
+
+      {:ok, rs} =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, "fw")
+        |> Ruleset.add_object({:inet, "fw"}, obj)
+
+      assert {:error, {:unsupported_in_reconcile, :objects, {:inet, "fw"}}} =
+               Diff.validate_for_reconcile(rs)
+    end
+
+    test "a desired ruleset with a flowtable is rejected" do
+      ft = Linx.Netfilter.Flowtable.new!("ft1", devices: ["eth0"])
+
+      {:ok, rs} =
+        Ruleset.new()
+        |> Ruleset.add_table!(:inet, "fw")
+        |> Ruleset.add_flowtable({:inet, "fw"}, ft)
+
+      assert {:error, {:unsupported_in_reconcile, :flowtables, {:inet, "fw"}}} =
+               Diff.validate_for_reconcile(rs)
+    end
+  end
 end

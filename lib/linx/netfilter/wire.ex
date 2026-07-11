@@ -219,6 +219,29 @@ defmodule Linx.Netfilter.Wire do
   defmacro nfta_obj_name, do: 2
   defmacro nfta_obj_type, do: 3
   defmacro nfta_obj_data, do: 4
+  defmacro nfta_obj_use, do: 5
+  defmacro nfta_obj_handle, do: 6
+
+  # NFTA_FLOWTABLE_* (flowtable messages)
+  defmacro nfta_flowtable_table, do: 1
+  defmacro nfta_flowtable_name, do: 2
+  defmacro nfta_flowtable_hook, do: 3
+  defmacro nfta_flowtable_use, do: 4
+  defmacro nfta_flowtable_handle, do: 5
+  defmacro nfta_flowtable_flags, do: 7
+
+  # NFTA_FLOWTABLE_HOOK_* (nested under NFTA_FLOWTABLE_HOOK; note the
+  # numbering differs from the chain-hook NFTA_HOOK_* set)
+  defmacro nfta_flowtable_hook_num, do: 1
+  defmacro nfta_flowtable_hook_priority, do: 2
+  defmacro nfta_flowtable_hook_devs, do: 3
+
+  # NFTA_DEVICE_* (device entries inside HOOK_DEVS)
+  defmacro nfta_device_name, do: 1
+
+  # NFT_FLOWTABLE_* flag bits
+  defmacro nft_flowtable_hw_offload, do: 0x1
+  defmacro nft_flowtable_counter, do: 0x2
 
   # NFTA_OBJREF_* (nft_objref expression)
   defmacro nfta_objref_imm_type, do: 1

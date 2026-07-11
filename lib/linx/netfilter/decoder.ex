@@ -16,7 +16,20 @@ defmodule Linx.Netfilter.Decoder do
   import Bitwise
   import Linx.Netfilter.Wire
 
-  alias Linx.Netfilter.{Chain, Event, Expr, Rule, Ruleset, Set, Table, Verdict, Wire}
+  alias Linx.Netfilter.{
+    Chain,
+    Event,
+    Expr,
+    Flowtable,
+    Object,
+    Rule,
+    Ruleset,
+    Set,
+    Table,
+    Verdict,
+    Wire
+  }
+
   alias Linx.Netfilter.Map, as: NMap
   alias Linx.Netlink.{Attr, Message}
   alias Linx.Netlink.Nfnl.Codec
@@ -455,6 +468,120 @@ defmodule Linx.Netfilter.Decoder do
   end
 
   defp decode_expr_data(_name, bin), do: bin
+
+  @doc """
+  Decodes a `NEWOBJ` body into `{family, %Object{}}` — the object's
+  `:table` field carries its owner, mirroring `set/1`.
+  """
+  @spec object(binary()) :: {Table.family(), Object.t()}
+  def object(body) when is_binary(body) do
+    {family_int, _ver, _res_id, attrs_bin} = Codec.decode_nfgenmsg(body)
+    family = Wire.family_atom(family_int)
+    attrs = Attr.decode(attrs_bin)
+
+    kind = object_kind_atom(get_u32_be(attrs, nfta_obj_type(), 0))
+
+    data =
+      case List.keyfind(attrs, nfta_obj_data(), 0) do
+        {_, data_bin} -> decode_object_data(kind, data_bin)
+        nil -> nil
+      end
+
+    {family,
+     %Object{
+       kind: kind,
+       name: get_string(attrs, nfta_obj_name()),
+       table: get_string(attrs, nfta_obj_table()),
+       data: data,
+       handle: get_u64_be(attrs, nfta_obj_handle(), nil)
+     }}
+  end
+
+  # The kinds the encoder can write decode to the same shapes it
+  # takes; other kinds keep their raw NFTA_OBJ_DATA payload.
+  defp decode_object_data(:counter, bin) do
+    attrs = Attr.decode(bin)
+
+    %{
+      packets: get_u64_be(attrs, nfta_counter_packets(), 0),
+      bytes: get_u64_be(attrs, nfta_counter_bytes(), 0)
+    }
+  end
+
+  defp decode_object_data(:quota, bin), do: decode_expr_data(:quota, bin)
+  defp decode_object_data(:limit, bin), do: decode_expr_data(:limit, bin)
+  defp decode_object_data(_kind, bin), do: bin
+
+  @doc """
+  Decodes a `NEWFLOWTABLE` body into `{family, %Flowtable{}}`.
+  """
+  @spec flowtable(binary()) :: {Table.family(), Flowtable.t()}
+  def flowtable(body) when is_binary(body) do
+    {family_int, _ver, _res_id, attrs_bin} = Codec.decode_nfgenmsg(body)
+    family = Wire.family_atom(family_int)
+    attrs = Attr.decode(attrs_bin)
+
+    {hook, priority, devices} = decode_flowtable_hook(attrs)
+    flags_int = get_u32_be(attrs, nfta_flowtable_flags(), 0)
+
+    flags =
+      Enum.filter(
+        [
+          if((flags_int &&& nft_flowtable_hw_offload()) != 0, do: :hw_offload),
+          if((flags_int &&& nft_flowtable_counter()) != 0, do: :counter)
+        ],
+        & &1
+      )
+
+    {family,
+     %Flowtable{
+       name: get_string(attrs, nfta_flowtable_name()),
+       table: get_string(attrs, nfta_flowtable_table()),
+       hook: hook,
+       priority: priority,
+       devices: devices,
+       flags: flags,
+       handle: get_u64_be(attrs, nfta_flowtable_handle(), nil)
+     }}
+  end
+
+  defp decode_flowtable_hook(attrs) do
+    case List.keyfind(attrs, nfta_flowtable_hook(), 0) do
+      {_, hook_bin} ->
+        hook_attrs = Attr.decode(hook_bin)
+
+        devices =
+          case List.keyfind(hook_attrs, nfta_flowtable_hook_devs(), 0) do
+            {_, devs_bin} ->
+              devs_bin
+              |> Attr.decode()
+              |> Enum.flat_map(fn
+                {tag, dev} when tag == nfta_device_name() ->
+                  [String.trim_trailing(dev, <<0>>)]
+
+                _ ->
+                  []
+              end)
+
+            nil ->
+              []
+          end
+
+        num = get_u32_be(hook_attrs, nfta_flowtable_hook_num(), 0)
+        hook = if num == 0, do: :ingress, else: num
+
+        priority =
+          case List.keyfind(hook_attrs, nfta_flowtable_hook_priority(), 0) do
+            {_, <<p::big-signed-32>>} -> p
+            _ -> nil
+          end
+
+        {hook, priority, devices}
+
+      nil ->
+        {nil, nil, []}
+    end
+  end
 
   # Inverse of the encoder's encode_log_flags bit table.
   @log_flag_bits [tcp_seq: 0x01, tcp_opt: 0x02, ip_opt: 0x04, uid: 0x08, macdecode: 0x20]
@@ -929,9 +1056,19 @@ defmodule Linx.Netfilter.Decoder do
           [{Table.family(), Chain.t()}],
           [{Table.family(), String.t(), String.t(), Rule.t()}],
           [{Table.family(), Set.t() | NMap.t()}],
-          [{Table.family(), String.t(), String.t(), [term()]}]
+          [{Table.family(), String.t(), String.t(), [term()]}],
+          [{Table.family(), Object.t()}],
+          [{Table.family(), Flowtable.t()}]
         ) :: Ruleset.t()
-  def from_msgs(tables, chains, rules, sets \\ [], set_elements \\ []) do
+  def from_msgs(
+        tables,
+        chains,
+        rules,
+        sets \\ [],
+        set_elements \\ [],
+        objects \\ [],
+        flowtables \\ []
+      ) do
     tables_map =
       Enum.reduce(tables, %{}, fn %Table{family: f, name: n} = t, acc ->
         Map.put(acc, {f, n}, t)
@@ -941,8 +1078,38 @@ defmodule Linx.Netfilter.Decoder do
     tables_map = attach_sets(tables_map, sets)
     tables_map = attach_set_elements(tables_map, set_elements)
     tables_map = attach_rules(tables_map, rules)
+    tables_map = attach_objects(tables_map, objects)
+    tables_map = attach_flowtables(tables_map, flowtables)
 
     %Ruleset{tables: tables_map}
+  end
+
+  defp attach_objects(tables_map, objects) do
+    Enum.reduce(objects, tables_map, fn {family, %Object{} = obj}, acc ->
+      case Map.fetch(acc, {family, obj.table}) do
+        {:ok, %Table{} = t} ->
+          objects = Map.put(t.objects, {obj.kind, obj.name}, obj)
+          Map.put(acc, {family, obj.table}, %Table{t | objects: objects})
+
+        :error ->
+          acc
+      end
+    end)
+  end
+
+  defp attach_flowtables(tables_map, flowtables) do
+    Enum.reduce(flowtables, tables_map, fn {family, %Flowtable{} = ft}, acc ->
+      case Map.fetch(acc, {family, ft.table}) do
+        {:ok, %Table{} = t} ->
+          Map.put(acc, {family, ft.table}, %Table{
+            t
+            | flowtables: Map.put(t.flowtables, ft.name, ft)
+          })
+
+        :error ->
+          acc
+      end
+    end)
   end
 
   defp attach_sets(tables_map, sets) do

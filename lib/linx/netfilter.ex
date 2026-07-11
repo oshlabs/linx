@@ -125,6 +125,8 @@ defmodule Linx.Netfilter do
       nft_msg_getrule: 0,
       nft_msg_getset: 0,
       nft_msg_getsetelem: 0,
+      nft_msg_getobj: 0,
+      nft_msg_getflowtable: 0,
       nfta_set_elem_list_table: 0,
       nfta_set_elem_list_set: 0
     ]
@@ -339,11 +341,11 @@ defmodule Linx.Netfilter do
       guaranteed not to be in the returned snapshot (snapshot+tail
       pattern).
 
-  Implementation: three sequential dumps (`GETTABLE`, `GETCHAIN`,
-  `GETRULE`) plus per-set `GETSETELEM`, then `Decoder.from_msgs/5`
-  assembles them. Dumps are not atomic across types — for full
-  consistency under churn, combine with `:subscribe_first` and the
-  Monitor.
+  Implementation: sequential dumps (`GETTABLE`, `GETCHAIN`,
+  `GETRULE`, `GETSET`, `GETOBJ`, `GETFLOWTABLE`) plus per-set
+  `GETSETELEM`, then `Decoder.from_msgs/7` assembles them. Dumps
+  are not atomic across types — for full consistency under churn,
+  combine with `:subscribe_first` and the Monitor.
   """
   @spec pull(Socket.t(), keyword() | {atom(), String.t()}) ::
           {:ok, Ruleset.t()} | {:error, Error.t() | term()}
@@ -355,8 +357,10 @@ defmodule Linx.Netfilter do
          {:ok, chains} <- dump_chains(sock, :unspec),
          {:ok, rules} <- dump_rules(sock, :unspec),
          {:ok, sets} <- dump_sets(sock, :unspec),
-         {:ok, set_elems} <- dump_set_elements_for(sock, sets) do
-      {:ok, Decoder.from_msgs(tables, chains, rules, sets, set_elems)}
+         {:ok, set_elems} <- dump_set_elements_for(sock, sets),
+         {:ok, objects} <- dump_objects(sock, :unspec),
+         {:ok, flowtables} <- dump_flowtables(sock, :unspec) do
+      {:ok, Decoder.from_msgs(tables, chains, rules, sets, set_elems, objects, flowtables)}
     end
   end
 
@@ -384,14 +388,19 @@ defmodule Linx.Netfilter do
          {:ok, [table]} <- get_table(sock, family, name),
          {:ok, chains} <- dump_chains(sock, family),
          {:ok, rules} <- dump_rules(sock, family),
-         {:ok, sets} <- dump_sets(sock, family) do
-      # Filter chains + rules + sets to just this table.
+         {:ok, sets} <- dump_sets(sock, family),
+         {:ok, objects} <- dump_objects(sock, family),
+         {:ok, flowtables} <- dump_flowtables(sock, family) do
+      # Filter chains + rules + sets + objects + flowtables to just
+      # this table.
       chains = Enum.filter(chains, fn {_, c} -> c.table == name end)
       rules = Enum.filter(rules, fn {_, t, _, _} -> t == name end)
       sets = Enum.filter(sets, fn {_, s} -> entity_table(s) == name end)
+      objects = Enum.filter(objects, fn {_, o} -> o.table == name end)
+      flowtables = Enum.filter(flowtables, fn {_, ft} -> ft.table == name end)
 
       with {:ok, set_elems} <- dump_set_elements_for(sock, sets) do
-        {:ok, Decoder.from_msgs([table], chains, rules, sets, set_elems)}
+        {:ok, Decoder.from_msgs([table], chains, rules, sets, set_elems, objects, flowtables)}
       end
     end
   end
@@ -456,6 +465,26 @@ defmodule Linx.Netfilter do
     }
 
     talk_dump(sock, msg, &Decoder.set/1, :pull)
+  end
+
+  defp dump_objects(sock, family) do
+    msg = %Message{
+      type: NfnlCodec.nlmsg_type(NfnlCodec.subsys_nftables(), nft_msg_getobj()),
+      flags: nlm_f_dump(),
+      payload: NfnlCodec.encode_nfgenmsg(family, 0)
+    }
+
+    talk_dump(sock, msg, &Decoder.object/1, :pull)
+  end
+
+  defp dump_flowtables(sock, family) do
+    msg = %Message{
+      type: NfnlCodec.nlmsg_type(NfnlCodec.subsys_nftables(), nft_msg_getflowtable()),
+      flags: nlm_f_dump(),
+      payload: NfnlCodec.encode_nfgenmsg(family, 0)
+    }
+
+    talk_dump(sock, msg, &Decoder.flowtable/1, :pull)
   end
 
   defp dump_set_elements_for(sock, sets) do

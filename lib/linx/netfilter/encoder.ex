@@ -177,10 +177,9 @@ defmodule Linx.Netfilter.Encoder do
        order** — rule ordering matters at runtime, the kernel
        preserves the batch order via `NLM_F_APPEND`.
 
-  Named objects are emitted right after `NEWTABLE` (declarations
-  before the rules that reference them). Flowtables are not yet
-  emitted; the batch shape supports them by interleaving in
-  step 3.
+  Named objects are emitted right after `NEWTABLE` and flowtables
+  right after the chains (declarations before the rules that
+  reference them).
 
   This list is intended to drop straight into
   `Linx.Netlink.Nfnl.batch/2`; it does not include the
@@ -203,6 +202,7 @@ defmodule Linx.Netfilter.Encoder do
         |> Enum.reject(&is_nil/1)
 
       chain_msgs = Enum.map(rewritten_chains, fn {_, c} -> chain(c, family) end)
+      ft_msgs = Enum.map(table.flowtables, fn {_, ft} -> flowtable(ft, family, table.name) end)
 
       rule_msgs =
         Enum.flat_map(rewritten_chains, fn {_, %Chain{} = chain} ->
@@ -215,11 +215,68 @@ defmodule Linx.Netfilter.Encoder do
       #   named objects + named/anonymous sets/maps → rules can
       #     reference them
       #   chains → vmap verdicts can reference them by name
+      #   flowtables → flow-offload rules reference them by name
       #   set/map elements → vmaps with jump/goto verdicts find chains
       #   rules → everything referenced exists
       [destroytable(family, table.name), table(table)] ++
         obj_msgs ++
-        sets_msgs ++ maps_msgs ++ anon_set_msgs ++ chain_msgs ++ set_elem_msgs ++ rule_msgs
+        sets_msgs ++
+        maps_msgs ++ anon_set_msgs ++ chain_msgs ++ ft_msgs ++ set_elem_msgs ++ rule_msgs
+    end)
+  end
+
+  @doc """
+  Builds a `NEWFLOWTABLE` message declaring a flowtable within
+  `family`/`table_name`. Flowtables attach at the netdev ingress
+  hook (`:ingress`, the only hook the kernel accepts) with a signed
+  priority and a device list.
+  """
+  @spec flowtable(Linx.Netfilter.Flowtable.t(), atom(), String.t()) :: Message.t()
+  def flowtable(%Linx.Netfilter.Flowtable{} = ft, family, table_name) do
+    devs =
+      Attr.encode(Enum.map(ft.devices, fn dev -> {nfta_device_name(), [dev, 0]} end))
+
+    hook_attrs =
+      Attr.encode([
+        {nfta_flowtable_hook_num(), Wire.u32_be(flowtable_hook_num(ft.hook))},
+        {nfta_flowtable_hook_priority(),
+         Wire.s32_be(Wire.priority_int(family, ft.priority || 0))},
+        {nfta_flowtable_hook_devs(), devs}
+      ])
+
+    flags_int = flowtable_flags_int(ft.flags)
+
+    attrs =
+      [
+        {nfta_flowtable_table(), [table_name, 0]},
+        {nfta_flowtable_name(), [ft.name, 0]},
+        {nfta_flowtable_hook(), hook_attrs}
+      ]
+      |> maybe_add(flags_int != 0, fn ->
+        {nfta_flowtable_flags(), Wire.u32_be(flags_int)}
+      end)
+
+    %Message{
+      type: Codec.nlmsg_type(Codec.subsys_nftables(), nft_msg_newflowtable()),
+      flags: nlm_f_create(),
+      payload: Codec.encode_nfgenmsg(family, 0) <> Attr.encode(attrs)
+    }
+  end
+
+  # NF_NETDEV_INGRESS — the only hook the kernel accepts for
+  # flowtables (nf_tables_flowtable_parse_hook).
+  defp flowtable_hook_num(nil), do: 0
+  defp flowtable_hook_num(:ingress), do: 0
+  defp flowtable_hook_num(n) when is_integer(n), do: n
+
+  defp flowtable_hook_num(other),
+    do: raise(ArgumentError, "flowtables attach at :ingress, got: #{inspect(other)}")
+
+  defp flowtable_flags_int(flags) do
+    Enum.reduce(flags, 0, fn
+      :hw_offload, acc -> Bitwise.bor(acc, nft_flowtable_hw_offload())
+      :counter, acc -> Bitwise.bor(acc, nft_flowtable_counter())
+      other, _acc -> raise(ArgumentError, "unknown flowtable flag #{inspect(other)}")
     end)
   end
 

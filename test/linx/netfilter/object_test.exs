@@ -58,4 +58,25 @@ defmodule Linx.Netfilter.ObjectTest do
       assert_raise ArgumentError, fn -> Object.new!(:weird, "x") end
     end
   end
+
+  describe "wire round-trip" do
+    alias Linx.Netfilter.{Decoder, Encoder}
+
+    test "NEWOBJ encode → decode preserves counter and quota objects" do
+      {:ok, counter} = Object.new(:counter, "hits", %{packets: 3, bytes: 100}, table: "fw")
+
+      {:ok, quota} =
+        Object.new(:quota, "cap", %{bytes: 1_000_000, over: true, used: 0}, table: "fw")
+
+      for obj <- [counter, quota] do
+        msg = Encoder.object(obj, :inet, "fw")
+        assert {:inet, decoded} = Decoder.object(msg.payload)
+
+        assert decoded.kind == obj.kind
+        assert decoded.name == obj.name
+        assert decoded.table == "fw"
+        assert decoded.data == obj.data
+      end
+    end
+  end
 end

@@ -47,7 +47,7 @@ defmodule Linx.Netfilter.Flowtable do
           handle: pos_integer() | nil
         }
 
-  @valid_flags [:hw_offload]
+  @valid_flags [:hw_offload, :counter]
 
   @doc "Builds a flowtable."
   @spec new(String.t(), keyword()) :: {:ok, t()} | {:error, {:bad_flowtable, term()}}

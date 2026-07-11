@@ -70,26 +70,44 @@ defmodule Linx.Netfilter.Diff do
   `:replace`-mode push; the reconcile diff has no name-allocation
   or equivalence story for them.
 
+  Desired rulesets containing named objects or flowtables are also
+  rejected: the diff has no create/replace ops for them yet, so a
+  reconcile push would silently never create them (and rules
+  referencing them would fail with a kernel `ENOENT`). Push them
+  with `mode: :replace` instead.
+
   Returns `:ok`, `{:error, {:tag_required, {family, table, chain}}}`,
-  or `{:error, {:anonymous_set_in_reconcile, {family, table, chain}}}`.
+  `{:error, {:anonymous_set_in_reconcile, {family, table, chain}}}`,
+  or `{:error, {:unsupported_in_reconcile, kind, {family, table}}}`.
   """
   @spec validate_for_reconcile(Ruleset.t()) ::
-          :ok | {:error, {:tag_required | :anonymous_set_in_reconcile, term()}}
+          :ok
+          | {:error, {:tag_required | :anonymous_set_in_reconcile, term()}}
+          | {:error, {:unsupported_in_reconcile, :objects | :flowtables, term()}}
   def validate_for_reconcile(%Ruleset{tables: tables}) do
     result =
       Enum.find_value(tables, fn {{family, table_name}, %Table{} = t} ->
-        Enum.find_value(t.chains, fn {chain_name, %Chain{} = c} ->
-          cond do
-            length(c.rules) > 1 and Enum.any?(c.rules, &is_nil(&1.tag)) ->
-              {:tag_required, {family, table_name, chain_name}}
+        cond do
+          map_size(t.objects) > 0 ->
+            {:unsupported_in_reconcile, :objects, {family, table_name}}
 
-            Enum.any?(c.rules, &rule_has_anon_set?/1) ->
-              {:anonymous_set_in_reconcile, {family, table_name, chain_name}}
+          map_size(t.flowtables) > 0 ->
+            {:unsupported_in_reconcile, :flowtables, {family, table_name}}
 
-            true ->
-              nil
-          end
-        end)
+          true ->
+            Enum.find_value(t.chains, fn {chain_name, %Chain{} = c} ->
+              cond do
+                length(c.rules) > 1 and Enum.any?(c.rules, &is_nil(&1.tag)) ->
+                  {:tag_required, {family, table_name, chain_name}}
+
+                Enum.any?(c.rules, &rule_has_anon_set?/1) ->
+                  {:anonymous_set_in_reconcile, {family, table_name, chain_name}}
+
+                true ->
+                  nil
+              end
+            end)
+        end
       end)
 
     case result do
