@@ -150,3 +150,36 @@ jobs:
 
       - name: Run dialyzer
         run: mix dialyzer
+
+  release-quality:
+    name: docs and package (elixir 1.19 / otp 28)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-release-otp28-elixir1.19-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-release-otp28-elixir1.19-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Build documentation
+        run: mix docs --warnings-as-errors
+
+      # mix hex.build validates the manifest and prints every packaged file,
+      # including the native sources and their custom compiler modules.
+      - name: Build Hex package
+        run: mix hex.build
