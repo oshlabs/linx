@@ -135,8 +135,7 @@ defmodule Linx.Cgroup.Reconcile do
         desired,
         last_applied,
         &run_op(cg, &1),
-        Report,
-        Cgroup.Error
+        Report
       )
 
     {:ok, report}

@@ -166,6 +166,18 @@ defmodule Linx.Sysctl.ReconcileTest do
       assert r.last_applied == %{}
     end
 
+    test "a caller-input error (bad key) also lands in :failed, never in converged?" do
+      # Sysctl.write reports a malformed key as {:error, {:bad_key, _}} — a
+      # tuple, not a %Sysctl.Error{}. It must still fail the pass: a report
+      # that silently drops it would claim convergence for a value the
+      # kernel never saw.
+      assert {:ok, %Report{} = r} = Reconcile.reconcile(%{"kernel..bad" => 1})
+      refute r.converged?
+      assert r.applied == []
+      assert [{{:set, "kernel..bad", 1}, {:bad_key, "kernel..bad"}}] = r.failed
+      assert r.last_applied == %{}
+    end
+
     test "releases an owned key that left the desired set, touching nothing", %{ostype: ostype} do
       last = %{"kernel.ostype" => %{applied: "whatever", original: ostype}}
       assert {:ok, %Report{} = r} = Reconcile.reconcile(%{}, last)

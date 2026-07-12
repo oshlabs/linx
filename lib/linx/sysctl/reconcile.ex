@@ -128,8 +128,7 @@ defmodule Linx.Sysctl.Reconcile do
         desired,
         last_applied,
         &run_op(&1, write_opts),
-        Report,
-        Sysctl.Error
+        Report
       )
 
     {:ok, report}

@@ -16,7 +16,11 @@ defmodule Linx.Sysctl.Reconcile.Report do
       or every op applied. `false` iff anything failed (or, for a fail-fast
       subsystem, anything is still pending).
     * `:applied` — ops that succeeded this pass, in attempt order.
-    * `:failed` — `{op, %Linx.Sysctl.Error{}}` pairs for ops that errored.
+    * `:failed` — `{op, reason}` pairs for ops that errored: a
+      `%Linx.Sysctl.Error{}` for kernel rejections, or one of
+      `Linx.Sysctl.write/3`'s caller-input tuples (`{:bad_key, _}`,
+      `{:bad_value, _}`, `{:bad_in, _}`) for a desired entry the kernel
+      never saw.
     * `:pending` — ops not attempted. Always `[]` for sysctl (best-effort
       attempts everything); non-empty only for fail-fast subsystems.
     * `:last_applied` — the **updated** ownership map to thread into the next
@@ -37,10 +41,16 @@ defmodule Linx.Sysctl.Reconcile.Report do
   @enforce_keys [:converged?, :applied, :failed, :pending, :last_applied]
   defstruct [:converged?, :applied, :failed, :pending, :last_applied]
 
+  @type failure ::
+          Linx.Sysctl.Error.t()
+          | {:bad_key, term()}
+          | {:bad_value, term()}
+          | {:bad_in, term()}
+
   @type t :: %__MODULE__{
           converged?: boolean(),
           applied: [Reconcile.op()],
-          failed: [{Reconcile.op(), Linx.Sysctl.Error.t()}],
+          failed: [{Reconcile.op(), failure()}],
           pending: [Reconcile.op()],
           last_applied: Reconcile.last_applied()
         }

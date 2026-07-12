@@ -41,17 +41,19 @@ defmodule Linx.Reconcile.FlatKV do
           map(),
           last_applied(),
           (op() -> :ok | {:error, term()}),
-          module(),
           module()
         ) :: struct()
-  def apply(ops, observed, desired, last_applied, run_op, report_module, error_module)
-      when is_list(ops) and is_function(run_op, 1) and is_atom(report_module) and
-             is_atom(error_module) do
+  def apply(ops, observed, desired, last_applied, run_op, report_module)
+      when is_list(ops) and is_function(run_op, 1) and is_atom(report_module) do
     results = Enum.map(ops, fn op -> {op, run_op.(op)} end)
     applied = for {op, :ok} <- results, do: op
 
-    failed =
-      for {op, {:error, error}} <- results, is_struct(error, error_module), do: {op, error}
+    # Every {:error, _} counts as failed, whatever its payload's shape — a
+    # subsystem's caller-input errors (e.g. sysctl's {:bad_key, _} tuples)
+    # must not vanish from the report and leave converged? claiming
+    # success, and next_last_applied below already treats any {:error, _}
+    # as failed.
+    failed = for {op, {:error, error}} <- results, do: {op, error}
 
     struct!(report_module,
       converged?: failed == [],
