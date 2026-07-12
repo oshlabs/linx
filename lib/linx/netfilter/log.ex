@@ -49,10 +49,8 @@ defmodule Linx.Netfilter.Log do
 
   use GenServer
 
-  import Bitwise
-
   alias Linx.Netfilter.Wire
-  alias Linx.Netlink.{Attr, Message, Nfnl, Socket}
+  alias Linx.Netlink.{Attr, Message, Nfnl, Request, Socket}
   alias Linx.Netlink.Nfnl.Codec
 
   import Linx.Netfilter.Wire,
@@ -132,24 +130,25 @@ defmodule Linx.Netfilter.Log do
     families = Keyword.get(opts, :families, [:ipv4, :ipv6])
     rcvbuf = Keyword.get(opts, :rcvbuf, @default_rcvbuf)
 
-    with {:ok, sock} <- Nfnl.open(netns),
-         :ok <- send_pf_binds(sock, families),
-         :ok <- send_cmd_bind(sock, group),
-         :ok <- send_cfg_mode(sock, group, copy_mode),
-         :ok <- send_cfg_flags(sock, group, flags),
-         :ok <- maybe_send_cfg_qthresh(sock, group, qthresh),
-         :ok <- maybe_send_cfg_timeout(sock, group, timeout_ms) do
-      _ = Socket.set_rcvbuf(sock, rcvbuf)
+    with {:ok, sock} <- Nfnl.open(netns) do
+      case configure(sock, group, copy_mode, flags, families, qthresh, timeout_ms) do
+        :ok ->
+          _ = Socket.set_rcvbuf(sock, rcvbuf)
 
-      state = %{
-        sock: sock,
-        owner: owner,
-        group: group,
-        families: families
-      }
+          state = %{
+            sock: sock,
+            owner: owner,
+            group: group,
+            families: families
+          }
 
-      send(self(), :recv)
-      {:ok, state}
+          send(self(), :recv)
+          {:ok, state}
+
+        {:error, _reason} = error ->
+          Socket.close(sock)
+          error
+      end
     end
   end
 
@@ -170,6 +169,17 @@ defmodule Linx.Netfilter.Log do
   # ===========================================================
   # Config-message helpers
   # ===========================================================
+
+  defp configure(sock, group, copy_mode, flags, families, qthresh, timeout_ms) do
+    with :ok <- send_pf_binds(sock, families),
+         :ok <- send_cmd_bind(sock, group),
+         :ok <- send_cfg_mode(sock, group, copy_mode),
+         :ok <- send_cfg_flags(sock, group, flags),
+         :ok <- maybe_send_cfg_qthresh(sock, group, qthresh),
+         :ok <- maybe_send_cfg_timeout(sock, group, timeout_ms) do
+      :ok
+    end
+  end
 
   defp send_pf_binds(sock, families) do
     Enum.reduce_while(families, :ok, fn family, :ok ->
@@ -273,40 +283,13 @@ defmodule Linx.Netfilter.Log do
   defp send_config(sock, payload) do
     type = Codec.nlmsg_type(Codec.subsys_ulog(), nfulnl_msg_config())
 
-    msg = %Message{
-      type: type,
-      flags: nlm_f_request() ||| nlm_f_ack(),
-      seq: Socket.next_seq(sock),
-      payload: payload
-    }
-
-    case :socket.send(sock.socket, Message.encode(msg)) do
-      :ok ->
-        # The request carries NLM_F_ACK, so the kernel answers every
-        # config message. A NACK here (EPERM without CAP_NET_ADMIN,
-        # nfnetlink_log module missing) is the difference between a
-        # working listener and one that silently never delivers —
-        # classify it instead of draining it blind.
-        case :socket.recv(sock.socket, @recv_size, 1_000) do
-          {:ok, ack} -> classify_config_ack(Message.decode(ack))
-          {:error, :timeout} -> :ok
-          {:error, reason} -> {:error, {:recv, reason}}
-        end
-
-      {:error, reason} ->
-        {:error, {:send, reason}}
+    # Configuration is complete only after the kernel ACKs this exact
+    # sequence. Request.talk/4 rejects stale replies and reports a lost ACK
+    # instead of returning a listener that can never deliver packets.
+    case Request.talk(sock, type, nlm_f_ack(), payload) do
+      {:ok, _messages} -> :ok
+      {:error, _reason} = error -> error
     end
-  end
-
-  defp classify_config_ack(messages) do
-    Enum.find_value(messages, :ok, fn %Message{type: type, payload: payload} ->
-      with true <- type == nlmsg_error(),
-           <<errno::native-signed-32, _::binary>> when errno != 0 <- payload do
-        {:error, Linx.Netlink.Error.from_errno(-errno)}
-      else
-        _ -> nil
-      end
-    end)
   end
 
   # ===========================================================

@@ -1168,10 +1168,7 @@ defmodule Linx.Netfilter.IntegrationTest do
       alias Linx.Netfilter.{Event, Ruleset}
 
       {:ok, monitor} = Netfilter.subscribe(self())
-      on_exit(fn -> if Process.alive?(monitor), do: Netfilter.unsubscribe(monitor) end)
-
-      # Let the monitor settle on the socket.
-      Process.sleep(50)
+      on_exit(fn -> stop_safely(fn -> Netfilter.unsubscribe(monitor) end) end)
 
       table_name = unique_name("monitor_basic")
 
@@ -1208,9 +1205,7 @@ defmodule Linx.Netfilter.IntegrationTest do
       alias Linx.Netfilter.{Expr, Rule, Ruleset, Verdict}
 
       {:ok, monitor} = Netfilter.subscribe(self())
-      on_exit(fn -> if Process.alive?(monitor), do: Netfilter.unsubscribe(monitor) end)
-
-      Process.sleep(50)
+      on_exit(fn -> stop_safely(fn -> Netfilter.unsubscribe(monitor) end) end)
 
       table_name = unique_name("monitor_full")
 
@@ -1271,9 +1266,7 @@ defmodule Linx.Netfilter.IntegrationTest do
       assert {:ok, _} = Netfilter.create_table(sock, table_name)
 
       {:ok, monitor} = Netfilter.subscribe(self())
-      on_exit(fn -> if Process.alive?(monitor), do: Netfilter.unsubscribe(monitor) end)
-
-      Process.sleep(50)
+      on_exit(fn -> stop_safely(fn -> Netfilter.unsubscribe(monitor) end) end)
 
       # subscribe_first captures the gen RIGHT before pull. Events at
       # or below that gen are dropped from the feed.
@@ -1297,10 +1290,9 @@ defmodule Linx.Netfilter.IntegrationTest do
 
     test "unsubscribe stops the monitor" do
       {:ok, monitor} = Netfilter.subscribe(self())
-      assert Process.alive?(monitor)
+      ref = Process.monitor(monitor)
       assert :ok = Netfilter.unsubscribe(monitor)
-      Process.sleep(20)
-      refute Process.alive?(monitor)
+      assert_receive {:DOWN, ^ref, :process, ^monitor, :normal}
     end
 
     test "log_listen + Expr.log → owner receives :log event with the prefix" do
@@ -1318,11 +1310,7 @@ defmodule Linx.Netfilter.IntegrationTest do
           copy_mode: {:packet, 256}
         )
 
-      on_exit(fn -> if Process.alive?(listener), do: Netfilter.unlog_listen(listener) end)
-
-      # Give the listener time to send all its config (BIND + PF_BIND
-      # + MODE) before we install the rule.
-      Process.sleep(100)
+      on_exit(fn -> stop_safely(fn -> Netfilter.unlog_listen(listener) end) end)
 
       table_name = unique_name("nflog")
 
@@ -1375,9 +1363,7 @@ defmodule Linx.Netfilter.IntegrationTest do
       group = rem(group, 65_000) + 1000
 
       {:ok, listener} = Netfilter.log_listen(self(), group: group, copy_mode: :meta)
-      on_exit(fn -> if Process.alive?(listener), do: Netfilter.unlog_listen(listener) end)
-
-      Process.sleep(100)
+      on_exit(fn -> stop_safely(fn -> Netfilter.unlog_listen(listener) end) end)
 
       table_name = unique_name("nflog_meta")
 
@@ -1402,8 +1388,6 @@ defmodule Linx.Netfilter.IntegrationTest do
         )
 
       assert :ok = Netfilter.push(sock, ruleset)
-      # Let the rule install fully before generating traffic
-      Process.sleep(50)
       System.cmd("ping", ["-c", "2", "-W", "1", "127.0.0.1"], stderr_to_stdout: true)
 
       events = drain_log_events(1_500)
@@ -1419,10 +1403,9 @@ defmodule Linx.Netfilter.IntegrationTest do
       group = rem(group, 65_000) + 1000
 
       {:ok, listener} = Netfilter.log_listen(self(), group: group)
-      assert Process.alive?(listener)
+      ref = Process.monitor(listener)
       assert :ok = Netfilter.unlog_listen(listener)
-      Process.sleep(20)
-      refute Process.alive?(listener)
+      assert_receive {:DOWN, ^ref, :process, ^listener, :normal}
     end
 
     test "jump verdict to a regular chain" do
@@ -1466,5 +1449,11 @@ defmodule Linx.Netfilter.IntegrationTest do
       assert nft_out =~ ~r/chain ssh_in/
       assert nft_out =~ ~r/jump ssh_in/
     end
+  end
+
+  defp stop_safely(stop) do
+    stop.()
+  catch
+    :exit, {:noproc, _} -> :ok
   end
 end
