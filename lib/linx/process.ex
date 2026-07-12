@@ -955,8 +955,7 @@ defmodule Linx.Process do
 
   def handle_call(:proceed, _from, %{port: port, child_pid: child_pid} = state)
       when child_pid != nil do
-    Port.command(port, :erlang.term_to_binary(:proceed))
-    {:reply, :ok, state}
+    {:reply, command_port(port, :proceed), state}
   end
 
   def handle_call(:proceed, _from, state) do
@@ -976,8 +975,7 @@ defmodule Linx.Process do
   # Parked at :ready -- forward :abort to the agent immediately.
   def handle_call(:abort, _from, %{port: port, child_pid: child_pid} = state)
       when child_pid != nil do
-    Port.command(port, :erlang.term_to_binary(:abort))
-    {:reply, :ok, state}
+    {:reply, command_port(port, :abort), state}
   end
 
   # Pre-:ready -- buffer the abort. The :ready handler in handle_info
@@ -1032,14 +1030,12 @@ defmodule Linx.Process do
   # :cap_*} via the existing pre-exec error path.
   def handle_call({:cap_drop_bounding, mask} = call, _from, %{port: port} = state)
       when is_integer(mask) and mask >= 0 do
-    Port.command(port, :erlang.term_to_binary(call))
-    {:reply, :ok, state}
+    {:reply, command_port(port, call), state}
   end
 
   def handle_call({:cap_set_ambient, mask} = call, _from, %{port: port} = state)
       when is_integer(mask) and mask >= 0 do
-    Port.command(port, :erlang.term_to_binary(call))
-    {:reply, :ok, state}
+    {:reply, command_port(port, call), state}
   end
 
   def handle_call(
@@ -1049,8 +1045,7 @@ defmodule Linx.Process do
       )
       when is_integer(e) and e >= 0 and is_integer(p) and p >= 0 and
              is_integer(i) and i >= 0 do
-    Port.command(port, :erlang.term_to_binary(call))
-    {:reply, :ok, state}
+    {:reply, command_port(port, call), state}
   end
 
   # Linx.Seccomp.install/2. Same state-machine guards as the
@@ -1076,8 +1071,7 @@ defmodule Linx.Process do
 
   def handle_call({:seccomp_install, bpf} = call, _from, %{port: port} = state)
       when is_binary(bpf) do
-    Port.command(port, :erlang.term_to_binary(call))
-    {:reply, :ok, state}
+    {:reply, command_port(port, call), state}
   end
 
   # host_pid/1 -- the value is set by handle_info on :spawned, which
@@ -1121,8 +1115,7 @@ defmodule Linx.Process do
 
   # Running: forward directly to the agent.
   def handle_call({:signal, signum}, _from, %{port: port} = state) do
-    Port.command(port, :erlang.term_to_binary({:signal, signum}))
-    {:reply, :ok, state}
+    {:reply, command_port(port, {:signal, signum}), state}
   end
 
   # Terminal event already arrived -- answer immediately.
@@ -1160,11 +1153,15 @@ defmodule Linx.Process do
 
   def handle_call({:pty_write, bytes}, _from, %{port: port} = state)
       when port != nil do
-    Enum.each(pty_chunks(bytes), fn chunk ->
-      Port.command(port, :erlang.term_to_binary({:pty_in, chunk}))
-    end)
+    reply =
+      Enum.reduce_while(pty_chunks(bytes), :ok, fn chunk, :ok ->
+        case command_port(port, {:pty_in, chunk}) do
+          :ok -> {:cont, :ok}
+          {:error, _} = error -> {:halt, error}
+        end
+      end)
 
-    {:reply, :ok, state}
+    {:reply, reply, state}
   end
 
   def handle_call({:pty_write, _bytes}, _from, state) do
@@ -1203,8 +1200,7 @@ defmodule Linx.Process do
   end
 
   def handle_call({:pty_winsize, ws}, _from, %{port: port} = state) do
-    Port.command(port, :erlang.term_to_binary({:pty_winsize, ws}))
-    {:reply, :ok, state}
+    {:reply, command_port(port, {:pty_winsize, ws}), state}
   end
 
   # Map the internal result tuple onto the shape `wait/1` documents.
@@ -1325,14 +1321,16 @@ defmodule Linx.Process do
     # `auto_proceed: true` advances past the checkpoint with no external
     # proceed/1 — the mode for supervised "just run it" workloads that need no
     # per-instance checkpoint configuration.
+    # A failed send is dropped, not raised: the agent's exit_status message
+    # is already on its way and finalises the session via :agent_died.
     state =
       cond do
         state.pending_abort? ->
-          Port.command(state.port, :erlang.term_to_binary(:abort))
+          _ = command_port(state.port, :abort)
           %{state | pending_abort?: false}
 
         state.auto_proceed ->
-          Port.command(state.port, :erlang.term_to_binary(:proceed))
+          _ = command_port(state.port, :proceed)
           state
 
         true ->
@@ -1433,22 +1431,30 @@ defmodule Linx.Process do
   defp reap(%{port: nil}), do: :ok
 
   defp reap(%{port: port, running?: true}) do
-    command_port(port, {:signal, 9})
+    _ = command_port(port, {:signal, 9})
+    :ok
   end
 
   defp reap(%{port: port, child_pid: child_pid}) when child_pid != nil do
-    command_port(port, :abort)
+    _ = command_port(port, :abort)
+    :ok
   end
 
   defp reap(_state), do: :ok
 
-  # Port.info/1 cannot guard this call: the external agent may exit between
-  # the check and Port.command/2 while the session is shutting down.
+  # The one guarded path to the agent. Port.info/1 cannot guard this call:
+  # the external agent may exit between any check and Port.command/2. A
+  # closed port means the workload is gone — the {port, {:exit_status, _}}
+  # message already in flight will finalise the session through the
+  # :agent_died path — so a failed send reports {:error, :no_process}
+  # instead of raising the ArgumentError that would crash the session,
+  # skip the exactly-once terminal event, and let a :transient supervisor
+  # restart duplicate the workload.
   defp command_port(port, command) do
     Port.command(port, :erlang.term_to_binary(command))
     :ok
   rescue
-    ArgumentError -> :ok
+    ArgumentError -> {:error, :no_process}
   end
 
   # The agent's frame buffer is 32 KiB; a {:pty_in, _} frame over that
@@ -1462,10 +1468,12 @@ defmodule Linx.Process do
   defp pty_chunks(<<chunk::binary-size(@pty_chunk_bytes), rest::binary>>),
     do: [chunk | pty_chunks(rest)]
 
-  # Drain pending_signals to the agent in the order they were queued.
+  # Drain pending_signals to the agent in the order they were queued. A
+  # failed send means the agent is gone; the remaining signals have no
+  # target either way, and :agent_died finalises the session.
   defp flush_pending_signals(%{port: port, pending_signals: signals}) do
     Enum.each(Enum.reverse(signals), fn signum ->
-      Port.command(port, :erlang.term_to_binary({:signal, signum}))
+      _ = command_port(port, {:signal, signum})
     end)
   end
 
