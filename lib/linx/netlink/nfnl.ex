@@ -39,6 +39,11 @@ defmodule Linx.Netlink.Nfnl do
   # `include/uapi/linux/netlink.h`.
   @netlink_netfilter 12
 
+  # Per-datagram bound on batch ACK collection; matches the rationale (and
+  # value) of Linx.Netlink.Request's default — the kernel ACKs a healthy
+  # batch in microseconds, and a lost datagram must not block forever.
+  @ack_timeout 5_000
+
   @doc """
   Opens an nfnetlink socket in network namespace `netns`.
 
@@ -148,7 +153,10 @@ defmodule Linx.Netlink.Nfnl do
   defp collect_batch_responses(socket, pending) do
     # Explicit 64 KiB read — :socket.recv/1's 8 KiB default would silently
     # truncate a large response datagram (see Socket.recv_datagram/1).
-    case Socket.recv_datagram(socket) do
+    # Bounded per-datagram, like Linx.Netlink.Request: netlink is lossy
+    # under ENOBUFS, and an ACK that never arrives must surface as
+    # {:error, {:recv, :timeout}} instead of blocking the caller forever.
+    case Socket.recv_datagram(socket, timeout: @ack_timeout) do
       {:ok, data} ->
         process_responses(Message.decode(data), socket, pending)
 
