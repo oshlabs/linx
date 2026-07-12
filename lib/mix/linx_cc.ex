@@ -17,6 +17,10 @@ defmodule Mix.Linx.CC do
   #     rebuilt, and a concurrent `mix compile` could load a half-written
   #     artifact. rename(2) within one directory is atomic.
   #
+  #   * **Sanitizer builds** — `LINX_SANITIZE=address,undefined` adds the
+  #     compiler and linker instrumentation to every native artifact. The
+  #     exact flags are fingerprinted, so switching modes always rebuilds.
+  #
   #   * **`CFLAGS` is honored** (appended after the built-in flags, so a
   #     packager / cross-builder can override `-O2`, inject `-march`,
   #     sysroots, etc.). `CC` selects the compiler, as before.
@@ -94,6 +98,7 @@ defmodule Mix.Linx.CC do
     opt = if debug?, do: ~w(-g -O0), else: ~w(-O2)
     # _FORTIFY_SOURCE needs optimisation; glibc warns it away under -O0.
     fortify = if debug?, do: [], else: @harden_fortify
+    sanitize = sanitizer_flags()
 
     cflags =
       case System.get_env("CFLAGS") do
@@ -108,6 +113,7 @@ defmodule Mix.Linx.CC do
           opt ++
           @harden_compile ++
           fortify ++
+          sanitize ++
           cflags ++
           ["-isystem", erts_include_dir()] ++
           @harden_link ++
@@ -119,11 +125,20 @@ defmodule Mix.Linx.CC do
           opt ++
           @harden_compile ++
           fortify ++
+          sanitize ++
           cflags ++
           ["-I", ei_include_dir(), "-L", ei_lib_dir()] ++
           @harden_link ++
           ["-o", output, source] ++
           ~w(-lei -lpthread)
+    end
+  end
+
+  defp sanitizer_flags do
+    case System.get_env("LINX_SANITIZE") do
+      nil -> []
+      "" -> []
+      sanitizers -> ["-fsanitize=#{sanitizers}", "-fno-omit-frame-pointer"]
     end
   end
 

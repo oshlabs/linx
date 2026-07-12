@@ -23,10 +23,11 @@ privileged job (full `:integration` suite as root on `ubuntu-24.04`), an
 aarch64 leg, and the seccomp kernel-acceptance tests in the default
 unprivileged suite. Still open:
 
-- **ASan / UBSan over the native code.** Build the four NIFs and the
-  `linx_process` port with `-fsanitize=address,undefined` and run the suite
-  under them — the port first (a standalone executable), the NIFs via
-  `LD_PRELOAD` of libasan. First backstop for the `c_src` edge-case guards.
+- **ASan / UBSan for the NIFs.** The standalone `linx_process` port now runs
+  its Process suites under both sanitizers in CI via
+  `LINX_SANITIZE=address,undefined`. Extend that coverage to the four NIFs;
+  they need the matching libasan preloaded into `beam.smp`, plus focused
+  suites that avoid mistaking VM/runtime allocations for Linx leaks.
 
 - **Property tests for the highest-risk pure code.** A small in-test cBPF
   evaluator that proves a compiled `Linx.Seccomp` filter actually blocks what

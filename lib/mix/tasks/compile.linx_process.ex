@@ -6,7 +6,7 @@ defmodule Mix.Tasks.Compile.LinxProcess do
   # wire protocol.
   #
   # All build mechanics — fingerprint-based staleness, compile-to-temp-
-  # then-rename, `CC` / `CFLAGS` / `LINX_DEBUG` handling, hardening
+  # then-rename, `CC` / `CFLAGS` / `LINX_DEBUG` / `LINX_SANITIZE` handling, hardening
   # flags, and the `ERL_EI_INCLUDE_DIR` / `ERL_EI_LIBDIR` cross-compile
   # overrides — live in `Mix.Linx.CC`, shared by the five Linx C
   # compilers.

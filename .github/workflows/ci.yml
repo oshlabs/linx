@@ -183,3 +183,37 @@ jobs:
       # including the native sources and their custom compiler modules.
       - name: Build Hex package
         run: mix hex.build
+
+  process-sanitizers:
+    name: process port (ASan + UBSan)
+    runs-on: ubuntu-24.04
+    env:
+      MIX_ENV: test
+      LINX_SANITIZE: address,undefined
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Erlang/Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      - name: Cache dependencies and sanitized build
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-sanitizers-otp28-elixir1.19-${{ hashFiles('mix.lock') }}
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      # These suites exercise the standalone linx_process Port. Sanitized
+      # NIFs need the sanitizer runtime preloaded into beam.smp and remain a
+      # separate follow-up; do not load them in this job.
+      - name: Run Process suites
+        run: mix test test/linx/process_test.exs test/linx/process_supervision_test.exs --warnings-as-errors
