@@ -142,9 +142,20 @@ defmodule Mix.Linx.CC do
     end
   end
 
+  # Shell-word splitting: quoted and backslash-escaped arguments survive as
+  # single words with the quotes consumed, as a POSIX shell would hand them
+  # to the compiler (so a string-valued macro is written -DNAME='"str"').
+  # OptionParser.split raises a bare RuntimeError on an unbalanced quote;
+  # re-raise it attributed to CFLAGS, or the packager sees an unexplained
+  # crash in the middle of five native compiles.
   @doc false
   @spec split_flags(String.t()) :: [String.t()]
-  def split_flags(flags) when is_binary(flags), do: OptionParser.split(flags)
+  def split_flags(flags) when is_binary(flags) do
+    OptionParser.split(flags)
+  rescue
+    e in RuntimeError ->
+      Mix.raise("could not parse CFLAGS #{inspect(flags)}: #{Exception.message(e)}")
+  end
 
   # Everything that determines the artifact's bytes: source *content*
   # (not mtime — Hex tarballs ship epoch mtimes), compiler, the exact
