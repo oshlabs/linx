@@ -41,10 +41,6 @@ unprivileged suite. Still open:
 set expectations of exact parity it couldn't honor. The pipeline DSL is the
 authoring surface; the frontend lives in git history if ever wanted again.)
 
-- **`openat2(RESOLVE_BENEATH)` hardening** for `linx_mount`'s target-file
-  creation when used against live (adversarial) containers — the final
-  component is already `O_EXCL|O_NOFOLLOW`-protected.
-
 - **A socket-owning connection process**, if concurrent access to one
   `%Socket{}` is ever needed: a GenServer that owns the fd and demuxes
   replies to waiters by seq. The current state only *documents* the

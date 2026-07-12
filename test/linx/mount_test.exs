@@ -628,6 +628,23 @@ defmodule Linx.MountTest do
       assert {:ok, ^victim} = File.read_link(target)
     end
 
+    test "bind/3 with create: true refuses a symlinked parent" do
+      base = Path.join(System.tmp_dir!(), "linx-mount-parent-link-#{System.unique_integer()}")
+      real_parent = Path.join(base, "real")
+      linked_parent = Path.join(base, "linked")
+      target = Path.join(linked_parent, "target")
+
+      File.mkdir_p!(real_parent)
+      File.ln_s!(real_parent, linked_parent)
+      on_exit(fn -> File.rm_rf(base) end)
+
+      assert {:error, %Error{operation: :create, errno: :eloop, path: ^target}} =
+               Mount.bind("/dev/null", target, create: true)
+
+      refute File.exists?(Path.join(real_parent, "target"))
+      assert {:ok, ^real_parent} = File.read_link(linked_parent)
+    end
+
     test "remount/2 against an unmounted target returns a structured error" do
       assert {:error, %Error{operation: :mount, errno: errno}} =
                Mount.remount("/nope/never-mounted")

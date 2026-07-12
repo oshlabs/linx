@@ -43,12 +43,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/openat2.h>
 #include <sched.h>      /* setns, CLONE_NEWNS */
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
-#include <sys/stat.h>    /* lstat / S_ISLNK -- ensure_target_file hardening */
-#include <sys/syscall.h> /* SYS_pivot_root (no glibc wrapper) */
+#include <sys/stat.h>
+#include <sys/syscall.h> /* SYS_openat2 / SYS_pivot_root (no glibc wrappers) */
 #include <sys/wait.h>    /* waitpid -- reap the pidns mount fork */
 #include <unistd.h>
 
@@ -247,28 +248,47 @@ static int enter_target_ns(struct ns_job_result *r, const char *ns_path)
  * success or if it already exists, otherwise an errno.
  *
  * Hardening: we run as root inside a mount namespace whose directories
- * may be container-writable, so a symlink at `target` must not redirect
- * the create (or the subsequent bind mount) to an attacker-chosen path.
- * O_EXCL|O_NOFOLLOW refuses a symlink at the final component; a
- * pre-existing symlink is reported as ELOOP rather than accepted.
- * (Symlinked *parent* directories would need openat2 with
- * RESOLVE_BENEATH/RESOLVE_NO_SYMLINKS — worth adding if this is ever
- * used against live, adversarial containers; the typical call here
- * precedes the workload.) */
+ * may be container-writable. openat2(2) RESOLVE_BENEATH |
+ * RESOLVE_NO_SYMLINKS rejects symlinks in every component and prevents
+ * `..` from escaping the pinned root/cwd. See openat2(2), "RESOLVE flags":
+ * https://man7.org/linux/man-pages/man2/openat2.2.html */
 static int ensure_target_file(const char *target)
 {
-	struct stat st;
-	if (lstat(target, &st) == 0)
-		return S_ISLNK(st.st_mode) ? ELOOP : 0;
+	int dirfd = AT_FDCWD;
+	int rootfd = -1;
+	const char *path = target;
 
-	int fd = open(target,
-		      O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC,
-		      0644);
+	if (target[0] == '/') {
+		rootfd = open("/", O_PATH | O_DIRECTORY | O_CLOEXEC);
+		if (rootfd < 0)
+			return errno;
+		dirfd = rootfd;
+		while (*path == '/')
+			path++;
+	}
+
+	struct open_how how = {
+		.flags = O_PATH | O_CLOEXEC,
+		.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+	};
+
+	int fd = (int)syscall(SYS_openat2, dirfd, path, &how, sizeof how);
+	if (fd < 0 && errno == ENOENT) {
+		how.flags = O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC;
+		how.mode = 0644;
+		fd = (int)syscall(SYS_openat2, dirfd, path, &how, sizeof how);
+	}
+
+	int result = 0;
 	if (fd < 0)
-		return errno == EEXIST ? 0 : errno;
+		result = errno;
+	else if (close(fd) < 0)
+		result = errno;
 
-	close(fd);
-	return 0;
+	if (rootfd >= 0 && close(rootfd) < 0 && result == 0)
+		result = errno;
+
+	return result;
 }
 
 /* Mount from inside the target PID namespace. setns(CLONE_NEWPID)

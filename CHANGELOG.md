@@ -264,6 +264,9 @@ A follow-up whole-library review landed a second round of fixes:
   non-reading workload and require an explicit `:pty_in_dropped` event.
 - Mount target creation has an unprivileged adversarial test requiring a final
   symlink to fail with `ELOOP` while leaving its destination untouched.
+- Mount placeholder creation now resolves every path component with
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`; parent-directory symlinks
+  and `..` escapes are refused before a privileged bind mount can be redirected.
 
 ## [0.2.0] - 2026-06-06
 
