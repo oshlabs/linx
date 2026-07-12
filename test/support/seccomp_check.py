@@ -6,6 +6,11 @@ it into struct sock_fprog, sets PR_SET_NO_NEW_PRIVS, and calls
 seccomp(SECCOMP_SET_MODE_FILTER, 0, &fprog) — the same syscall the
 Linx agent will issue from c_src/linx_process.c in S2.
 
+An optional second argument, ``x32``, invokes an x32-numbered getpid
+after installation. Success means the filter killed the child with
+SIGSYS before syscall dispatch; an x32-disabled kernel returning ENOSYS
+is a failure because it proves the guard did not fire.
+
 Exit codes (consumed by the Elixir test in test/linx/seccomp_test.exs):
 
     0      — kernel accepted the filter (either the helper exited
@@ -36,14 +41,20 @@ _SYS_SECCOMP = {"x86_64": 317, "aarch64": 277}
 
 
 def main():
-    if len(sys.argv) != 2:
-        print("usage: seccomp_check.py <bpf-file>", file=sys.stderr)
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "x32"):
+        print("usage: seccomp_check.py <bpf-file> [x32]", file=sys.stderr)
         sys.exit(255)
+
+    mode = sys.argv[2] if len(sys.argv) == 3 else "install"
 
     arch = os.uname().machine
     if arch not in _SYS_SECCOMP:
         print(f"unsupported arch: {arch}", file=sys.stderr)
         sys.exit(255)
+
+    if mode == "x32" and arch != "x86_64":
+        print("x32 probe requires x86_64", file=sys.stderr)
+        sys.exit(77)
 
     sys_seccomp = _SYS_SECCOMP[arch]
 
@@ -74,7 +85,13 @@ def main():
         libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
         r = libc.syscall(sys_seccomp, SECCOMP_SET_MODE_FILTER, 0, ctypes.byref(fprog))
         if r == 0:
-            os._exit(0)
+            if mode == "x32":
+                # __X32_SYSCALL_BIT | __NR_getpid. The compiler's unsigned
+                # JGE guard must return SECCOMP_RET_KILL_PROCESS first.
+                libc.syscall(0x40000000 | 39)
+                os._exit(125)
+            else:
+                os._exit(0)
         else:
             os._exit(ctypes.get_errno())
     else:
@@ -83,6 +100,8 @@ def main():
         _, status = os.waitpid(pid, 0)
         if os.WIFEXITED(status):
             sys.exit(os.WEXITSTATUS(status))
+        elif os.WIFSIGNALED(status) and mode == "x32":
+            sys.exit(0 if os.WTERMSIG(status) == 31 else 126)
         elif os.WIFSIGNALED(status):
             # Killed by signal — filter installed successfully but the
             # teardown syscall (likely exit_group) was blocked.

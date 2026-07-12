@@ -241,6 +241,8 @@ A follow-up whole-library review landed a second round of fixes:
   override the bound with `:dump_retries`.
 - Native-build `CFLAGS` now use shell-word parsing, preserving quoted and
   escaped arguments without executing a shell.
+- Seccomp kernel acceptance now invokes a real x32-numbered syscall on x86_64
+  and requires the compiler's x32 guard to kill it with `SIGSYS`.
 
 ## [0.2.0] - 2026-06-06
 

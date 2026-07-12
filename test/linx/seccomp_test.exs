@@ -1118,6 +1118,18 @@ defmodule Linx.SeccompTest do
       assert run_helper(filter.bpf) == 0
     end
 
+    if :erlang.system_info(:system_architecture)
+       |> List.to_string()
+       |> String.starts_with?("x86_64") do
+      test "the x32 guard kills a real x32-numbered syscall" do
+        {:ok, filter} = Seccomp.deny_list([], default: :allow)
+        assert run_helper(filter.bpf, "x32") == 0
+      end
+    else
+      @tag skip: "x32 ABI exists only on x86_64"
+      test "the x32 guard kills a real x32-numbered syscall", do: :ok
+    end
+
     test "a deliberately malformed blob is rejected with EINVAL (22)" do
       # Eight zero bytes — one "instruction" but with code=0, which the
       # kernel rejects as an invalid BPF program.
@@ -1245,7 +1257,7 @@ defmodule Linx.SeccompTest do
 
   # Spawn the python helper, write `bpf` to a temp file, return the
   # helper's exit code.
-  defp run_helper(bpf) do
+  defp run_helper(bpf, mode \\ nil) do
     helper = @moduletag_helper
 
     unless File.exists?(helper) do
@@ -1261,8 +1273,8 @@ defmodule Linx.SeccompTest do
     File.write!(path, bpf)
 
     try do
-      {_output, exit_code} =
-        System.cmd("python3", [helper, path], stderr_to_stdout: true)
+      args = if mode, do: [helper, path, mode], else: [helper, path]
+      {_output, exit_code} = System.cmd("python3", args, stderr_to_stdout: true)
 
       exit_code
     after

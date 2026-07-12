@@ -23,12 +23,6 @@ privileged job (full `:integration` suite as root on `ubuntu-24.04`), an
 aarch64 leg, and the seccomp kernel-acceptance tests in the default
 unprivileged suite. Still open:
 
-- **x32 kernel-acceptance test.** The seccomp x32-ABI guard has byte-level
-  golden tests, but nothing yet invokes an actual x32 syscall against a real
-  kernel to prove the trap *fires*. `test/support/seccomp_check.py` could be
-  extended to call e.g. `getpid` via the x32 entry under a deny-list and
-  assert the kill.
-
 - **Deterministic PTY backpressure / overflow tests.** The agent's `POLLOUT`
   flush and the 1 MiB `pty_in_dropped` cap are exercised only indirectly (a
   64 KiB flood test); there is no test that deterministically fills the tty
