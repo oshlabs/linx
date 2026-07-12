@@ -23,12 +23,11 @@ privileged job (full `:integration` suite as root on `ubuntu-24.04`), an
 aarch64 leg, and the seccomp kernel-acceptance tests in the default
 unprivileged suite. Still open:
 
-- **Deterministic PTY backpressure / overflow tests.** The agent's `POLLOUT`
-  flush and the 1 MiB `pty_in_dropped` cap are exercised only indirectly (a
-  64 KiB flood test); there is no test that deterministically fills the tty
-  input queue and asserts the buffer→flush handoff, nor one that trips the
-  cap and asserts the `pty_in_dropped` event. Both are
-  timing/pressure-dependent.
+- **Deterministic PTY backpressure flush test.** The 1 MiB overflow cap and
+  `pty_in_dropped` event are covered with a non-reading workload. The separate
+  buffer→`POLLOUT`→flush handoff is still exercised only indirectly by the
+  64 KiB flood test; add a reader-controlled workload that proves bytes held
+  during backpressure arrive after reading resumes.
 
 - **Privileged, adversarial-path coverage.** The mount-target symlink refusal
   and the namespace-entry pid-reuse (TOCTOU) narrowing are covered only for

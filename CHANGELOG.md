@@ -243,6 +243,8 @@ A follow-up whole-library review landed a second round of fixes:
   escaped arguments without executing a shell.
 - Seccomp kernel acceptance now invokes a real x32-numbered syscall on x86_64
   and requires the compiler's x32 guard to kill it with `SIGSYS`.
+- PTY tests deterministically fill the agent's 1 MiB input buffer against a
+  non-reading workload and require an explicit `:pty_in_dropped` event.
 
 ## [0.2.0] - 2026-06-06
 

@@ -586,6 +586,23 @@ defmodule Linx.ProcessTest do
       assert_receive {:linx_process, :signaled, 9}, 5_000
     end
 
+    test "PTY input overflow is reported when the workload never reads" do
+      {:ok, session} = P.spawn(argv: ["/bin/sleep", "60"], stdio: :pty)
+      assert_receive {:linx_process, :ready, _}, 2_000
+      :ok = P.proceed(session)
+      assert_receive {:linx_process, :running}, 2_000
+
+      # sleep never reads stdin. Once the tty queue fills, the agent buffers
+      # up to its 1 MiB cap; subsequent 16 KiB command chunks must be reported
+      # rather than silently discarded.
+      :ok = P.pty_write(session, :binary.copy(<<0>>, 2 * 1024 * 1024))
+      assert_receive {:linx_process, :pty_in_dropped, dropped}, 10_000
+      assert dropped > 0
+
+      :ok = P.signal(session, 9)
+      assert_receive {:linx_process, :signaled, 9}, 5_000
+    end
+
     test "pty_write/2 refuses with :no_process after the workload has terminated" do
       {:ok, session} = P.spawn(argv: ["/bin/true"], stdio: :pty)
       assert_receive {:linx_process, :ready, _}, 2_000
