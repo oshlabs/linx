@@ -130,25 +130,23 @@ defmodule Linx.Netfilter.Log do
     families = Keyword.get(opts, :families, [:ipv4, :ipv6])
     rcvbuf = Keyword.get(opts, :rcvbuf, @default_rcvbuf)
 
-    with {:ok, sock} <- Nfnl.open(netns) do
-      case configure(sock, group, copy_mode, flags, families, qthresh, timeout_ms) do
-        :ok ->
-          _ = Socket.set_rcvbuf(sock, rcvbuf)
+    with {:ok, sock} <- Nfnl.open(netns),
+         :ok <-
+           Socket.close_on_error(
+             sock,
+             configure(sock, group, copy_mode, flags, families, qthresh, timeout_ms)
+           ) do
+      _ = Socket.set_rcvbuf(sock, rcvbuf)
 
-          state = %{
-            sock: sock,
-            owner: owner,
-            group: group,
-            families: families
-          }
+      state = %{
+        sock: sock,
+        owner: owner,
+        group: group,
+        families: families
+      }
 
-          send(self(), :recv)
-          {:ok, state}
-
-        {:error, _reason} = error ->
-          Socket.close(sock)
-          error
-      end
+      send(self(), :recv)
+      {:ok, state}
     end
   end
 
@@ -284,9 +282,13 @@ defmodule Linx.Netfilter.Log do
     type = Codec.nlmsg_type(Codec.subsys_ulog(), nfulnl_msg_config())
 
     # Configuration is complete only after the kernel ACKs this exact
-    # sequence. Request.talk/4 rejects stale replies and reports a lost ACK
-    # instead of returning a listener that can never deliver packets.
-    case Request.talk(sock, type, nlm_f_ack(), payload) do
+    # sequence. Request.talk/5 rejects stale replies and reports a lost ACK
+    # instead of returning a listener that can never deliver packets. The
+    # explicit timeout matters: a local config ACK arrives in microseconds,
+    # and this runs inside init/1 — up to ~7 sequential messages, repeated
+    # on every supervisor restart — so a lost ACK must fail fast rather
+    # than stall startup for the default 5s per message.
+    case Request.talk(sock, type, nlm_f_ack(), payload, timeout: 1_000) do
       {:ok, _messages} -> :ok
       {:error, _reason} = error -> error
     end

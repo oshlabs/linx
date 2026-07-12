@@ -148,7 +148,7 @@ defmodule Linx.Netlink.Rtnl.Monitor do
     rcvbuf = Keyword.get(opts, :rcvbuf, @default_rcvbuf)
 
     with {:ok, sock} <- Rtnl.open(netns),
-         :ok <- join_all(sock, groups) do
+         :ok <- Socket.close_on_error(sock, join_all(sock, groups)) do
       _ = Socket.set_rcvbuf(sock, rcvbuf)
       send(self(), :recv)
       {:ok, %{sock: sock, owner: owner}}

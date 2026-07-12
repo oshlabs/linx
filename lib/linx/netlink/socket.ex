@@ -113,6 +113,27 @@ defmodule Linx.Netlink.Socket do
   @spec close(t) :: :ok
   def close(%__MODULE__{socket: socket}), do: :socket.close(socket)
 
+  @doc """
+  Threads a post-open setup step's result through: success passes
+  untouched, and `{:error, _}` closes `socket` first.
+
+  The standard shape for a listener `init/1` that opens a socket and then
+  configures it — `with {:ok, sock} <- open(...), :ok <-
+  close_on_error(sock, configure(sock)) do` — so a failed configuration
+  step can't leak the socket.
+  """
+  @spec close_on_error(t, result) :: result when result: :ok | {:ok, term} | {:error, term}
+  def close_on_error(%__MODULE__{} = socket, result) do
+    case result do
+      {:error, _} = error ->
+        _ = close(socket)
+        error
+
+      success ->
+        success
+    end
+  end
+
   # One netlink datagram can far exceed OTP's default 8 KiB read length
   # (an RTM_GETLINK dump chunk on a host with SR-IOV VFs easily does).
   # 64 KiB is the ceiling the kernel itself uses for dump allocations.

@@ -115,31 +115,25 @@ defmodule Linx.Netfilter.Monitor do
     since_gen = Keyword.get(opts, :since_gen, 0)
     rcvbuf = Keyword.get(opts, :rcvbuf, @default_rcvbuf)
 
-    with {:ok, sock} <- Nfnl.open(netns) do
-      case Socket.add_membership(sock, @nfnlgrp_nftables) do
-        :ok ->
-          _ = Socket.set_rcvbuf(sock, rcvbuf)
+    with {:ok, sock} <- Nfnl.open(netns),
+         :ok <- Socket.close_on_error(sock, Socket.add_membership(sock, @nfnlgrp_nftables)) do
+      _ = Socket.set_rcvbuf(sock, rcvbuf)
 
-          state = %{
-            sock: sock,
-            owner: owner,
-            gen_id: nil,
-            proc_pid: nil,
-            proc_name: nil,
-            min_gen: since_gen,
-            # Pending entity events buffered until the closing NEWGEN
-            # tells us which gen they belong to. The kernel broadcasts
-            # entity events FIRST, then the NEWGEN for the batch.
-            pending: []
-          }
+      state = %{
+        sock: sock,
+        owner: owner,
+        gen_id: nil,
+        proc_pid: nil,
+        proc_name: nil,
+        min_gen: since_gen,
+        # Pending entity events buffered until the closing NEWGEN
+        # tells us which gen they belong to. The kernel broadcasts
+        # entity events FIRST, then the NEWGEN for the batch.
+        pending: []
+      }
 
-          send(self(), :recv)
-          {:ok, state}
-
-        {:error, _reason} = error ->
-          Socket.close(sock)
-          error
-      end
+      send(self(), :recv)
+      {:ok, state}
     end
   end
 
