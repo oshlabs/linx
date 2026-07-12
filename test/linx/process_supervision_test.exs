@@ -1,6 +1,8 @@
 defmodule Linx.ProcessSupervisionTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   # Abnormal exits (the supervised-restart cases) log crash reports by design;
   # capture them so expected failures don't clutter the suite output.
   @moduletag capture_log: true
@@ -97,8 +99,8 @@ defmodule Linx.ProcessSupervisionTest do
       :ok = P.proceed(s)
       assert_receive {:linx_process, :exited, 0}, 2_000
 
-      assert Process.alive?(s)
       assert {:ok, {:exited, 0}} = P.wait(s)
+      assert {:ok, %{stage: :exited}} = P.info(s)
     end
   end
 
@@ -113,6 +115,24 @@ defmodule Linx.ProcessSupervisionTest do
   end
 
   describe "OS-process reaping" do
+    test "shutdown tolerates an agent port that has already closed" do
+      {:ok, s} = P.spawn(argv: ["/bin/true"])
+      assert_receive {:linx_process, :ready, _}, 2_000
+
+      closed_port = Port.open({:spawn_executable, "/bin/true"}, [:exit_status])
+      assert_receive {^closed_port, {:exit_status, 0}}, 2_000
+
+      # Model the unavoidable race where the agent exits after the session
+      # decides to reap it but before Port.command/2 reaches the port.
+      :sys.replace_state(s, &%{&1 | port: closed_port})
+      ref = Process.monitor(s)
+
+      log = capture_log(fn -> assert :ok = GenServer.stop(s) end)
+
+      assert_receive {:DOWN, ^ref, :process, ^s, :normal}
+      assert log == ""
+    end
+
     test "a graceful stop reaps the running workload (no leak)" do
       {:ok, s} = P.spawn(argv: ["/bin/sleep", "60"], auto_proceed: true)
       assert_receive {:linx_process, :running}, 2_000

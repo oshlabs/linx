@@ -419,7 +419,7 @@ defmodule Linx.TtyTest do
         end)
 
       gl = fake_gl(watcher)
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       # Pre-seed the pump's mailbox with input bytes; the pump forwards
       # them to cat, which echoes back as :pty_out, which the pump
@@ -437,7 +437,7 @@ defmodule Linx.TtyTest do
       :ok = Linx.Process.proceed(session)
 
       gl = fake_gl(self())
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       assert {:ok, {:exited, 0}} = Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil)
     end
@@ -448,7 +448,7 @@ defmodule Linx.TtyTest do
       :ok = Linx.Process.proceed(session)
 
       gl = fake_gl(self())
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       assert {:error, %Linx.Process.Error{stage: :execve, errno: :enoent, code: 2}} =
                Linx.Tty.__pump_gl__(reader, gl, session, 60_000, nil)
@@ -461,7 +461,7 @@ defmodule Linx.TtyTest do
       assert_receive {:linx_process, :running}, 2_000
 
       gl = fake_gl(self())
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       send(self(), {:linx_tty_gl, :eof})
 
@@ -478,7 +478,7 @@ defmodule Linx.TtyTest do
       assert_receive {:linx_process, :running}, 2_000
 
       gl = fake_gl(self())
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       send(self(), {:linx_tty_gl, {:error, :ebadf}})
 
@@ -501,7 +501,7 @@ defmodule Linx.TtyTest do
       assert_receive {:linx_process, :running}, 2_000
 
       gl = fake_gl(self())
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       send(self(), {:EXIT, gl, :interrupt})
 
@@ -572,7 +572,7 @@ defmodule Linx.TtyTest do
         end)
 
       gl = fake_gl(watcher, geometry: %{columns: 132, rows: 42})
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       # poll_ms = 50 → the first poll forwards (last_ws starts nil);
       # the watcher then ends the pump.
@@ -587,7 +587,7 @@ defmodule Linx.TtyTest do
       assert_receive {:linx_process, :running}, 2_000
 
       gl = fake_gl(self())
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       send(self(), {:linx_tty_gl, :data, <<16, 17>>})
 
@@ -609,7 +609,7 @@ defmodule Linx.TtyTest do
       assert_receive {:linx_process, :running}, 2_000
 
       gl = fake_gl(self())
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       send(self(), {:linx_tty_gl, :data, <<16>>})
       send(self(), {:linx_tty_gl, :data, <<17>>})
@@ -630,7 +630,7 @@ defmodule Linx.TtyTest do
       assert_receive {:linx_process, :running}, 2_000
 
       gl = fake_gl(self())
-      reader = spawn_link(fn -> Process.sleep(:infinity) end)
+      reader = spawn_link(&park/0)
 
       # With detach key "QQ", a lone "Q" is held; the following "x" breaks the
       # match, so "Qx" must reach the workload (and echo back from cat).
@@ -835,11 +835,14 @@ defmodule Linx.TtyTest do
   end
 
   defp stop_fake_gl(pid) when is_pid(pid) do
-    if Process.alive?(pid) do
-      send(pid, :stop)
-    end
-
+    send(pid, :stop)
     :ok
+  end
+
+  defp park do
+    receive do
+      :stop -> :ok
+    end
   end
 
   # Drain every {:fake_gl_wrote, _} that's in our mailbox right now

@@ -1433,16 +1433,23 @@ defmodule Linx.Process do
   defp reap(%{port: nil}), do: :ok
 
   defp reap(%{port: port, running?: true}) do
-    if Port.info(port), do: Port.command(port, :erlang.term_to_binary({:signal, 9}))
-    :ok
+    command_port(port, {:signal, 9})
   end
 
   defp reap(%{port: port, child_pid: child_pid}) when child_pid != nil do
-    if Port.info(port), do: Port.command(port, :erlang.term_to_binary(:abort))
-    :ok
+    command_port(port, :abort)
   end
 
   defp reap(_state), do: :ok
+
+  # Port.info/1 cannot guard this call: the external agent may exit between
+  # the check and Port.command/2 while the session is shutting down.
+  defp command_port(port, command) do
+    Port.command(port, :erlang.term_to_binary(command))
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
 
   # The agent's frame buffer is 32 KiB; a {:pty_in, _} frame over that
   # desyncs the wire and the agent SIGKILLs the workload (command_too_big).
