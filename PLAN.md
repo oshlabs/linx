@@ -42,11 +42,6 @@ unprivileged suite. Still open:
   racing pid recycle, a planted symlink) isn't reproduced. Hard to make
   deterministic; document as a known coverage limit if not built.
 
-- **Extend wire-byte assertions beyond the set-element layer.**
-  `test/linx/netfilter/encoder_test.exs` pins exact bytes for set elements
-  (where the assessment's element-layer defects lived); the rest of the
-  netfilter encoder is still covered only by value-equality round-trips.
-
 ## Deferred features
 
 (The `~NFT` text frontend and its parity roadmap were removed on the

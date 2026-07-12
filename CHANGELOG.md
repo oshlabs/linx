@@ -231,6 +231,8 @@ A follow-up whole-library review landed a second round of fixes:
   escaping, propagation tags, and unknown optional fields.
 - A test-only cBPF evaluator checks generated Seccomp rule sets semantically
   across both architectures, including architecture mismatch and x32 guards.
+- Exact full-message nf_tables fixtures pin table, base-chain, counter-object,
+  and flowtable framing beyond the existing set-element byte assertions.
 
 ## [0.2.0] - 2026-06-06
 

@@ -8,7 +8,19 @@ defmodule Linx.Netfilter.EncoderTest do
 
   import Linx.Netfilter.Wire
 
-  alias Linx.Netfilter.{Decoder, Encoder, Expr, Patch, Ruleset, Set}
+  alias Linx.Netfilter.{
+    Chain,
+    Decoder,
+    Encoder,
+    Expr,
+    Flowtable,
+    Object,
+    Patch,
+    Ruleset,
+    Set,
+    Table
+  }
+
   alias Linx.Netlink.Attr
   alias Linx.Netlink.Message
   alias Linx.Netlink.Nfnl.Codec
@@ -46,7 +58,75 @@ defmodule Linx.Netfilter.EncoderTest do
     Encoder.set_elements(set, :inet)
   end
 
+  defp hex(encoded), do: Base.decode16!(encoded, case: :lower)
+
   @interval_end nft_set_elem_interval_end()
+
+  describe "full-message wire fixtures" do
+    # Attribute IDs and nested layouts come from include/uapi/linux/netfilter/nf_tables.h:
+    # https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/linux/netfilter/nf_tables.h
+    # Pin the nlmsghdr too, so message type/flags and native-order framing are
+    # checked alongside the big-endian nf_tables values.
+    test "NEWTABLE with the owner flag" do
+      message = Encoder.table(Table.new!(:inet, "t", flags: [:owner]))
+
+      assert Message.encode(message) ==
+               hex(
+                 "24000000000a00040000000000000000" <>
+                   "0100000006000100740000000800020000000002"
+               )
+    end
+
+    test "NEWCHAIN with a nested input hook and drop policy" do
+      chain =
+        Chain.new!("input",
+          table: "t",
+          type: :filter,
+          hook: :input,
+          priority: -10,
+          policy: :drop
+        )
+
+      assert chain |> Encoder.chain(:inet) |> Message.encode() ==
+               hex(
+                 "50000000030a00040000000000000000" <>
+                   "0100000006000100740000000a000300696e707574000000" <>
+                   "14000400080001000000000108000200fffffff6" <>
+                   "0b00070066696c74657200000800050000000000"
+               )
+    end
+
+    test "NEWOBJ counter data keeps 64-bit network byte order" do
+      object = Object.new!(:counter, "c", %{bytes: 2, packets: 1})
+
+      assert object |> Encoder.object(:inet, "t") |> Message.encode() ==
+               hex(
+                 "48000000120a00040000000000000000" <>
+                   "0100000006000100740000000600020063000000" <>
+                   "08000300000000011c000400" <>
+                   "0c00010000000000000000020c0002000000000000000001"
+               )
+    end
+
+    test "NEWFLOWTABLE preserves nested device-list framing" do
+      flowtable =
+        Flowtable.new!("f",
+          hook: :ingress,
+          priority: 0,
+          devices: ["eth0", "eth1"],
+          flags: [:counter]
+        )
+
+      assert flowtable |> Encoder.flowtable(:inet, "t") |> Message.encode() ==
+               hex(
+                 "5c000000160a00040000000000000000" <>
+                   "0100000006000100740000000600020066000000" <>
+                   "3000030008000100000000000800020000000000" <>
+                   "1c000300090001006574683000000000090001006574683100000000" <>
+                   "0800070000000002"
+               )
+    end
+  end
 
   describe "type-directed key encoding (C4)" do
     test "textual IPv4 elements are parsed to 4 address bytes, not ASCII" do
