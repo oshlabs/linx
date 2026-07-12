@@ -225,6 +225,8 @@ A follow-up whole-library review landed a second round of fixes:
   under ASan and UBSan in CI; `LINX_SANITIZE` provides the same fingerprinted
   native build mode locally. NIF execution preloads libasan into the BEAM;
   leak detection stays scoped to the isolated Port process.
+- Property tests cover full-field, multi-message Netlink framing round trips
+  and malformed `nlmsg_len` rejection.
 
 ## [0.2.0] - 2026-06-06
 

@@ -27,7 +27,7 @@ unprivileged suite. Still open:
   evaluator that proves a compiled `Linx.Seccomp` filter actually blocks what
   it should (complements the kernel-acceptance tests with exhaustive
   input coverage); plus round-trip properties for the `/proc/<pid>/mountinfo`
-  parser and the full netlink `Message` codec.
+  parser.
 
 - **x32 kernel-acceptance test.** The seccomp x32-ABI guard has byte-level
   golden tests, but nothing yet invokes an actual x32 syscall against a real
