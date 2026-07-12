@@ -10,11 +10,11 @@ render on hexdocs.
 
 ## Release
 
-- **Decide the release vehicle for the owner-flag default (M13).**
-  `Table.new/3` / `Ruleset.add_table/3` defaulting to `flags: [:owner]` is a
-  behaviour change for existing users. Confirm it should ship as-is (it aligns
-  code with the long-documented "sockets own their tables" guarantee) and that
-  a minor-version bump + the CHANGELOG note are the right disclosure.
+The next release is `0.3.0`. It keeps the owner-flag default because that
+matches the documented socket-owned table lifecycle; the changelog migration
+section documents `flags: []` and `flags: [:persist]` as explicit alternatives.
+The version in `mix.exs` stays at the last published release until the release
+commit.
 
 ## Verification
 

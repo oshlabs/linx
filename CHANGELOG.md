@@ -12,6 +12,23 @@ findings, all fixed with test coverage; a major expansion of the netfilter
 encoder and pipeline DSL, kernel-verified throughout; and the **removal of the
 `~NFT` text frontend** (breaking).
 
+### Migrating to 0.3.0
+
+- Replace `~NFT` and `Linx.NFT` calls with the `Ruleset` / `Table` / `Chain` /
+  `Rule` / `Expr` pipeline API, or use the system `nft` command when nft syntax
+  itself is the required interface.
+- Tables now default to `flags: [:owner]` and disappear when their creating
+  socket closes. Pass `flags: []` for the old unmanaged lifetime, or
+  `flags: [:persist]` for an explicitly persistent policy.
+- `Linx.Process` now terminates orphaned workloads after an unclean VM death.
+  Pass `orphan_policy: :linger` only when the old outlive-the-VM behavior is
+  intentional.
+- Code matching the formerly aspirational `Linx.Netfilter.Error.operation`
+  atoms should handle the actual `:push | :pull | :create_table` set.
+
+These intentional 0.x behavior/API changes will ship together as `0.3.0`;
+`mix.exs` remains at the last released version until the release commit.
+
 ### Removed — **breaking**
 
 - **The `~NFT` sigil and the `Linx.NFT` namespace** (tokenizer, parser,
