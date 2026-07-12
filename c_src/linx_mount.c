@@ -251,7 +251,15 @@ static int enter_target_ns(struct ns_job_result *r, const char *ns_path)
  * may be container-writable. openat2(2) RESOLVE_BENEATH |
  * RESOLVE_NO_SYMLINKS rejects symlinks in every component and prevents
  * `..` from escaping the pinned root/cwd. See openat2(2), "RESOLVE flags":
- * https://man7.org/linux/man-pages/man2/openat2.2.html */
+ * https://man7.org/linux/man-pages/man2/openat2.2.html
+ *
+ * This validates the path at creation time only: the mount(2) that
+ * follows re-resolves the target *string* with ordinary
+ * symlink-following resolution, so a parent directory swapped for a
+ * symlink in the window between this check and the mount can still
+ * redirect it. Closing that window means mounting through the
+ * validated fd (move_mount(2) with MOVE_MOUNT_T_EMPTY_PATH) -- a
+ * known limit, tracked in PLAN.md. */
 static int ensure_target_file(const char *target)
 {
 	int dirfd = AT_FDCWD;
@@ -267,16 +275,28 @@ static int ensure_target_file(const char *target)
 			path++;
 	}
 
-	struct open_how how = {
-		.flags = O_PATH | O_CLOEXEC,
-		.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
-	};
+	/* Probe, then create -- and when the create loses a benign race to
+	 * a concurrent creator (EEXIST), loop back to the probe: whatever
+	 * appeared is re-validated under the same RESOLVE flags, so an
+	 * honest placeholder passes and a planted symlink still fails
+	 * ELOOP. Two rounds bound the loop; a dirent that keeps flapping
+	 * between the calls is reported as the EEXIST it produced. */
+	int fd = -1;
+	for (int attempt = 0; attempt < 2; attempt++) {
+		struct open_how how = {
+			.flags = O_PATH | O_CLOEXEC,
+			.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS,
+		};
 
-	int fd = (int)syscall(SYS_openat2, dirfd, path, &how, sizeof how);
-	if (fd < 0 && errno == ENOENT) {
+		fd = (int)syscall(SYS_openat2, dirfd, path, &how, sizeof how);
+		if (fd >= 0 || errno != ENOENT)
+			break;
+
 		how.flags = O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC;
 		how.mode = 0644;
 		fd = (int)syscall(SYS_openat2, dirfd, path, &how, sizeof how);
+		if (fd >= 0 || errno != EEXIST)
+			break;
 	}
 
 	int result = 0;
