@@ -23,11 +23,6 @@ privileged job (full `:integration` suite as root on `ubuntu-24.04`), an
 aarch64 leg, and the seccomp kernel-acceptance tests in the default
 unprivileged suite. Still open:
 
-- **Property tests for the highest-risk pure code.** A small in-test cBPF
-  evaluator that proves a compiled `Linx.Seccomp` filter actually blocks what
-  it should (complements the kernel-acceptance tests with exhaustive
-  input coverage).
-
 - **x32 kernel-acceptance test.** The seccomp x32-ABI guard has byte-level
   golden tests, but nothing yet invokes an actual x32 syscall against a real
   kernel to prove the trap *fires*. `test/support/seccomp_check.py` could be

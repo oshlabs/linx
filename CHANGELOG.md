@@ -229,6 +229,8 @@ A follow-up whole-library review landed a second round of fixes:
   and malformed `nlmsg_len` rejection.
 - Generated kernel-shaped mountinfo entries cover field preservation, octal
   escaping, propagation tags, and unknown optional fields.
+- A test-only cBPF evaluator checks generated Seccomp rule sets semantically
+  across both architectures, including architecture mismatch and x32 guards.
 
 ## [0.2.0] - 2026-06-06
 
