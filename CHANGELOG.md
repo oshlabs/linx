@@ -262,6 +262,8 @@ A follow-up whole-library review landed a second round of fixes:
   and requires the compiler's x32 guard to kill it with `SIGSYS`.
 - PTY tests deterministically fill the agent's 1 MiB input buffer against a
   non-reading workload and require an explicit `:pty_in_dropped` event.
+- Mount target creation has an unprivileged adversarial test requiring a final
+  symlink to fail with `ELOOP` while leaving its destination untouched.
 
 ## [0.2.0] - 2026-06-06
 

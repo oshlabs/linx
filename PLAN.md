@@ -29,11 +29,10 @@ unprivileged suite. Still open:
   64 KiB flood test; add a reader-controlled workload that proves bytes held
   during backpressure arrive after reading resumes.
 
-- **Privileged, adversarial-path coverage.** The mount-target symlink refusal
-  and the namespace-entry pid-reuse (TOCTOU) narrowing are covered only for
-  the happy path by the `enter`/mount integration tests — the *attack* (a
-  racing pid recycle, a planted symlink) isn't reproduced. Hard to make
-  deterministic; document as a known coverage limit if not built.
+- **Privileged, adversarial pid-reuse coverage.** Namespace-entry identity
+  re-verification is covered for the happy path, but a racing pid recycle is
+  not reproduced. It is difficult to make deterministic; document it as a
+  known coverage limit if no reliable harness is built.
 
 ## Deferred features
 

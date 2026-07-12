@@ -611,6 +611,23 @@ defmodule Linx.MountTest do
                Mount.bind("/a", "/b", flags: [:nonsense])
     end
 
+    test "bind/3 with create: true refuses a symlink target" do
+      base = Path.join(System.tmp_dir!(), "linx-mount-symlink-#{System.unique_integer()}")
+      victim = Path.join(base, "victim")
+      target = Path.join(base, "target")
+
+      File.mkdir_p!(base)
+      File.write!(victim, "untouched")
+      File.ln_s!(victim, target)
+      on_exit(fn -> File.rm_rf(base) end)
+
+      assert {:error, %Error{operation: :create, errno: :eloop, path: ^target}} =
+               Mount.bind("/dev/null", target, create: true)
+
+      assert File.read!(victim) == "untouched"
+      assert {:ok, ^victim} = File.read_link(target)
+    end
+
     test "remount/2 against an unmounted target returns a structured error" do
       assert {:error, %Error{operation: :mount, errno: errno}} =
                Mount.remount("/nope/never-mounted")
