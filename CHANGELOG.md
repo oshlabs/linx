@@ -207,10 +207,15 @@ A follow-up whole-library review landed a second round of fixes:
   every pass; `Linx.Cgroup.create/1` verifies an `EEXIST` target is a
   directory; `Linx.Mount` gains `:nosymfollow` (MS_NOSYMFOLLOW, ≥ 5.10)
   and unescapes mountinfo `super_options`.
-- **Lifecycle race fixes**: `Linx.Process` teardown tolerates the external
-  agent closing between the decision to reap and `Port.command/2`, preserving
-  the intended session exit instead of crashing in `terminate/2`. Netfilter
-  Monitor and NFLOG startup close their socket when configuration fails.
+- **Lifecycle race fixes**: every `Linx.Process` command forwarded to the
+  external agent (proceed, abort, capability and seccomp verbs, signals,
+  PTY writes and winsize, teardown reaping) tolerates the agent exiting
+  between the state check and `Port.command/2` — caller-facing verbs
+  return `{:error, :no_process}`, teardown and async forwards drop the
+  send — preserving the exactly-once terminal event instead of crashing
+  the session. Netfilter Monitor, NFLOG, and rtnl Monitor startup close
+  their socket when post-open configuration fails (shared
+  `Socket.close_on_error/2`).
 - **NFLOG readiness is now sequence-safe**: every configuration request waits
   for its matching kernel ACK through `Linx.Netlink.Request`; a lost ACK is an
   error instead of a listener that starts successfully but never delivers.
@@ -253,9 +258,19 @@ A follow-up whole-library review landed a second round of fixes:
 - One internal flat-KV engine now owns the shared Cgroup/Sysctl diff,
   best-effort apply, and last-applied ownership state machine; both public
   reconcilers keep their existing APIs and subsystem-specific value semantics.
-- Netlink dumps retry interrupted snapshots and negative `NLMSG_DONE` status
-  twice with fresh sequence numbers, discarding partial results; callers can
-  override the bound with `:dump_retries`.
+  Reconcile reports no longer silently drop caller-input write errors:
+  sysctl's `{:bad_key, _}` / `{:bad_value, _}` / `{:bad_in, _}` land in
+  `report.failed` and fail `converged?` instead of vanishing.
+- `Linx.Netlink.Nfnl.batch/4` ACK collection is bounded per datagram (5s,
+  like `Request.talk/5`); a lost ACK surfaces as `{:error, {:recv,
+  :timeout}}` instead of blocking the pusher forever.
+- Netlink dumps retry interrupted snapshots (`NLM_F_DUMP_INTR`) twice with
+  fresh sequence numbers, first reading the abandoned dump to completion
+  (a netlink socket runs one dump at a time — re-sending earlier would be
+  refused with `EBUSY`) and discarding partial results; callers can
+  override the bound with `:dump_retries`. A negative `NLMSG_DONE` status
+  (`-EPERM`, `-ENOMEM`, …) is surfaced immediately — re-asking cannot fix
+  it.
 - Native-build `CFLAGS` now use shell-word parsing, preserving quoted and
   escaped arguments without executing a shell.
 - Seccomp kernel acceptance now invokes a real x32-numbered syscall on x86_64
@@ -266,7 +281,12 @@ A follow-up whole-library review landed a second round of fixes:
   symlink to fail with `ELOOP` while leaving its destination untouched.
 - Mount placeholder creation now resolves every path component with
   `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`; parent-directory symlinks
-  and `..` escapes are refused before a privileged bind mount can be redirected.
+  and `..` escapes are refused at creation time, and a benign creation race
+  (the placeholder appearing between probe and create) re-validates and
+  succeeds instead of failing `EEXIST`. The `mount(2)` call itself still
+  re-resolves the target path, so this narrows — but does not close — the
+  check-to-use window against a live adversary; the fd-pinned mount
+  (`move_mount(2)`) is tracked in PLAN.md.
 
 ## [0.2.0] - 2026-06-06
 

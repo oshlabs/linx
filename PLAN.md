@@ -53,3 +53,15 @@ authoring surface; the frontend lives in git history if ever wanted again.)
   approach does. A `pidfd_open` + `pidfd`-relative resolution would be
   strictly stronger; the paths are opaque binaries there (possibly
   bind-mounted netns files), which is why the cheaper re-verify was used.
+
+- **fd-pinned mount targets (`move_mount(2)`).** `ensure_target_file`'s
+  `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)` validates the target
+  path at creation time, but the fd is discarded and `mount(2)` re-resolves
+  the target *string* — a check-to-use window in which an adversarial
+  container can swap a parent directory for a symlink and redirect the
+  privileged mount. The race-free mechanism is to keep the validated
+  `O_PATH` fd and mount through it (`open_tree` + `move_mount` with
+  `MOVE_MOUNT_T_EMPTY_PATH`), and to give the non-create mount, `umount2`,
+  and `pivot_root` targets the same treatment. Until then this is a known
+  limit against *live* adversarial containers; the typical call precedes
+  the workload.
