@@ -221,9 +221,10 @@ A follow-up whole-library review landed a second round of fixes:
 - Dialyzer (via `dialyxir`) runs in CI with a cached PLT, enforcing the
   project's `@spec`-on-every-public-function policy.
 - Documentation warnings and Hex package construction are checked in CI.
-- The standalone `linx_process` Port runs its Process suites under ASan and
-  UBSan in CI; `LINX_SANITIZE` provides the same fingerprinted native build
-  mode locally.
+- The standalone `linx_process` Port and all four NIFs run focused suites
+  under ASan and UBSan in CI; `LINX_SANITIZE` provides the same fingerprinted
+  native build mode locally. NIF execution preloads libasan into the BEAM;
+  leak detection stays scoped to the isolated Port process.
 
 ## [0.2.0] - 2026-06-06
 

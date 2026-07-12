@@ -212,8 +212,27 @@ jobs:
       - name: Install dependencies
         run: mix deps.get
 
-      # These suites exercise the standalone linx_process Port. Sanitized
-      # NIFs need the sanitizer runtime preloaded into beam.smp and remain a
-      # separate follow-up; do not load them in this job.
+      # These suites exercise the standalone linx_process Port. Leak detection
+      # is meaningful here because each instrumented agent is a short-lived,
+      # isolated OS process.
       - name: Run Process suites
         run: mix test test/linx/process_test.exs test/linx/process_supervision_test.exs --warnings-as-errors
+
+      - name: Locate ASan runtime
+        run: echo "LIBASAN=$(cc -print-file-name=libasan.so)" >> "$GITHUB_ENV"
+
+      # NIF instrumentation needs libasan loaded before beam.smp. Leak
+      # detection is disabled because it would report allocations owned by
+      # the VM and other applications; bounds and undefined-behaviour checks
+      # remain fail-fast.
+      - name: Run NIF suites
+        env:
+          LD_PRELOAD: ${{ env.LIBASAN }}
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+        run: >-
+          mix test
+          test/linx/mount_test.exs
+          test/linx/sysctl_test.exs
+          test/linx/tty_test.exs
+          test/linx/netlink/socket_test.exs
+          --warnings-as-errors
