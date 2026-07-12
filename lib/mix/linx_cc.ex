@@ -103,7 +103,7 @@ defmodule Mix.Linx.CC do
     cflags =
       case System.get_env("CFLAGS") do
         nil -> []
-        env -> String.split(env)
+        env -> split_flags(env)
       end
 
     case mode do
@@ -141,6 +141,10 @@ defmodule Mix.Linx.CC do
       sanitizers -> ["-fsanitize=#{sanitizers}", "-fno-omit-frame-pointer"]
     end
   end
+
+  @doc false
+  @spec split_flags(String.t()) :: [String.t()]
+  def split_flags(flags) when is_binary(flags), do: OptionParser.split(flags)
 
   # Everything that determines the artifact's bytes: source *content*
   # (not mtime — Hex tarballs ship epoch mtimes), compiler, the exact

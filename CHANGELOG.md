@@ -239,6 +239,8 @@ A follow-up whole-library review landed a second round of fixes:
 - Netlink dumps retry interrupted snapshots and negative `NLMSG_DONE` status
   twice with fresh sequence numbers, discarding partial results; callers can
   override the bound with `:dump_retries`.
+- Native-build `CFLAGS` now use shell-word parsing, preserving quoted and
+  escaped arguments without executing a shell.
 
 ## [0.2.0] - 2026-06-06
 
