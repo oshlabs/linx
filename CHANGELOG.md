@@ -233,6 +233,9 @@ A follow-up whole-library review landed a second round of fixes:
   across both architectures, including architecture mismatch and x32 guards.
 - Exact full-message nf_tables fixtures pin table, base-chain, counter-object,
   and flowtable framing beyond the existing set-element byte assertions.
+- One internal flat-KV engine now owns the shared Cgroup/Sysctl diff,
+  best-effort apply, and last-applied ownership state machine; both public
+  reconcilers keep their existing APIs and subsystem-specific value semantics.
 
 ## [0.2.0] - 2026-06-06
 

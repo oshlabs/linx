@@ -49,28 +49,6 @@ unprivileged suite. Still open:
 set expectations of exact parity it couldn't honor. The pipeline DSL is the
 authoring surface; the frontend lives in git history if ever wanted again.)
 
-- **Extract the shared flat-KV reconcile engine (cgroup + sysctl).**
-  `Linx.Cgroup.Reconcile` and `Linx.Sysctl.Reconcile` are ~85%
-  line-identical: `diff/4`, `apply_ops`, `next_last_applied`,
-  `converged?`, the `%Report{}` structs, and the `Source` adapters all
-  mirror each other (the moduledocs say so). The duplication already
-  bit once — the trailing-whitespace convergence bug had to be fixed
-  twice — and any `next_last_applied` change can silently diverge.
-  Fix shape: one engine (working name `Linx.Reconcile.FlatKV`) owning
-  the pass structure and ownership semantics, parameterized per
-  subsystem by `read`/`write`/`render`/`same_value?`; the public
-  per-subsystem modules keep their exact APIs (including cgroup's
-  positional scope vs sysctl's `:in` opt) as thin fronts, and the
-  Source adapters are untouched. Acceptance: all four existing
-  reconcile test suites pass **unchanged** (they define the
-  semantics — a test edit means the refactor changed behavior),
-  `./sudotest.sh` green, dialyzer clean, net lines down (~120+
-  deleted), and the ownership rules (capture-once `:original`,
-  failed-set ownership retention, failed-revert retry) documented in
-  exactly one place. Trigger: before any third flat-KV reconcile
-  surface, or the next time `next_last_applied` needs touching in
-  both files; folds into the 0.3.0 cycle.
-
 - **`openat2(RESOLVE_BENEATH)` hardening** for `linx_mount`'s target-file
   creation when used against live (adversarial) containers — the final
   component is already `O_EXCL|O_NOFOLLOW`-protected.

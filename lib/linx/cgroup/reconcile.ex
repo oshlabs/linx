@@ -75,6 +75,7 @@ defmodule Linx.Cgroup.Reconcile do
 
   alias Linx.Cgroup
   alias Linx.Cgroup.Reconcile.Report
+  alias Linx.Reconcile.FlatKV
 
   @typedoc "A cgroup interface-file name, e.g. `\"memory.max\"`."
   @type file :: String.t()
@@ -124,9 +125,21 @@ defmodule Linx.Cgroup.Reconcile do
   @spec reconcile(Cgroup.cgroup(), desired(), last_applied(), opts()) :: {:ok, Report.t()}
   def reconcile(cg, desired, last_applied \\ %{}, opts \\ [])
       when is_binary(cg) and is_map(desired) and is_map(last_applied) and is_list(opts) do
-    observed = observe(cg, relevant_keys(desired, last_applied))
+    observed = observe(cg, FlatKV.relevant_keys(desired, last_applied))
     ops = diff(observed, desired, last_applied, opts)
-    {:ok, apply_ops(cg, ops, observed, desired, last_applied)}
+
+    report =
+      FlatKV.apply(
+        ops,
+        observed,
+        desired,
+        last_applied,
+        &run_op(cg, &1),
+        Report,
+        Cgroup.Error
+      )
+
+    {:ok, report}
   end
 
   @doc """
@@ -152,94 +165,18 @@ defmodule Linx.Cgroup.Reconcile do
   @spec diff(%{optional(file()) => binary()}, desired(), last_applied(), opts()) :: [op()]
   def diff(observed, desired, last_applied \\ %{}, opts \\ [])
       when is_map(observed) and is_map(desired) and is_map(last_applied) and is_list(opts) do
-    revert? = Keyword.get(opts, :revert_on_release, false)
-
-    sets =
-      for {file, value} <- desired, not converged?(observed, file, value) do
-        {:set, file, value}
-      end
-
-    releases =
-      for {file, own} <- last_applied, not Map.has_key?(desired, file) do
-        case {revert?, own[:original]} do
-          {true, original} when not is_nil(original) -> {:revert, file, original}
-          _ -> {:release, file}
-        end
-      end
-
-    sets ++ releases
-  end
-
-  # --- apply ----------------------------------------------------------------
-
-  defp apply_ops(cg, ops, observed, desired, last_applied) do
-    results = Enum.map(ops, fn op -> {op, run_op(cg, op)} end)
-
-    applied = for {op, :ok} <- results, do: op
-    failed = for {op, {:error, %Cgroup.Error{} = err}} <- results, do: {op, err}
-
-    %Report{
-      converged?: failed == [],
-      applied: applied,
-      failed: failed,
-      pending: [],
-      last_applied: next_last_applied(results, observed, desired, last_applied)
-    }
+    FlatKV.diff(
+      observed,
+      desired,
+      last_applied,
+      Keyword.get(opts, :revert_on_release, false),
+      &same_value?/2
+    )
   end
 
   defp run_op(cg, {:set, file, value}), do: Cgroup.write(cg, file, render(value))
   defp run_op(cg, {:revert, file, original}), do: Cgroup.write(cg, file, original)
   defp run_op(_cg, {:release, _file}), do: :ok
-
-  # The updated ownership map after a pass. Ownership is claimed for every
-  # desired file we successfully control (including no-op files that were
-  # already converged), capturing the pre-management original once. Files whose
-  # :set failed keep any prior ownership (so the original survives a transient
-  # failure) but are not newly claimed. Released files are dropped, unless a
-  # revert *failed* — then they are kept so the next pass retries the revert.
-  defp next_last_applied(results, observed, desired, last_applied) do
-    failed_sets = MapSet.new(for {{:set, f, _}, {:error, _}} <- results, do: f)
-
-    owned =
-      for {file, value} <- desired, not MapSet.member?(failed_sets, file), into: %{} do
-        {file, %{applied: value, original: original_for(file, last_applied, observed)}}
-      end
-
-    preserved =
-      for {file, _value} <- desired,
-          MapSet.member?(failed_sets, file),
-          Map.has_key?(last_applied, file),
-          into: %{},
-          do: {file, last_applied[file]}
-
-    kept_reverts =
-      for {{:revert, file, _}, {:error, _}} <- results,
-          Map.has_key?(last_applied, file),
-          into: %{},
-          do: {file, last_applied[file]}
-
-    owned |> Map.merge(preserved) |> Map.merge(kept_reverts)
-  end
-
-  # The original to record for a file: a previously-captured original wins
-  # (capture once), else the raw value observed before we first touched it.
-  defp original_for(file, last_applied, observed) do
-    case last_applied do
-      %{^file => %{original: original}} -> original
-      _ -> Map.get(observed, file)
-    end
-  end
-
-  # --- value comparison -----------------------------------------------------
-
-  # True iff the kernel's current (observed) raw value already matches desired.
-  # An absent observed value never counts as converged.
-  defp converged?(observed, file, desired_value) do
-    case Map.fetch(observed, file) do
-      {:ok, raw} -> same_value?(raw, desired_value)
-      :error -> false
-    end
-  end
 
   # `:max` clears a limit. Single-value knobs (memory.max, pids.max) read back
   # the literal "max"; cpu.max reads back "max <period>" — two tokens — so a
@@ -265,10 +202,4 @@ defmodule Linx.Cgroup.Reconcile do
   defp render(value) when is_binary(value), do: value
 
   defp tokens(raw), do: String.split(raw, ~r/\s+/, trim: true)
-
-  # Files touched by a pass: desired files plus still-owned files (to detect and
-  # release those that have left the desired set).
-  defp relevant_keys(desired, last_applied) do
-    (Map.keys(desired) ++ Map.keys(last_applied)) |> Enum.uniq()
-  end
 end

@@ -70,6 +70,7 @@ defmodule Linx.Sysctl.Reconcile do
 
   alias Linx.Sysctl
   alias Linx.Sysctl.Reconcile.Report
+  alias Linx.Reconcile.FlatKV
 
   @typedoc "A reconcile op. `:set`/`:revert` write; `:release` is a no-op marker."
   @type op ::
@@ -116,9 +117,22 @@ defmodule Linx.Sysctl.Reconcile do
   @spec reconcile(desired(), last_applied(), opts()) :: {:ok, Report.t()}
   def reconcile(desired, last_applied \\ %{}, opts \\ [])
       when is_map(desired) and is_map(last_applied) and is_list(opts) do
-    observed = observe(relevant_keys(desired, last_applied), opts)
+    observed = observe(FlatKV.relevant_keys(desired, last_applied), opts)
     ops = diff(observed, desired, last_applied, opts)
-    {:ok, apply_ops(ops, observed, desired, last_applied, opts)}
+    write_opts = Keyword.take(opts, [:in])
+
+    report =
+      FlatKV.apply(
+        ops,
+        observed,
+        desired,
+        last_applied,
+        &run_op(&1, write_opts),
+        Report,
+        Sysctl.Error
+      )
+
+    {:ok, report}
   end
 
   @doc """
@@ -155,95 +169,18 @@ defmodule Linx.Sysctl.Reconcile do
   @spec diff(%{optional(Sysctl.key()) => binary()}, desired(), last_applied(), opts()) :: [op()]
   def diff(observed, desired, last_applied \\ %{}, opts \\ [])
       when is_map(observed) and is_map(desired) and is_map(last_applied) and is_list(opts) do
-    revert? = Keyword.get(opts, :revert_on_release, false)
-
-    sets =
-      for {key, value} <- desired, not converged?(observed, key, value) do
-        {:set, key, value}
-      end
-
-    releases =
-      for {key, own} <- last_applied, not Map.has_key?(desired, key) do
-        case {revert?, own[:original]} do
-          {true, original} when not is_nil(original) -> {:revert, key, original}
-          _ -> {:release, key}
-        end
-      end
-
-    sets ++ releases
-  end
-
-  # --- apply ----------------------------------------------------------------
-
-  defp apply_ops(ops, observed, desired, last_applied, opts) do
-    write_opts = Keyword.take(opts, [:in])
-    results = Enum.map(ops, fn op -> {op, run_op(op, write_opts)} end)
-
-    applied = for {op, :ok} <- results, do: op
-    failed = for {op, {:error, %Sysctl.Error{} = err}} <- results, do: {op, err}
-
-    %Report{
-      converged?: failed == [],
-      applied: applied,
-      failed: failed,
-      pending: [],
-      last_applied: next_last_applied(results, observed, desired, last_applied)
-    }
+    FlatKV.diff(
+      observed,
+      desired,
+      last_applied,
+      Keyword.get(opts, :revert_on_release, false),
+      &same_value?/2
+    )
   end
 
   defp run_op({:set, key, value}, write_opts), do: Sysctl.write(key, value, write_opts)
   defp run_op({:revert, key, value}, write_opts), do: Sysctl.write(key, value, write_opts)
   defp run_op({:release, _key}, _write_opts), do: :ok
-
-  # The updated ownership map after a pass. Ownership is claimed for every
-  # desired key we successfully control (including no-op keys that were already
-  # converged), capturing the pre-management original once. Keys whose :set
-  # failed keep any prior ownership (so the original survives a transient
-  # failure) but are not newly claimed. Released keys are dropped, unless a
-  # revert *failed* — then they are kept so the next pass retries the revert.
-  defp next_last_applied(results, observed, desired, last_applied) do
-    failed_sets = MapSet.new(for {{:set, k, _}, {:error, _}} <- results, do: k)
-
-    owned =
-      for {key, value} <- desired, not MapSet.member?(failed_sets, key), into: %{} do
-        {key, %{applied: value, original: original_for(key, last_applied, observed)}}
-      end
-
-    preserved =
-      for {key, _value} <- desired,
-          MapSet.member?(failed_sets, key),
-          Map.has_key?(last_applied, key),
-          into: %{},
-          do: {key, last_applied[key]}
-
-    kept_reverts =
-      for {{:revert, key, _}, {:error, _}} <- results,
-          Map.has_key?(last_applied, key),
-          into: %{},
-          do: {key, last_applied[key]}
-
-    owned |> Map.merge(preserved) |> Map.merge(kept_reverts)
-  end
-
-  # The original to record for a key: a previously-captured original wins
-  # (capture once), else the value observed before we first touched it.
-  defp original_for(key, last_applied, observed) do
-    case last_applied do
-      %{^key => %{original: original}} -> original
-      _ -> Map.get(observed, key)
-    end
-  end
-
-  # --- value comparison -----------------------------------------------------
-
-  # True iff the kernel's current (observed) value already matches desired.
-  # An absent observed value (unreadable key) never counts as converged.
-  defp converged?(observed, key, desired_value) do
-    case Map.fetch(observed, key) do
-      {:ok, raw} -> same_value?(raw, desired_value)
-      :error -> false
-    end
-  end
 
   # Integers and integer lists compare token-wise (tuple-shaped knobs read back
   # tab- or space-separated, e.g. "4\t4\t1\t7"); binaries compare exactly,
@@ -261,10 +198,4 @@ defmodule Linx.Sysctl.Reconcile do
     do: raw == String.trim_trailing(desired)
 
   defp tokens(raw), do: String.split(raw, ~r/\s+/, trim: true)
-
-  # Keys touched by a pass: desired keys plus still-owned keys (to detect and
-  # release those that have left the desired set).
-  defp relevant_keys(desired, last_applied) do
-    (Map.keys(desired) ++ Map.keys(last_applied)) |> Enum.uniq()
-  end
 end
