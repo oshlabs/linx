@@ -190,6 +190,13 @@ A follow-up whole-library review landed a second round of fixes:
   every pass; `Linx.Cgroup.create/1` verifies an `EEXIST` target is a
   directory; `Linx.Mount` gains `:nosymfollow` (MS_NOSYMFOLLOW, ≥ 5.10)
   and unescapes mountinfo `super_options`.
+- **Lifecycle race fixes**: `Linx.Process` teardown tolerates the external
+  agent closing between the decision to reap and `Port.command/2`, preserving
+  the intended session exit instead of crashing in `terminate/2`. Netfilter
+  Monitor and NFLOG startup close their socket when configuration fails.
+- **NFLOG readiness is now sequence-safe**: every configuration request waits
+  for its matching kernel ACK through `Linx.Netlink.Request`; a lost ACK is an
+  error instead of a listener that starts successfully but never delivers.
 
 ### Changed — orphan policy on unclean VM death (behavior change)
 
@@ -213,6 +220,10 @@ A follow-up whole-library review landed a second round of fixes:
   kernel-acceptance tests (no root needed) run in the default suite.
 - Dialyzer (via `dialyxir`) runs in CI with a cached PLT, enforcing the
   project's `@spec`-on-every-public-function policy.
+- Documentation warnings and Hex package construction are checked in CI.
+- The standalone `linx_process` Port runs its Process suites under ASan and
+  UBSan in CI; `LINX_SANITIZE` provides the same fingerprinted native build
+  mode locally.
 
 ## [0.2.0] - 2026-06-06
 
