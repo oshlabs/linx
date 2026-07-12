@@ -227,6 +227,8 @@ A follow-up whole-library review landed a second round of fixes:
   leak detection stays scoped to the isolated Port process.
 - Property tests cover full-field, multi-message Netlink framing round trips
   and malformed `nlmsg_len` rejection.
+- Generated kernel-shaped mountinfo entries cover field preservation, octal
+  escaping, propagation tags, and unknown optional fields.
 
 ## [0.2.0] - 2026-06-06
 
