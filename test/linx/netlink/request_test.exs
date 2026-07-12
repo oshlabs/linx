@@ -126,7 +126,7 @@ defmodule Linx.Netlink.RequestTest do
       attempt = fn ->
         Agent.get_and_update(attempts, fn
           [:first | rest] -> {{:retry_dump, :dump_interrupted}, rest}
-          [:second | rest] -> {{:retry_dump, %Error{errno: :enomem, code: 12}}, rest}
+          [:second | rest] -> {{:retry_dump, :dump_interrupted}, rest}
           [:complete | rest] -> {{:ok, [:complete_snapshot]}, rest}
         end)
       end

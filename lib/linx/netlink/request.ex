@@ -47,14 +47,20 @@ defmodule Linx.Netlink.Request do
     * `{:error, %Linx.Netlink.Error{}}` is also returned when the kernel
       aborted the dump partway — since Linux 4.x `NLMSG_DONE` carries a
       `dump_done_errno`, and a negative value means the preceding messages
-      are an incomplete snapshot, not a success.
+      are an incomplete snapshot, not a success. This is surfaced
+      immediately: the abort has a cause (`-ENOMEM`, `-EPERM`, …) that
+      re-asking cannot fix.
     * `{:error, :dump_interrupted}` — the kernel set `NLM_F_DUMP_INTR`,
       meaning the object set changed mid-dump and the reply may contain
       duplicates or omissions.
 
-  Dump requests automatically retry either condition twice, discarding the
-  partial snapshot and allocating a fresh sequence number each time. Override
-  the bound with `:dump_retries`; `0` surfaces the first failure immediately.
+  Interrupted dumps automatically retry twice, discarding the partial
+  snapshot and allocating a fresh sequence number each time. A netlink
+  socket runs one dump at a time — a new request while the abandoned dump
+  is still generating would be refused with `EBUSY` — so the engine first
+  reads the old dump through its terminating `NLMSG_DONE` before
+  re-sending. Override the bound with `:dump_retries`; `0` surfaces the
+  first `:dump_interrupted` immediately.
   """
   # A reply datagram that takes longer than this to arrive means the
   # request or its reply was lost (netlink is lossy under ENOBUFS) —
@@ -88,10 +94,53 @@ defmodule Linx.Netlink.Request do
     }
 
     case :socket.send(socket.socket, Message.encode(message)) do
-      :ok -> receive_reply(socket, seq, [], timeout)
-      {:error, reason} -> {:error, {:send, reason}}
+      :ok ->
+        case receive_reply(socket, seq, [], timeout) do
+          # NLM_F_DUMP_INTR arrived on the DONE: the dump has terminated
+          # kernel-side and the socket is free for the retry.
+          {:retry_dump, reason, :complete} ->
+            {:retry_dump, reason}
+
+          # NLM_F_DUMP_INTR arrived mid-stream: the kernel generates the
+          # rest of the abandoned dump lazily as we read, and refuses a
+          # new dump with EBUSY until the old one is read through its
+          # DONE. Drain it before letting the retry send.
+          {:retry_dump, reason, :mid_dump} ->
+            case drain_dump(socket, seq, timeout) do
+              :ok -> {:retry_dump, reason}
+              {:error, _} = error -> error
+            end
+
+          result ->
+            result
+        end
+
+      {:error, reason} ->
+        {:error, {:send, reason}}
     end
   end
+
+  # Read the abandoned dump to its terminating message (DONE, or an error),
+  # discarding everything. Datagrams with other sequence numbers are
+  # unrelated traffic and are discarded too, exactly as receive_reply does.
+  defp drain_dump(socket, seq, timeout) do
+    case Socket.recv_datagram(socket, timeout: timeout) do
+      {:ok, data} ->
+        if Enum.any?(Message.decode(data), &terminal?(&1, seq)) do
+          :ok
+        else
+          drain_dump(socket, seq, timeout)
+        end
+
+      {:error, reason} ->
+        {:error, {:recv, reason}}
+    end
+  end
+
+  defp terminal?(%Message{seq: seq, type: type}, seq),
+    do: type == nlmsg_done() or type == nlmsg_error()
+
+  defp terminal?(%Message{}, _seq), do: false
 
   @doc false
   def run_with_dump_retries(attempt, retries_left)
@@ -131,7 +180,7 @@ defmodule Linx.Netlink.Request do
   @doc false
   def consume(messages, seq, acc) do
     case consume_reply(messages, seq, acc) do
-      {:halt, {:retry_dump, reason}} -> {:halt, {:error, reason}}
+      {:halt, {:retry_dump, reason, _stage}} -> {:halt, {:error, reason}}
       result -> result
     end
   end
@@ -146,8 +195,7 @@ defmodule Linx.Netlink.Request do
       :done -> {:halt, {:ok, Enum.reverse(acc)}}
       :ack -> {:halt, {:ok, Enum.reverse(acc)}}
       {:error, _} = error -> {:halt, error}
-      {:dump_error, error} -> {:halt, {:retry_dump, error}}
-      :dump_intr -> {:halt, {:retry_dump, :dump_interrupted}}
+      :dump_intr -> {:halt, {:retry_dump, :dump_interrupted, intr_stage(msg)}}
       :skip -> consume_reply(rest, seq, acc)
     end
   end
@@ -155,6 +203,13 @@ defmodule Linx.Netlink.Request do
   # Any other sequence number is not our reply — an unsolicited notification
   # or a stale message; ignore it.
   defp consume_reply([%Message{} | rest], seq, acc), do: consume_reply(rest, seq, acc)
+
+  # Whether NLM_F_DUMP_INTR arrived on the terminating DONE (the dump is
+  # over; the socket is free) or on a data message mid-stream (the abandoned
+  # dump must be drained before another can start).
+  defp intr_stage(%Message{type: type}) do
+    if type == nlmsg_done(), do: :complete, else: :mid_dump
+  end
 
   defp classify(%Message{type: type, flags: flags} = msg) do
     cond do
@@ -181,10 +236,11 @@ defmodule Linx.Netlink.Request do
   # Since Linux 4.x, NLMSG_DONE carries the dump's final status as a leading
   # signed 32-bit `dump_done_errno`; negative means the kernel aborted the
   # dump partway (e.g. -ENOMEM) and the collected messages are an incomplete
-  # snapshot. Old kernels may send an empty DONE — treat that as success.
+  # snapshot. Not retried: the abort has a cause re-asking cannot fix.
+  # Old kernels may send an empty DONE — treat that as success.
   defp classify_done(%Message{payload: <<errno::native-signed-32, _::binary>>})
        when errno < 0 do
-    {:dump_error, Error.from_errno(-errno, nil)}
+    {:error, Error.from_errno(-errno, nil)}
   end
 
   defp classify_done(%Message{}), do: :done
