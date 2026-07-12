@@ -50,7 +50,11 @@ defmodule Linx.Netlink.Request do
       are an incomplete snapshot, not a success.
     * `{:error, :dump_interrupted}` — the kernel set `NLM_F_DUMP_INTR`,
       meaning the object set changed mid-dump and the reply may contain
-      duplicates or omissions. Retry the dump.
+      duplicates or omissions.
+
+  Dump requests automatically retry either condition twice, discarding the
+  partial snapshot and allocating a fresh sequence number each time. Override
+  the bound with `:dump_retries`; `0` surfaces the first failure immediately.
   """
   # A reply datagram that takes longer than this to arrive means the
   # request or its reply was lost (netlink is lossy under ENOBUFS) —
@@ -58,23 +62,49 @@ defmodule Linx.Netlink.Request do
   # answers healthy requests in microseconds, and the timeout is
   # per-datagram, so long dumps are unaffected as long as they flow.
   @default_timeout 5_000
+  @default_dump_retries 2
 
   @spec talk(Socket.t(), 0..0xFFFF, non_neg_integer, iodata, keyword) ::
           {:ok, [Message.t()]} | {:error, term}
   def talk(%Socket{} = socket, type, flags, payload \\ <<>>, opts \\ []) do
-    seq = Socket.next_seq(socket)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
+
+    with {:ok, retries} <- dump_retries(flags, opts) do
+      run_with_dump_retries(
+        fn -> request_once(socket, type, flags, IO.iodata_to_binary(payload), timeout) end,
+        retries
+      )
+    end
+  end
+
+  defp request_once(socket, type, flags, payload, timeout) do
+    seq = Socket.next_seq(socket)
 
     message = %Message{
       type: type,
       flags: flags ||| nlm_f_request(),
       seq: seq,
-      payload: IO.iodata_to_binary(payload)
+      payload: payload
     }
 
     case :socket.send(socket.socket, Message.encode(message)) do
       :ok -> receive_reply(socket, seq, [], timeout)
       {:error, reason} -> {:error, {:send, reason}}
+    end
+  end
+
+  @doc false
+  def run_with_dump_retries(attempt, retries_left)
+      when is_function(attempt, 0) and is_integer(retries_left) and retries_left >= 0 do
+    case attempt.() do
+      {:retry_dump, _reason} when retries_left > 0 ->
+        run_with_dump_retries(attempt, retries_left - 1)
+
+      {:retry_dump, reason} ->
+        {:error, reason}
+
+      result ->
+        result
     end
   end
 
@@ -84,7 +114,7 @@ defmodule Linx.Netlink.Request do
   defp receive_reply(socket, seq, acc, timeout) do
     case Socket.recv_datagram(socket, timeout: timeout) do
       {:ok, data} ->
-        case consume(Message.decode(data), seq, acc) do
+        case consume_reply(Message.decode(data), seq, acc) do
           {:cont, acc} -> receive_reply(socket, seq, acc, timeout)
           {:halt, result} -> result
         end
@@ -99,24 +129,32 @@ defmodule Linx.Netlink.Request do
   # classifications — DONE-with-errno, NLM_F_DUMP_INTR — are unit-testable
   # with synthesized messages; a real socket can't produce them on demand.
   @doc false
-  def consume([], _seq, acc), do: {:cont, acc}
+  def consume(messages, seq, acc) do
+    case consume_reply(messages, seq, acc) do
+      {:halt, {:retry_dump, reason}} -> {:halt, {:error, reason}}
+      result -> result
+    end
+  end
+
+  defp consume_reply([], _seq, acc), do: {:cont, acc}
 
   # A message that echoes our sequence number is part of this reply.
-  def consume([%Message{seq: seq} = msg | rest], seq, acc) do
+  defp consume_reply([%Message{seq: seq} = msg | rest], seq, acc) do
     case classify(msg) do
-      {:data, :multi} -> consume(rest, seq, [msg | acc])
+      {:data, :multi} -> consume_reply(rest, seq, [msg | acc])
       {:data, :single} -> {:halt, {:ok, Enum.reverse([msg | acc])}}
       :done -> {:halt, {:ok, Enum.reverse(acc)}}
       :ack -> {:halt, {:ok, Enum.reverse(acc)}}
       {:error, _} = error -> {:halt, error}
-      :dump_intr -> {:halt, {:error, :dump_interrupted}}
-      :skip -> consume(rest, seq, acc)
+      {:dump_error, error} -> {:halt, {:retry_dump, error}}
+      :dump_intr -> {:halt, {:retry_dump, :dump_interrupted}}
+      :skip -> consume_reply(rest, seq, acc)
     end
   end
 
   # Any other sequence number is not our reply — an unsolicited notification
   # or a stale message; ignore it.
-  def consume([%Message{} | rest], seq, acc), do: consume(rest, seq, acc)
+  defp consume_reply([%Message{} | rest], seq, acc), do: consume_reply(rest, seq, acc)
 
   defp classify(%Message{type: type, flags: flags} = msg) do
     cond do
@@ -146,7 +184,7 @@ defmodule Linx.Netlink.Request do
   # snapshot. Old kernels may send an empty DONE — treat that as success.
   defp classify_done(%Message{payload: <<errno::native-signed-32, _::binary>>})
        when errno < 0 do
-    {:error, Error.from_errno(-errno, nil)}
+    {:dump_error, Error.from_errno(-errno, nil)}
   end
 
   defp classify_done(%Message{}), do: :done
@@ -169,5 +207,18 @@ defmodule Linx.Netlink.Request do
   # message without it is a complete single reply.
   defp multipart(%Message{flags: flags}) do
     if (flags &&& nlm_f_multi()) != 0, do: :multi, else: :single
+  end
+
+  defp dump?(flags), do: (flags &&& nlm_f_dump()) == nlm_f_dump()
+
+  defp dump_retries(flags, opts) do
+    retries =
+      if dump?(flags), do: Keyword.get(opts, :dump_retries, @default_dump_retries), else: 0
+
+    if is_integer(retries) and retries >= 0 do
+      {:ok, retries}
+    else
+      {:error, {:bad_dump_retries, retries}}
+    end
   end
 end

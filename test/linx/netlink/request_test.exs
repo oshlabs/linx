@@ -44,6 +44,15 @@ defmodule Linx.Netlink.RequestTest do
     assert :ok = Socket.close(socket)
   end
 
+  test "talk/5 rejects an invalid dump retry bound before sending" do
+    {:ok, socket} = Socket.open(@netlink_route)
+
+    assert {:error, {:bad_dump_retries, -1}} =
+             Request.talk(socket, @rtm_getlink, @nlm_f_dump, @ifinfomsg, dump_retries: -1)
+
+    assert :ok = Socket.close(socket)
+  end
+
   # The terminal classifications below can't be provoked on demand through a
   # real socket, so they are exercised via consume/3 (a @doc false seam) with
   # synthesized messages.
@@ -107,6 +116,47 @@ defmodule Linx.Netlink.RequestTest do
 
       assert {:halt, {:error, :dump_interrupted}} =
                Request.consume([data_msg(7), done], 7, [])
+    end
+  end
+
+  describe "run_with_dump_retries/2" do
+    test "discards retryable attempts until a complete snapshot arrives" do
+      attempts = start_supervised!({Agent, fn -> [:first, :second, :complete] end})
+
+      attempt = fn ->
+        Agent.get_and_update(attempts, fn
+          [:first | rest] -> {{:retry_dump, :dump_interrupted}, rest}
+          [:second | rest] -> {{:retry_dump, %Error{errno: :enomem, code: 12}}, rest}
+          [:complete | rest] -> {{:ok, [:complete_snapshot]}, rest}
+        end)
+      end
+
+      assert Request.run_with_dump_retries(attempt, 2) == {:ok, [:complete_snapshot]}
+      assert Agent.get(attempts, & &1) == []
+    end
+
+    test "preserves the public error after the retry bound is exhausted" do
+      attempts = start_supervised!({Agent, fn -> 0 end})
+
+      attempt = fn ->
+        Agent.update(attempts, &(&1 + 1))
+        {:retry_dump, :dump_interrupted}
+      end
+
+      assert Request.run_with_dump_retries(attempt, 2) == {:error, :dump_interrupted}
+      assert Agent.get(attempts, & &1) == 3
+    end
+
+    test "does not retry ordinary request errors" do
+      attempts = start_supervised!({Agent, fn -> 0 end})
+
+      attempt = fn ->
+        Agent.update(attempts, &(&1 + 1))
+        {:error, %Error{errno: :eperm, code: 1}}
+      end
+
+      assert {:error, %Error{errno: :eperm}} = Request.run_with_dump_retries(attempt, 2)
+      assert Agent.get(attempts, & &1) == 1
     end
   end
 end

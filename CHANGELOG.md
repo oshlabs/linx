@@ -236,6 +236,9 @@ A follow-up whole-library review landed a second round of fixes:
 - One internal flat-KV engine now owns the shared Cgroup/Sysctl diff,
   best-effort apply, and last-applied ownership state machine; both public
   reconcilers keep their existing APIs and subsystem-specific value semantics.
+- Netlink dumps retry interrupted snapshots and negative `NLMSG_DONE` status
+  twice with fresh sequence numbers, discarding partial results; callers can
+  override the bound with `:dump_retries`.
 
 ## [0.2.0] - 2026-06-06
 

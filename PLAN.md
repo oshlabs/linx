@@ -53,14 +53,6 @@ authoring surface; the frontend lives in git history if ever wanted again.)
   creation when used against live (adversarial) containers — the final
   component is already `O_EXCL|O_NOFOLLOW`-protected.
 
-- **Bounded re-dump on `NLM_F_DUMP_INTR` / DONE-errno.** The netlink engines
-  now *surface* interrupted and failed dumps (`:dump_interrupted`, a negative
-  `dump_done_errno`), and every dump caller propagates them cleanly — but no
-  caller yet does the *ideal* thing: a bounded auto re-dump on
-  `NLM_F_DUMP_INTR` (libnl's `NLE_DUMP_INTR` retry), and `Rtnl.Reconcile`
-  should treat both errors as "skip this cycle" rather than a one-shot
-  failure to the caller.
-
 - **A socket-owning connection process**, if concurrent access to one
   `%Socket{}` is ever needed: a GenServer that owns the fd and demuxes
   replies to waiters by seq. The current state only *documents* the
